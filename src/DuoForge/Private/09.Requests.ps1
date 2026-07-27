@@ -1,3 +1,39 @@
+function Resolve-DuoForgeDocumentInputAliasesInternal {
+    [CmdletBinding()]
+    param(
+        [string]$DocumentA,
+        [string]$DocumentB,
+        [string]$CodexDocument,
+        [string]$ClaudeDocument
+    )
+
+    $hasDocumentA = -not [string]::IsNullOrWhiteSpace($DocumentA)
+    $hasDocumentB = -not [string]::IsNullOrWhiteSpace($DocumentB)
+    $hasLegacyA = -not [string]::IsNullOrWhiteSpace($CodexDocument)
+    $hasLegacyB = -not [string]::IsNullOrWhiteSpace($ClaudeDocument)
+
+    if ($hasDocumentA -and $hasLegacyA -and -not [string]::Equals($DocumentA, $CodexDocument, [StringComparison]::OrdinalIgnoreCase)) {
+        throw (New-DuoForgeException -Code 'DF-INPUT-DOCUMENT-ALIAS-CONFLICT' -Message '문서 A의 정규 입력과 레거시 --codex 입력이 서로 다릅니다.')
+    }
+    if ($hasDocumentB -and $hasLegacyB -and -not [string]::Equals($DocumentB, $ClaudeDocument, [StringComparison]::OrdinalIgnoreCase)) {
+        throw (New-DuoForgeException -Code 'DF-INPUT-DOCUMENT-ALIAS-CONFLICT' -Message '문서 B의 정규 입력과 레거시 --claude 입력이 서로 다릅니다.')
+    }
+
+    $warnings = [System.Collections.Generic.List[object]]::new()
+    if ($hasLegacyA -or $hasLegacyB) {
+        $warnings.Add([ordered]@{
+            code = 'DF-DEPRECATED-DOCUMENT-ALIASES'
+            message = '--codex와 --claude 문서 옵션은 사용 중단 예정입니다. --document-a와 --document-b를 사용해 주세요.'
+        })
+    }
+
+    return [ordered]@{
+        documentA = if ($hasDocumentA) { $DocumentA } else { $CodexDocument }
+        documentB = if ($hasDocumentB) { $DocumentB } else { $ClaudeDocument }
+        warnings = @($warnings)
+    }
+}
+
 function New-DuoForgeStartRequestInternal {
     [CmdletBinding()]
     param(

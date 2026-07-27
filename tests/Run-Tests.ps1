@@ -161,9 +161,14 @@ try {
         [System.IO.Directory]::CreateDirectory($claudeProject) | Out-Null
         $workspace = Join-Path $tempRoot '3a-gate-results'
         $request = New-TestStartRequest -Mode dual-project-audit -CodexProject $codexProject -ClaudeProject $claudeProject -Workspace $workspace
-        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $doctor = New-FakeDoctor
+        $doctor.readyForProjectAudit = $true
+        $config = New-TestConfig -ResultsRoot $workspace
+        $config.features.dualProjectAudit = $true
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport $doctor -Config $config
         Assert-False ([bool]$validation.valid)
         Assert-Equal @($validation.errors | Where-Object { $_.code -eq 'DF-PREFLIGHT-3A-ISOLATION' }).Count 1
+        Assert-ThrowsCode -ExpectedCode 'DF-RUN-INVALID' -Body { New-DuoForgeRun -ValidationResult $validation }
         Assert-False (Test-Path -LiteralPath $workspace)
     }
 
@@ -323,6 +328,81 @@ try {
         Assert-Equal (Test-DuoForgePathRelationship -PathA $a -PathB $a) 'Same'
         Assert-Equal (Test-DuoForgePathRelationship -PathA $a -PathB $b) 'AContainsB'
         Assert-Equal (Test-DuoForgePathRelationship -PathA $a -PathB $c) 'Disjoint'
+    }
+
+    Test-Case '정규 문서 입력은 공급자와 분리된 A/B 계보로 유지된다' {
+        $normalized = & $module {
+            Resolve-DuoForgeDocumentInputAliasesInternal -DocumentA '.\A\main.md' -DocumentB '.\B\main.md'
+        }
+        Assert-Equal $normalized.documentA '.\A\main.md'
+        Assert-Equal $normalized.documentB '.\B\main.md'
+        Assert-Equal @($normalized.warnings).Count 0
+        Assert-False $normalized.Contains('codexDocument')
+        Assert-False $normalized.Contains('claudeDocument')
+    }
+
+    Test-Case '레거시 문서 별칭은 A/B로만 정규화되고 경로 없는 경고를 남긴다' {
+        $normalized = & $module {
+            Resolve-DuoForgeDocumentInputAliasesInternal -CodexDocument 'C:\private\A.md' -ClaudeDocument 'D:\private\B.md'
+        }
+        Assert-Equal $normalized.documentA 'C:\private\A.md'
+        Assert-Equal $normalized.documentB 'D:\private\B.md'
+        Assert-Equal @($normalized.warnings).Count 1
+        Assert-Equal $normalized.warnings[0].code 'DF-DEPRECATED-DOCUMENT-ALIASES'
+        $warningJson = $normalized.warnings | ConvertTo-Json -Depth 10 -Compress
+        Assert-NotContainsText $warningJson 'C:\private\A.md'
+        Assert-NotContainsText $warningJson 'D:\private\B.md'
+    }
+
+    Test-Case '정규 문서 입력과 레거시 별칭이 다르면 묵시적 우선순위 없이 차단한다' {
+        Assert-ThrowsCode -ExpectedCode 'DF-INPUT-DOCUMENT-ALIAS-CONFLICT' -Body {
+            & $module {
+                Resolve-DuoForgeDocumentInputAliasesInternal -DocumentA '.\A\new.md' -CodexDocument '.\A\legacy.md'
+            }
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-INPUT-DOCUMENT-ALIAS-CONFLICT' -Body {
+            & $module {
+                Resolve-DuoForgeDocumentInputAliasesInternal -DocumentB '.\B\new.md' -ClaudeDocument '.\B\legacy.md'
+            }
+        }
+    }
+
+    Test-Case '워크플로 버전이 없는 실행은 v1이며 명시된 v2만 신규 의미를 사용한다' {
+        $versions = & $module {
+            [ordered]@{
+                legacy = Get-DuoForgeWorkflowVersionInternal -Manifest ([ordered]@{ mode = 'dual-document' })
+                explicitLegacy = Get-DuoForgeWorkflowVersionInternal -Manifest ([ordered]@{ workflowVersion = 'workflow-v1' })
+                current = Get-DuoForgeWorkflowVersionInternal -Manifest ([ordered]@{ workflowVersion = 'workflow-v2' })
+            }
+        }
+        Assert-Equal $versions.legacy 'workflow-v1'
+        Assert-Equal $versions.explicitLegacy 'workflow-v1'
+        Assert-Equal $versions.current 'workflow-v2'
+        Assert-ThrowsCode -ExpectedCode 'DF-WORKFLOW-VERSION' -Body {
+            & $module { Get-DuoForgeWorkflowVersionInternal -Manifest ([ordered]@{ workflowVersion = 'workflow-v3' }) }
+        }
+    }
+
+    Test-Case '이미 저장된 레거시 단계 그래프는 초기화 시 재해석하거나 다시 쓰지 않는다' {
+        $runDirectory = Join-Path $tempRoot 'legacy-graph'
+        [System.IO.Directory]::CreateDirectory($runDirectory) | Out-Null
+        $stepsPath = Join-Path $runDirectory 'steps.json'
+        $legacyGraph = [ordered]@{
+            schemaVersion = 1
+            mode = 'dual-document'
+            maxRounds = 2
+            steps = @(
+                [ordered]@{ stepKey = 'r01-codex-owner-response'; provider = 'codex'; round = 1; stage = 'owner-response'; dependsOn = @(); status = 'PENDING' }
+                [ordered]@{ stepKey = 'r01-claude-owned-document-revision'; provider = 'claude'; round = 1; stage = 'owned-document-revision'; dependsOn = @('r01-codex-owner-response'); status = 'PENDING' }
+            )
+        }
+        [System.IO.File]::WriteAllText($stepsPath, ($legacyGraph | ConvertTo-Json -Depth 20), [System.Text.UTF8Encoding]::new($false))
+        $before = (Get-FileHash -LiteralPath $stepsPath -Algorithm SHA256).Hash
+        $loaded = & $module { param($directory) Initialize-DuoForgeStageGraph -RunDirectory $directory } $runDirectory
+        $after = (Get-FileHash -LiteralPath $stepsPath -Algorithm SHA256).Hash
+        Assert-Equal $after $before
+        Assert-Equal $loaded.steps[0].stage 'owner-response'
+        Assert-Equal $loaded.steps[1].stage 'owned-document-revision'
     }
 
     Test-Case '공동 문서 요청은 입력 폴더 안의 결과 루트를 차단한다' {
@@ -569,12 +649,21 @@ try {
         $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         $run = New-DuoForgeRun -ValidationResult $validation
         $events = [System.Collections.Generic.List[object]]::new()
+        $documentMarker = 'DOCUMENT-CONTENT-MUST-NOT-ENTER-EVENTS'
+        $providerMarker = 'PROVIDER-RAW-MUST-NOT-ENTER-EVENTS'
+        $secretMarker = 'SECRET-VALUE-MUST-NOT-ENTER-EVENTS'
         $result = & $module {
-            param($directory, $eventList)
-            $callback = { param($step) New-DuoForgeFakeStageResult -Step $step }
+            param($directory, $eventList, $documentText, $providerText, $secretText)
+            $callback = {
+                param($step)
+                $fake = New-DuoForgeFakeStageResult -Step $step
+                $fake.summary = "$providerText $secretText"
+                if ($null -ne $fake.document) { $fake.document = $documentText }
+                return $fake
+            }
             $observer = { param($event) $eventList.Add($event) }.GetNewClosure()
             Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback -ProgressObserver $observer
-        } $run.runDirectory $events
+        } $run.runDirectory $events $documentMarker $providerMarker $secretMarker
         Assert-Equal $result.status 'COMPLETED'
         $firstStepEvents = @($events | Where-Object { [string]$_.data.stepKey -eq 'r01-codex-independent-draft' } | ForEach-Object { [string]$_.type })
         Assert-Equal (($firstStepEvents -join ',')) 'STAGE_STARTED,STAGE_RESULT_RECEIVED,STAGE_COMMITTED'
@@ -582,7 +671,16 @@ try {
         Assert-Equal $committed.Count 13
         Assert-False $committed[0].data.Contains('summary')
         Assert-False $committed[0].data.Contains('document')
-        $durableEvents = @(Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ConvertFrom-Json | Where-Object type -eq 'STAGE_COMMITTED')
+        $observerJson = $events | ConvertTo-Json -Depth 100 -Compress
+        Assert-NotContainsText $observerJson $documentMarker
+        Assert-NotContainsText $observerJson $providerMarker
+        Assert-NotContainsText $observerJson $secretMarker
+        $durableEventText = Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') -Raw
+        Assert-NotContainsText $durableEventText $documentMarker
+        Assert-NotContainsText $durableEventText $providerMarker
+        Assert-NotContainsText $durableEventText $secretMarker
+        $durableEventLines = $durableEventText -split "`r?`n"
+        $durableEvents = @($durableEventLines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ConvertFrom-Json | Where-Object type -eq 'STAGE_COMMITTED')
         Assert-Equal $durableEvents.Count 13
     }
 
