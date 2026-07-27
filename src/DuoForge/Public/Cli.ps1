@@ -107,8 +107,34 @@ function Invoke-DuoForgeCli {
                 throw (New-DuoForgeException -Code 'DF-CLI-ANSWER' -Message 'answer에는 --run, --issue, --choice가 필요합니다.')
             }
             $workspace = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')
-            $result = Set-DuoForgeUserDecisionInternal -RunId $runId -IssueId $issueId -Action answer -Choice $choice -ResultsRoot $workspace
+            $replace = [bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'replace' -Default $false)
+            $result = Set-DuoForgeUserDecisionInternal -RunId $runId -IssueId $issueId -Action answer -Choice $choice -ResultsRoot $workspace -ReplacePrevious:$replace
             $result | ConvertTo-Json -Depth 30
+            return
+        }
+        'constraint' {
+            $runId = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'run' -Default '')
+            $issueId = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'issue' -Default '')
+            $text = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'text' -Default '')
+            if ([string]::IsNullOrWhiteSpace($runId) -or [string]::IsNullOrWhiteSpace($issueId) -or [string]::IsNullOrWhiteSpace($text)) {
+                throw (New-DuoForgeException -Code 'DF-CLI-CONSTRAINT' -Message 'constraint에는 --run, --issue, --text가 필요합니다.')
+            }
+            $workspace = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')
+            $confirm = [bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'confirm' -Default $false)
+            if ($confirm) {
+                $result = Set-DuoForgeUserConstraintInternal -RunId $runId -IssueId $issueId -Text $text -ResultsRoot $workspace -Confirm
+            }
+            else {
+                $result = New-DuoForgeDecisionConstraintPreviewInternal -RunId $runId -IssueId $issueId -Text $text -ResultsRoot $workspace
+            }
+            $result | ConvertTo-Json -Depth 30
+            return
+        }
+        'extend-round' {
+            $runId = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'run' -Default '')
+            if ([string]::IsNullOrWhiteSpace($runId)) { throw (New-DuoForgeException -Code 'DF-CLI-RUN' -Message 'extend-round에는 --run <실행 ID>가 필요합니다.') }
+            $workspace = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')
+            Add-DuoForgeRoundInternal -RunId $runId -ResultsRoot $workspace | ConvertTo-Json -Depth 30
             return
         }
         'defer' {
@@ -208,8 +234,10 @@ function Invoke-DuoForgeCli {
                 -Workspace ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')) `
                 -FirstSynthesizer ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'first-synthesizer' -Default 'alternate')) `
                 -PauseAfterRound ([bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'pause-after-round' -Default $false)) `
+                -AllowPartial ([bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'allow-partial' -Default $false)) `
                 -Name ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'name' -Default ''))
             $validation = Test-DuoForgeStartRequestInternal -Request $request
+            $validation = Confirm-DuoForgeInteractivePartialAnalysisInternal -Validation $validation
             if (-not $validation.valid) { Write-DuoForgeValidationErrors -Validation $validation; throw (New-DuoForgeException -Code 'DF-START-BLOCKED' -Message '실행 전 검증에 실패했습니다.') }
             Write-DuoForgeExecutionPlan -Validation $validation
             if ([bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'plan-only' -Default $false)) { return }

@@ -7,13 +7,15 @@ DuoForge
 사용법:
   duoforge
   duoforge doctor [--json]
-  duoforge start shared-document --brief <파일> --codex-model <모델> --codex-effort <단계> --claude-model <모델> --claude-effort <단계> [--pause-after-round] [--plan-only]
-  duoforge start dual-document --codex <파일> --claude <파일> --codex-model <모델> --codex-effort <단계> --claude-model <모델> --claude-effort <단계> [--pause-after-round] [--plan-only]
+  duoforge start shared-document --brief <파일> --codex-model <모델> --codex-effort <단계> --claude-model <모델> --claude-effort <단계> [--pause-after-round] [--allow-partial] [--plan-only]
+  duoforge start dual-document --codex <파일> --claude <파일> --codex-model <모델> --codex-effort <단계> --claude-model <모델> --claude-effort <단계> [--pause-after-round] [--allow-partial] [--plan-only]
   duoforge status --run <실행 ID> [--workspace <폴더>] [--json]
   duoforge issues --run <실행 ID> [--workspace <폴더>] [--json]
   duoforge explain --run <실행 ID> --issue <쟁점 ID> [--provider codex|claude|both] [--level beginner|general|expert] [--focus general|evidence|examples|tradeoffs|experiment] [--live]
   duoforge evidence --run <실행 ID> --issue <쟁점 ID> --file <Markdown 파일> [--workspace <폴더>]
-  duoforge answer --run <실행 ID> --issue <쟁점 ID> --choice <A|B> [--workspace <폴더>]
+  duoforge answer --run <실행 ID> --issue <쟁점 ID> --choice <A|B> [--replace] [--workspace <폴더>]
+  duoforge constraint --run <실행 ID> --issue <쟁점 ID> --text <제약 조건> [--confirm] [--workspace <폴더>]
+  duoforge extend-round --run <실행 ID> [--workspace <폴더>]
   duoforge defer --run <실행 ID> --issue <쟁점 ID> [--workspace <폴더>] [--confirm-partial]
   duoforge pause --run <실행 ID> [--workspace <폴더>]
   duoforge resume --run <실행 ID> [--workspace <폴더>] [--live]
@@ -42,6 +44,10 @@ function Write-DuoForgeDoctorReport {
         $item = $Report.providers[$provider]
         $mark = if ($item.status -eq 'READY_DOCUMENTS') { '✓' } else { '✗' }
         Write-Host ("$mark {0}: {1}, 인증={2}, 문서 프로필={3}" -f $provider, $item.version, $item.authType, $item.documentProfileSupported)
+    }
+    if ($null -ne $Validation.contextPlan -and [bool]$Validation.contextPlan.enabled) {
+        Write-Host ('문맥 배치: {0}/{1}, 예상 파일 커버리지 {2}%, 바이트 커버리지 {3}%' -f $Validation.contextPlan.selectedBatchCount, $Validation.contextPlan.requiredBatchCount, $Validation.contextPlan.predictedFileCoveragePercent, $Validation.contextPlan.predictedByteCoveragePercent)
+        if ([bool]$Validation.contextPlan.requiresPartialConsent) { Write-Host '일부 문맥만 분석되므로 결과는 COMPLETED_PARTIAL로 제한됩니다.' -ForegroundColor Yellow }
     }
     if ($Report.apiCredentialConflicts.Count -gt 0) {
         Write-Host ('✗ API 인증 우선 환경 변수: {0}' -f ($Report.apiCredentialConflicts -join ', ')) -ForegroundColor Red
@@ -77,6 +83,7 @@ function Write-DuoForgeExecutionPlan {
     Write-Host '실행 전 확인'
     Write-Host ('모드: {0}' -f $Validation.request.mode)
     Write-Host ('라운드: {0}' -f $Validation.request.maxRounds)
+    Write-Host ('누적 모델 실행 시간 상한: {0}분' -f (Get-DuoForgeConfig).limits.maxWallClockMinutes)
     Write-Host ('라운드마다 일시정지: {0}' -f $(if ([bool](Get-DuoForgeObjectValue -Object $Validation.request -Name 'pauseAfterRound' -Default $false)) { '예' } else { '아니요' }))
     Write-Host ('결과 루트: {0}' -f $Validation.resultsRoot)
     Write-DuoForgeProviderSelectionSummary -ProviderSelections $Validation.request.providerSelections

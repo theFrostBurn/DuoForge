@@ -73,11 +73,54 @@ function Apply-DuoForgeUserEvidenceRecordsInternal {
     return @($Issues)
 }
 
+function Apply-DuoForgeUserDecisionRecordsInternal {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()][Parameter(Mandatory)][object[]]$Issues,
+        [AllowEmptyCollection()][Parameter(Mandatory)][object[]]$DecisionRecords
+    )
+
+    $effective = @(Get-DuoForgeEffectiveUserDecisionsInternal -Records $DecisionRecords)
+    foreach ($decision in @($effective | Where-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'action' -Default '') -eq 'ANSWER' })) {
+        $issueId = [string](Get-DuoForgeObjectValue -Object $decision -Name 'issueId' -Default '')
+        $issue = @($Issues | Where-Object { [string]$_.issueId -eq $issueId } | Select-Object -First 1)
+        if ($issue.Count -ne 1) { continue }
+        $issue = $issue[0]
+        $decisionId = [string](Get-DuoForgeObjectValue -Object $decision -Name 'decisionId' -Default '')
+        if (-not $issue.Contains('responses') -or $null -eq $issue.responses) { $issue.responses = [ordered]@{} }
+        $userResponses = [System.Collections.Generic.List[object]]::new()
+        if ($issue.responses.Contains('user')) { foreach ($response in @($issue.responses.user)) { $userResponses.Add($response) } }
+        if ([string]::IsNullOrWhiteSpace($decisionId) -or $decisionId -notin @($userResponses | ForEach-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'decisionId' -Default '') })) {
+            $userResponses.Add($decision)
+        }
+        $issue.responses.user = @($userResponses)
+        $issue.resolutionStatus = 'RESOLVED'
+        $issue.requiresUser = $false
+        $issue.blocking = $false
+
+        $history = [System.Collections.Generic.List[object]]::new()
+        foreach ($entry in @($issue.history)) { $history.Add($entry) }
+        if ([string]::IsNullOrWhiteSpace($decisionId) -or $decisionId -notin @($history | ForEach-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'decisionId' -Default '') })) {
+            $history.Add([ordered]@{
+                at = [string](Get-DuoForgeObjectValue -Object $decision -Name 'recordedAt' -Default (Get-DuoForgeUtcNow))
+                event = 'USER_DECISION_APPLIED'
+                actor = 'user'
+                status = 'RESOLVED'
+                decisionId = $decisionId
+                revision = [int](Get-DuoForgeObjectValue -Object $decision -Name 'revision' -Default 1)
+            })
+        }
+        $issue.history = @($history)
+    }
+    return @($Issues)
+}
+
 function Merge-DuoForgeStageIssues {
     [CmdletBinding()]
     param(
         [AllowEmptyCollection()][Parameter(Mandatory)][object[]]$StageResults,
         [AllowEmptyCollection()][object[]]$UserEvidenceRecords = @(),
+        [AllowEmptyCollection()][object[]]$UserDecisionRecords = @(),
         [AllowEmptyCollection()][object[]]$PreservedIssues = @()
     )
 
@@ -213,6 +256,17 @@ function Merge-DuoForgeStageIssues {
                     question = [string]$question.question
                     options = @($question.options)
                     recommendedOption = [string]$question.recommendedOption
+                    reasonNow = [string](Get-DuoForgeObjectValue -Object $question -Name 'reasonNow' -Default '이 쟁점은 사용자 선호에 따라 최종 결과가 달라져 지금 확인이 필요합니다.')
+                    plainExplanation = [string](Get-DuoForgeObjectValue -Object $question -Name 'plainExplanation' -Default $issue.claim)
+                    codexOpinion = [string](Get-DuoForgeObjectValue -Object $question -Name 'codexOpinion' -Default '기록된 Codex 의견은 상세 설명에서 확인할 수 있습니다.')
+                    claudeOpinion = [string](Get-DuoForgeObjectValue -Object $question -Name 'claudeOpinion' -Default '기록된 Claude 의견은 상세 설명에서 확인할 수 있습니다.')
+                    impactIfDeferred = [string](Get-DuoForgeObjectValue -Object $question -Name 'impactIfDeferred' -Default '결정 전에는 관련 최종화를 진행할 수 없습니다.')
+                    estimatedCost = [string](Get-DuoForgeObjectValue -Object $question -Name 'estimatedCost' -Default '입력 근거만으로 정확한 비용을 산정할 수 없습니다.')
+                    reversibility = [string](Get-DuoForgeObjectValue -Object $question -Name 'reversibility' -Default 'unknown')
+                    confidence = [string](Get-DuoForgeObjectValue -Object $question -Name 'confidence' -Default 'medium')
+                    safeDefault = [string](Get-DuoForgeObjectValue -Object $question -Name 'safeDefault' -Default ([string]$question.recommendedOption))
+                    experimentPossible = [bool](Get-DuoForgeObjectValue -Object $question -Name 'experimentPossible' -Default $false)
+                    priority = if ([string]$issue.severity -eq 'critical') { 1 } elseif ([string]$issue.severity -eq 'major') { 2 } else { 3 }
                 })
                 $issue.requiresUser = $true
                 $issue.blocking = $true
@@ -223,6 +277,9 @@ function Merge-DuoForgeStageIssues {
 
     if ($null -ne $UserEvidenceRecords -and @($UserEvidenceRecords | Where-Object { $null -ne $_ }).Count -gt 0) {
         $issues = [System.Collections.Generic.List[object]]::new(@(Apply-DuoForgeUserEvidenceRecordsInternal -Issues @($issues) -EvidenceRecords @($UserEvidenceRecords)))
+    }
+    if ($null -ne $UserDecisionRecords -and @($UserDecisionRecords | Where-Object { $null -ne $_ }).Count -gt 0) {
+        $issues = [System.Collections.Generic.List[object]]::new(@(Apply-DuoForgeUserDecisionRecordsInternal -Issues @($issues) -DecisionRecords @($UserDecisionRecords)))
     }
     $activeIssueIds = @($issues | Where-Object { $_.resolutionStatus -notin @('RESOLVED', 'SUPERSEDED', 'AWAITING_EVIDENCE') } | ForEach-Object { [string]$_.issueId })
     $questions = [System.Collections.Generic.List[object]]::new(@($questions | Where-Object { [string]$_.issueKey -in $activeIssueIds }))
@@ -244,12 +301,44 @@ function Merge-DuoForgeStageIssues {
                 'B: 현재 요구를 유지하고 반대 근거를 고려해 다시 검증'
             )
             recommendedOption = 'A'
+            reasonNow = '이 차단 쟁점을 해결하지 않으면 완료 상태로 진행할 수 없습니다.'
+            plainExplanation = [string]$issue.claim
+            codexOpinion = 'Codex의 관련 판단은 쟁점 이력과 상세 설명에서 확인할 수 있습니다.'
+            claudeOpinion = 'Claude의 관련 판단은 쟁점 이력과 상세 설명에서 확인할 수 있습니다.'
+            impactIfDeferred = 'Major 쟁점은 부분 완료로만 종료할 수 있고 Critical 쟁점은 보류할 수 없습니다.'
+            estimatedCost = '선택에 따라 마지막 문서 단계와 검증 단계가 다시 실행됩니다.'
+            reversibility = 'moderate'
+            confidence = 'medium'
+            safeDefault = 'A'
+            experimentPossible = $false
+            priority = if ([string]$issue.severity -eq 'critical') { 1 } elseif ([string]$issue.severity -eq 'major') { 2 } else { 3 }
         })
         $issue.requiresUser = $true
         $issue.resolutionStatus = 'AWAITING_USER'
     }
 
-    return [ordered]@{ issues = @($issues); questions = @($questions) }
+    $latestQuestionByIssue = [ordered]@{}
+    foreach ($question in @($questions)) { $latestQuestionByIssue[[string]$question.issueKey] = $question }
+    $deduplicatedQuestions = @($latestQuestionByIssue.Values)
+    $orderedQuestions = @($deduplicatedQuestions | Sort-Object @{ Expression = { [int](Get-DuoForgeObjectValue -Object $_ -Name 'priority' -Default 99) } }, @{ Expression = { [string]$_.issueKey } })
+    return [ordered]@{ issues = @($issues); questions = $orderedQuestions }
+}
+
+function Get-DuoForgePendingQuestionBatchInternal {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()][Parameter(Mandatory)][object[]]$Questions,
+        [ValidateRange(1, 3)][int]$Maximum = 3
+    )
+
+    $all = @($Questions)
+    $batch = @($all | Select-Object -First $Maximum)
+    return [ordered]@{
+        total = $all.Count
+        batchSize = $batch.Count
+        remainingAfterBatch = [Math]::Max(0, $all.Count - $batch.Count)
+        questions = $batch
+    }
 }
 
 function ConvertTo-DuoForgeMarkdownCell {
@@ -326,6 +415,16 @@ function New-DuoForgeOpenQuestionsMarkdown {
     foreach ($question in $Questions) {
         $lines.Add("## $($question.title)")
         $lines.Add('')
+        $lines.Add("- 지금 결정하는 이유: $($question.reasonNow)")
+        $lines.Add("- 쉬운 설명: $($question.plainExplanation)")
+        $lines.Add("- Codex 의견: $($question.codexOpinion)")
+        $lines.Add("- Claude 의견: $($question.claudeOpinion)")
+        $lines.Add("- 예상 비용: $($question.estimatedCost)")
+        $lines.Add("- 되돌리기: $($question.reversibility)")
+        $lines.Add("- 권고 신뢰도: $($question.confidence)")
+        $lines.Add("- 안전한 기본값: $($question.safeDefault)")
+        $lines.Add("- 보류 영향: $($question.impactIfDeferred)")
+        $lines.Add('')
         $lines.Add([string]$question.question)
         $lines.Add('')
         foreach ($option in @($question.options)) { $lines.Add("- $option") }
@@ -355,11 +454,13 @@ function Render-DuoForgeFinalArtifacts {
     $stageResults = @(Get-DuoForgeCommittedStageResults -RunDirectory $RunDirectory -Graph $Graph)
     $userEvidencePath = Join-Path $RunDirectory 'decisions\user-evidence.jsonl'
     $userEvidence = @(Read-DuoForgeJsonLines -Path $userEvidencePath -AllowMissing)
+    $userDecisionRecords = @(Read-DuoForgeJsonLines -Path (Join-Path $RunDirectory 'decisions\user-answers.jsonl') -AllowMissing)
     $existingLedgerPath = Join-Path $RunDirectory 'issues.json'
     $existingLedger = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $existingLedgerPath)
     $evidenceIssueIds = @($userEvidence | ForEach-Object { [string]$_.issueId })
-    $preservedIssues = @($existingLedger.issues | Where-Object { [string]$_.issueId -in $evidenceIssueIds })
-    $merged = Merge-DuoForgeStageIssues -StageResults $stageResults -UserEvidenceRecords $userEvidence -PreservedIssues $preservedIssues
+    $decisionIssueIds = @($userDecisionRecords | Where-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'action' -Default '') -eq 'ANSWER' } | ForEach-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'issueId' -Default '') })
+    $preservedIssues = @($existingLedger.issues | Where-Object { [string]$_.issueId -in $evidenceIssueIds -or [string]$_.issueId -in $decisionIssueIds })
+    $merged = Merge-DuoForgeStageIssues -StageResults $stageResults -UserEvidenceRecords $userEvidence -UserDecisionRecords $userDecisionRecords -PreservedIssues $preservedIssues
     Write-DuoForgeJsonAtomic -Path (Join-Path $RunDirectory 'issues.json') -Value ([ordered]@{ schemaVersion = 1; issues = @($merged.issues) })
     Write-DuoForgeJsonAtomic -Path (Join-Path $RunDirectory 'decisions\pending.json') -Value ([ordered]@{ schemaVersion = 1; questions = @($merged.questions) })
 
@@ -422,6 +523,15 @@ function Render-DuoForgeFinalArtifacts {
     $state.updatedAt = Get-DuoForgeUtcNow
     Write-DuoForgeJsonAtomic -Path $statePath -Value $state
 
+    $contextPlanPath = Join-Path $RunDirectory 'inputs\context-plan.json'
+    if (Test-Path -LiteralPath $contextPlanPath -PathType Leaf) {
+        $contextPlan = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $contextPlanPath)
+        if ([bool]$contextPlan.enabled) {
+            $coveragePath = Join-Path $finalDirectory 'COVERAGE.md'
+            Write-DuoForgeTextAtomic -Path $coveragePath -Text (New-DuoForgeCoverageMarkdownInternal -ContextPlan $contextPlan)
+            $files.Add($coveragePath)
+        }
+    }
     $artifactIndex = [ordered]@{ schemaVersion = 1; generatedAt = Get-DuoForgeUtcNow; files = @($files | ForEach-Object { [ordered]@{ name = [System.IO.Path]::GetFileName($_); sha256 = Get-DuoForgeSha256 -Path $_ } }) }
     Write-DuoForgeJsonAtomic -Path (Join-Path $finalDirectory 'artifacts.json') -Value $artifactIndex
     return [ordered]@{ files = @($files); issues = @($merged.issues); questions = @($merged.questions) }

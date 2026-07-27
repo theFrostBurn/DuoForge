@@ -17,6 +17,7 @@ function New-DuoForgeStartRequest {
         [string]$Workspace,
         [ValidateSet('alternate', 'codex', 'claude')][string]$FirstSynthesizer = 'alternate',
         [bool]$PauseAfterRound = $false,
+        [bool]$AllowPartial = $false,
         [string]$Name
     )
     return New-DuoForgeStartRequestInternal @PSBoundParameters

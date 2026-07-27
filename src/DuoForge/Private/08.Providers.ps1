@@ -186,3 +186,56 @@ function Invoke-DuoForgeDoctorInternal {
         recommendations = @($recommendations)
     }
 }
+
+function Get-DuoForgeAuthenticationGateInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Report)
+
+    $missingProviders = [System.Collections.Generic.List[string]]::new()
+    if (-not [bool](Get-DuoForgeObjectValue -Object $Report.providers.codex -Name 'subscription' -Default $false)) {
+        $missingProviders.Add('codex')
+    }
+    if (-not [bool](Get-DuoForgeObjectValue -Object $Report.providers.claude -Name 'subscription' -Default $false)) {
+        $missingProviders.Add('claude')
+    }
+
+    $ready = [bool](Get-DuoForgeObjectValue -Object $Report -Name 'readyForDocumentModes' -Default $false)
+    if ($ready) { $missingProviders.Clear() }
+    $actions = [System.Collections.Generic.List[string]]::new()
+    foreach ($provider in $missingProviders) { $actions.Add("$provider-login") }
+    if (-not $ready) {
+        $actions.Add('show-manual-login')
+        $actions.Add('recheck')
+        $actions.Add('exit')
+    }
+
+    return [ordered]@{
+        ready = $ready
+        modelCallsAllowed = $ready
+        inputTransferAllowed = $ready
+        blockCode = if ($ready) { $null } else { 'DF-PREFLIGHT-PROVIDERS' }
+        missingProviders = @($missingProviders)
+        actions = @($actions)
+    }
+}
+
+function Get-DuoForgeGuidedLoginOutcomeInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('codex', 'claude')][string]$Provider,
+        [Parameter(Mandatory)][int]$ExitCode,
+        [Parameter(Mandatory)]$PostReport
+    )
+
+    $diagnostic = Get-DuoForgeObjectValue -Object $PostReport.providers -Name $Provider
+    $subscription = [bool](Get-DuoForgeObjectValue -Object $diagnostic -Name 'subscription' -Default $false)
+    $status = if ($subscription) { 'READY' } elseif ($ExitCode -eq 0) { 'AUTH_NOT_CONFIRMED' } else { 'CANCELLED_OR_FAILED' }
+    return [ordered]@{
+        provider = $Provider
+        status = $status
+        exitCode = $ExitCode
+        subscription = $subscription
+        modelCallsAllowed = [bool](Get-DuoForgeAuthenticationGateInternal -Report $PostReport).modelCallsAllowed
+        nextActions = if ($subscription) { @('recheck') } else { @("$provider-login", 'show-manual-login', 'recheck', 'exit') }
+    }
+}

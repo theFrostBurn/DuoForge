@@ -102,6 +102,20 @@ function Test-DuoForgeStageResultInternal {
         }
     }
 
+    $questionItems = if ($Result -is [System.Collections.IDictionary] -and $Result.Contains('openQuestions')) { $Result['openQuestions'] } else { @() }
+    foreach ($question in @($questionItems)) {
+        foreach ($name in @('issueKey', 'title', 'question', 'recommendedOption', 'reasonNow', 'plainExplanation', 'codexOpinion', 'claudeOpinion', 'impactIfDeferred', 'estimatedCost', 'safeDefault')) {
+            if ([string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $question -Name $name))) { $errors.Add("openQuestions.$name 값이 비어 있습니다.") }
+        }
+        $options = @(Get-DuoForgeObjectValue -Object $question -Name 'options' -Default @())
+        if ($options.Count -lt 2) { $errors.Add('openQuestions.options에는 두 개 이상의 선택지가 필요합니다.') }
+        $reversibility = [string](Get-DuoForgeObjectValue -Object $question -Name 'reversibility' -Default '')
+        if (-not [string]::IsNullOrWhiteSpace($reversibility) -and $reversibility -notin @('easy', 'moderate', 'hard', 'unknown')) { $errors.Add('openQuestions.reversibility 값이 잘못되었습니다.') }
+        $confidence = [string](Get-DuoForgeObjectValue -Object $question -Name 'confidence' -Default '')
+        if (-not [string]::IsNullOrWhiteSpace($confidence) -and $confidence -notin @('low', 'medium', 'high')) { $errors.Add('openQuestions.confidence 값이 잘못되었습니다.') }
+        if ((Get-DuoForgeObjectValue -Object $question -Name 'experimentPossible') -isnot [bool]) { $errors.Add('openQuestions.experimentPossible 값은 boolean이어야 합니다.') }
+    }
+
     $validation = [ordered]@{ valid = $errors.Count -eq 0; errors = @($errors) }
     if ($ThrowOnError -and -not $validation.valid) {
         $exception = New-DuoForgeException -Code 'DF-STAGE-SCHEMA' -Message ($validation.errors -join ' ')

@@ -23,6 +23,7 @@ function New-DuoForgeStartRequestInternal {
         [ValidateSet('alternate', 'codex', 'claude')]
         [string]$FirstSynthesizer = 'alternate',
         [bool]$PauseAfterRound = $false,
+        [bool]$AllowPartial = $false,
         [string]$Name
     )
 
@@ -33,6 +34,7 @@ function New-DuoForgeStartRequestInternal {
         maxRounds = $MaxRounds
         firstSynthesizer = $FirstSynthesizer
         pauseAfterRound = $PauseAfterRound
+        allowPartial = $AllowPartial
         workspace = $Workspace
         providerSelections = [ordered]@{
             codex = [ordered]@{
@@ -157,18 +159,26 @@ function Test-DuoForgeStartRequestInternal {
         $errors.Add([ordered]@{ code = 'DF-MODE'; message = "지원하지 않는 모드입니다: $mode" })
     }
 
-    if (-not [bool]$DoctorReport.readyForDocumentModes -and $mode -in @('shared-document', 'dual-document')) {
+    $authenticationGate = Get-DuoForgeAuthenticationGateInternal -Report $DoctorReport
+    if (-not [bool]$authenticationGate.modelCallsAllowed -and $mode -in @('shared-document', 'dual-document')) {
         $errors.Add([ordered]@{
-            code = 'DF-PREFLIGHT-PROVIDERS'
+            code = [string]$authenticationGate.blockCode
             message = '두 공급자의 구독 인증과 안전 실행 프로필이 모두 준비되지 않았습니다. duoforge doctor 결과를 확인해 주세요.'
         })
     }
 
     $plan = $null
+    $contextPlan = $null
     try {
-        $plan = Get-DuoForgeExecutionPlanInternal -Mode $mode -MaxRounds ([int]$Request.maxRounds) -FirstSynthesizer ([string]$Request.firstSynthesizer) -MaxCallsPerProvider ([int]$Config.limits.maxCallsPerProviderPerRun)
+        $basePlan = Get-DuoForgeExecutionPlanInternal -Mode $mode -MaxRounds ([int]$Request.maxRounds) -FirstSynthesizer ([string]$Request.firstSynthesizer) -MaxCallsPerProvider ([int]$Config.limits.maxCallsPerProviderPerRun)
+        $partialValidation = [ordered]@{ request = $Request; inputs = $inputs }
+        $contextPlan = New-DuoForgeContextBatchPlanInternal -ValidationResult $partialValidation -Config $Config -BaseExecutionPlan $basePlan
+        $plan = Get-DuoForgeExecutionPlanInternal -Mode $mode -MaxRounds ([int]$Request.maxRounds) -FirstSynthesizer ([string]$Request.firstSynthesizer) -MaxCallsPerProvider ([int]$Config.limits.maxCallsPerProviderPerRun) -ContextBatchCount ([int]$contextPlan.selectedBatchCount)
         if (-not $plan.withinLimits) {
             $errors.Add([ordered]@{ code = 'DF-PLAN-CALL-LIMIT'; message = '최악 호출 계획이 공급자별 강제 호출 상한을 초과합니다.' })
+        }
+        if ([bool]$contextPlan.requiresPartialConsent -and -not [bool](Get-DuoForgeObjectValue -Object $Request -Name 'allowPartial' -Default $false)) {
+            $errors.Add([ordered]@{ code = 'DF-PARTIAL-CONSENT-REQUIRED'; message = "예상 문맥 커버리지는 파일 $($contextPlan.predictedFileCoveragePercent)%, 바이트 $($contextPlan.predictedByteCoveragePercent)%입니다. 범위를 줄이거나 --allow-partial로 부분 분석에 명시적으로 동의해 주세요." })
         }
     }
     catch {
@@ -183,7 +193,9 @@ function Test-DuoForgeStartRequestInternal {
         resultsRoot = $resultsRoot
         inputs = $inputs
         executionPlan = $plan
+        contextPlan = $contextPlan
         doctor = $DoctorReport
+        authenticationGate = $authenticationGate
         errors = @($errors)
         warnings = @($warnings)
     }

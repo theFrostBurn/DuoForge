@@ -46,6 +46,13 @@ function Remove-DuoForgeProviderWorkDirectory {
     if (Test-Path -LiteralPath $workFull -PathType Container) {
         [System.IO.Directory]::Delete($workFull, $true)
     }
+    $stepDirectory = [System.IO.Path]::GetDirectoryName($workFull)
+    if ($stepDirectory.StartsWith($providerRoot + '\', [StringComparison]::OrdinalIgnoreCase) -and (Test-Path -LiteralPath $stepDirectory -PathType Container) -and @(Get-ChildItem -LiteralPath $stepDirectory -Force).Count -eq 0) {
+        [System.IO.Directory]::Delete($stepDirectory, $false)
+    }
+    if ((Test-Path -LiteralPath $providerRoot -PathType Container) -and @(Get-ChildItem -LiteralPath $providerRoot -Force).Count -eq 0) {
+        [System.IO.Directory]::Delete($providerRoot, $false)
+    }
 }
 
 function Get-DuoForgeStructuredProviderCommandSpecInternal {

@@ -1,13 +1,20 @@
 {
   "schemaVersion": 2,
   "verifiedAt": "2026-07-27",
-  "liveE2EVerified": false,
+  "liveE2EVerified": true,
+  "liveE2E": {
+    "sharedDocumentRunId": "run-20260727-142702-0eeb82",
+    "dualDocumentRunId": "run-20260727-155148-7617d3",
+    "status": "COMPLETED",
+    "forbiddenToolEvents": 0,
+    "originalHashesUnchanged": true
+  },
   "providers": {
     "codex": {
       "observedVersion": "0.145.0",
       "explicitModelSelectionRequired": true,
       "explicitReasoningEffortSelectionRequired": true,
-      "suggestedModels": ["gpt-5.6", "gpt-5.6-terra"],
+      "suggestedModels": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
       "reasoningEfforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
       "documentProfile": {
         "sandbox": "read-only",

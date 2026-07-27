@@ -4,9 +4,10 @@ function Set-DuoForgeIssueAnswer {
         [Parameter(Mandatory)][string]$RunId,
         [Parameter(Mandatory)][string]$IssueId,
         [Parameter(Mandatory)][string]$Choice,
-        [string]$ResultsRoot
+        [string]$ResultsRoot,
+        [switch]$ReplacePrevious
     )
-    return Set-DuoForgeUserDecisionInternal -RunId $RunId -IssueId $IssueId -Action answer -Choice $Choice -ResultsRoot $ResultsRoot
+    return Set-DuoForgeUserDecisionInternal -RunId $RunId -IssueId $IssueId -Action answer -Choice $Choice -ResultsRoot $ResultsRoot -ReplacePrevious:$ReplacePrevious
 }
 
 function Suspend-DuoForgeIssue {

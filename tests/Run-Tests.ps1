@@ -72,6 +72,7 @@ function Test-Case {
         $script:Failed++
         Write-Host ("[실패] $Name") -ForegroundColor Red
         Write-Host ('       ' + $_.Exception.Message) -ForegroundColor Red
+        Write-Host ('       ' + $_.ScriptStackTrace) -ForegroundColor DarkRed
     }
 }
 
@@ -113,14 +114,16 @@ function New-TestStartRequest {
         [string]$Workspace,
         [string]$FirstSynthesizer = 'alternate',
         [bool]$PauseAfterRound = $false,
+        [bool]$AllowPartial = $false,
         [string]$Name
     )
     $parameters = @{} + $PSBoundParameters
     $parameters['CodexModel'] = $CodexModel
     $parameters['CodexReasoningEffort'] = $CodexReasoningEffort
     $parameters['ClaudeModel'] = $ClaudeModel
-    $parameters['ClaudeReasoningEffort'] = $ClaudeReasoningEffort
-    return New-DuoForgeStartRequest @parameters
+        $parameters['ClaudeReasoningEffort'] = $ClaudeReasoningEffort
+        $parameters['AllowPartial'] = $AllowPartial
+        return New-DuoForgeStartRequest @parameters
 }
 
 function New-MarkdownFile {
@@ -537,8 +540,8 @@ try {
                 [ordered]@{ issueKey = 'I-1'; target = 'document'; category = 'test'; severity = 'minor'; claim = '단일 항목'; evidence = @(); proposal = '유지'; requiresUser = $false; blockingProposal = $false }
             )
             $source.openQuestions = @(
-                [ordered]@{ issueKey = 'I-1'; title = '첫 질문'; question = '확인합니까?'; options = @('예', '아니요'); recommendedOption = '예' },
-                [ordered]@{ issueKey = 'I-2'; title = '둘째 질문'; question = '계속합니까?'; options = @('예', '아니요'); recommendedOption = '예' }
+                [ordered]@{ issueKey = 'I-1'; title = '첫 질문'; question = '확인합니까?'; options = @('예', '아니요'); recommendedOption = '예'; reasonNow = '지금 결정'; plainExplanation = '쉬운 설명'; codexOpinion = 'Codex 의견'; claudeOpinion = 'Claude 의견'; impactIfDeferred = '진행 중단'; estimatedCost = '낮음'; reversibility = 'easy'; confidence = 'high'; safeDefault = '예'; experimentPossible = $false },
+                [ordered]@{ issueKey = 'I-2'; title = '둘째 질문'; question = '계속합니까?'; options = @('예', '아니요'); recommendedOption = '예'; reasonNow = '지금 결정'; plainExplanation = '쉬운 설명'; codexOpinion = 'Codex 의견'; claudeOpinion = 'Claude 의견'; impactIfDeferred = '진행 중단'; estimatedCost = '낮음'; reversibility = 'easy'; confidence = 'high'; safeDefault = '예'; experimentPossible = $false }
             )
             $redactions = 0
             $protected = Protect-DuoForgeObjectInternal -Value $source -RedactionCount ([ref]$redactions)
@@ -660,11 +663,13 @@ try {
         $retryRequest = New-TestStartRequest -Mode shared-document -Brief $retryInput -Workspace $retryWorkspace -DocumentType prd
         $retryValidation = Test-DuoForgeStartRequest -Request $retryRequest -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $retryWorkspace)
         $retryRun = New-DuoForgeRun -ValidationResult $retryValidation
-        $retryControl = @{ failed = $false }
+        $retryControl = @{ failed = $false; promptKinds = @(); promptHashes = @() }
         $retryResult = & $module {
             param($directory, $control)
             $callback = {
-                param($step)
+                param($step, $prompt)
+                $control.promptKinds = @($control.promptKinds) + @([string]$prompt.kind)
+                $control.promptHashes = @($control.promptHashes) + @([string]$prompt.sha256)
                 $result = New-DuoForgeFakeStageResult -Step $step
                 if (-not $control.failed -and [string]$step.stepKey -eq 'r01-codex-independent-draft') {
                     $control.failed = $true
@@ -675,6 +680,10 @@ try {
             Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
         } $retryRun.runDirectory $retryControl
         Assert-Equal $retryResult.status 'COMPLETED'
+        Assert-Equal @($retryControl.promptKinds | Where-Object { $_ -eq 'FORMAT_REPAIR' }).Count 1
+        $stageIndex = [Array]::IndexOf([object[]]$retryControl.promptKinds, 'STAGE')
+        $repairIndex = [Array]::IndexOf([object[]]$retryControl.promptKinds, 'FORMAT_REPAIR')
+        Assert-True ($retryControl.promptHashes[$stageIndex] -ne $retryControl.promptHashes[$repairIndex]) '형식 복구 프롬프트 해시가 원래 프롬프트와 달라야 합니다.'
         $retryGraph = Get-Content -Raw -LiteralPath (Join-Path $retryRun.runDirectory 'steps.json') | ConvertFrom-Json -Depth 50
         Assert-Equal (@($retryGraph.steps | Where-Object { $_.stepKey -eq 'r01-codex-independent-draft' })[0].attemptCount) 2
 
@@ -796,7 +805,7 @@ try {
             $callback = { param($step) New-DuoForgeFakeStageResult -Step $step }
             Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
         } $run.runDirectory
-        Assert-Equal $third.status 'COMPLETED'
+        Assert-Equal $third.status 'COMPLETED' ($third | ConvertTo-Json -Depth 20 -Compress)
         Assert-Equal $third.invoked 1
         $history = & $module { param($directory) Read-DuoForgeJsonLines -Path (Join-Path $directory 'control\pause-history.jsonl') } $run.runDirectory
         Assert-Equal @($history | Where-Object { $_.reason -eq 'pause-after-round' }).Count 2
@@ -904,7 +913,7 @@ try {
             $callback = { param($step) New-DuoForgeFakeStageResult -Step $step }
             Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
         } $run.runDirectory
-        Assert-Equal $resumed.status 'COMPLETED'
+        Assert-Equal $resumed.status 'COMPLETED' ($resumed | ConvertTo-Json -Depth 20 -Compress)
         Assert-Equal $resumed.invoked 2
         Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'decisions\user-answers.jsonl') -PathType Leaf)
     }
@@ -1058,7 +1067,7 @@ try {
         $prompt = & $module {
             param($directory)
             $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $directory 'steps.json'))
-            $step = @($graph.steps | Where-Object { $_.status -eq 'PENDING' } | Select-Object -First 1)[0]
+            $step = @($graph.steps | Where-Object { $_.status -in @('PENDING', 'STALE') } | Select-Object -First 1)[0]
             New-DuoForgeStagePrompt -RunDirectory $directory -Graph $graph -Step $step
         } $run.runDirectory
         Assert-True ('E000001.md' -in @($prompt.snapshotNames)) '재실행 프롬프트 스냅샷 목록에 근거가 없습니다.'
@@ -1090,6 +1099,283 @@ try {
         Assert-Equal $finalIssue.resolutionStatus 'RESOLVED'
         Assert-Equal @($finalIssue.history | Where-Object { $_.event -eq 'USER_EVIDENCE_ADDED' }).Count 1
         Assert-Equal @($finalIssue.evidence | Where-Object { $_.source -eq 'E000001.md' -and $_.addedBy -eq 'user' }).Count 1
+    }
+
+    Test-Case '인증 실패 행렬은 메뉴와 CLI에서 같은 실패 폐쇄 게이트를 사용한다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'auth-matrix\input\brief.md')
+        $scenarios = @(
+            [ordered]@{ name = '미로그인'; codex = $false; claude = $false; expectedActions = 'codex-login,claude-login,show-manual-login,recheck,exit' },
+            [ordered]@{ name = 'Codex만 성공'; codex = $true; claude = $false; expectedActions = 'claude-login,show-manual-login,recheck,exit' },
+            [ordered]@{ name = 'Claude 만료'; codex = $true; claude = $false; expectedActions = 'claude-login,show-manual-login,recheck,exit' }
+        )
+        foreach ($scenario in $scenarios) {
+            $report = [ordered]@{
+                readyForDocumentModes = $false
+                readyForProjectAudit = $false
+                providers = [ordered]@{
+                    codex = [ordered]@{ version = 'codex-test'; authType = if ($scenario.codex) { 'chatgpt' } else { 'unknown' }; subscription = [bool]$scenario.codex; authenticated = [bool]$scenario.codex }
+                    claude = [ordered]@{ version = 'claude-test'; authType = if ($scenario.claude) { 'claude.ai' } else { 'unknown' }; subscription = [bool]$scenario.claude; authenticated = [bool]$scenario.claude }
+                }
+            }
+            $parity = & $module {
+                param($doctor)
+                [ordered]@{
+                    gate = Get-DuoForgeAuthenticationGateInternal -Report $doctor
+                    menuActions = @(Get-DuoForgeInteractiveSetupActionsInternal -Report $doctor)
+                    cancelled = Get-DuoForgeGuidedLoginOutcomeInternal -Provider claude -ExitCode 1 -PostReport $doctor
+                }
+            } $report
+            Assert-False ([bool]$parity.gate.modelCallsAllowed) "$($scenario.name)에서 모델 호출이 열렸습니다."
+            Assert-False ([bool]$parity.gate.inputTransferAllowed) "$($scenario.name)에서 입력 전송이 열렸습니다."
+            Assert-Equal ($parity.gate.actions -join ',') $scenario.expectedActions
+            Assert-Equal ($parity.menuActions -join ',') $scenario.expectedActions
+            Assert-Equal $parity.cancelled.status 'CANCELLED_OR_FAILED'
+
+            $workspace = Join-Path $tempRoot ("auth-matrix-results\" + $scenario.name)
+            $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+            $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport $report -Config (New-TestConfig -ResultsRoot $workspace)
+            Assert-False ([bool]$validation.valid)
+            Assert-Equal @($validation.errors | Where-Object { $_.code -eq 'DF-PREFLIGHT-PROVIDERS' }).Count 1
+            Assert-False (Test-Path -LiteralPath $workspace) '인증 실패 시 실행 폴더가 생성되었습니다.'
+        }
+    }
+
+    Test-Case '질문 카드는 우선순위대로 최대 3개만 한 배치에 표시하고 결정 정보를 보강한다' {
+        $cardResult = & $module {
+            $issues = @()
+            $questions = @()
+            for ($index = 1; $index -le 5; $index++) {
+                $key = "Q-$index"
+                $issues += [ordered]@{ issueKey = $key; target = 'document'; category = 'choice'; severity = if ($index -eq 1) { 'critical' } else { 'major' }; claim = "선택 $index 필요"; evidence = @(); proposal = '사용자 선택'; requiresUser = $true; blockingProposal = $true }
+                $questions += [ordered]@{ issueKey = $key; title = "질문 $index"; question = '어느 쪽을 선택할까요?'; options = @('A안', 'B안'); recommendedOption = 'A안' }
+            }
+            $stage = [ordered]@{ stepKey = 'r02-claude-final-validation'; provider = 'claude'; stage = 'final-validation'; round = 2; result = [ordered]@{ schemaVersion = 1; stage = 'final-validation'; provider = 'claude'; summary = '질문'; document = $null; issues = $issues; issueResponses = @(); adoptions = @(); openQuestions = $questions; finalApproved = $false } }
+            $secondStage = ConvertTo-DuoForgeHashtable -InputObject $stage
+            $secondStage.stepKey = 'r02-codex-final-validation'
+            $secondStage.provider = 'codex'
+            $secondStage.result.provider = 'codex'
+            $merged = Merge-DuoForgeStageIssues -StageResults @($stage, $secondStage)
+            [ordered]@{ merged = $merged; batch = Get-DuoForgePendingQuestionBatchInternal -Questions @($merged.questions) }
+        }
+        Assert-Equal $cardResult.merged.questions.Count 5
+        Assert-Equal $cardResult.batch.batchSize 3
+        Assert-Equal $cardResult.batch.remainingAfterBatch 2
+        $first = $cardResult.batch.questions[0]
+        Assert-Equal $first.priority 1
+        Assert-False ([string]::IsNullOrWhiteSpace([string]$first.impactIfDeferred))
+        Assert-False ([string]::IsNullOrWhiteSpace([string]$first.estimatedCost))
+        Assert-True ([string]$first.reversibility -in @('easy', 'moderate', 'hard', 'unknown'))
+        Assert-True ([string]$first.confidence -in @('low', 'medium', 'high'))
+    }
+
+    Test-Case '최신 사용자 결정은 과거 라운드의 동일 질문을 확정 처리한다' {
+        $decisionMerge = & $module {
+            $stage = [ordered]@{
+                stepKey = 'r01-claude-cross-review'
+                provider = 'claude'
+                stage = 'cross-review'
+                round = 1
+                result = [ordered]@{
+                    schemaVersion = 1; stage = 'cross-review'; provider = 'claude'; summary = '결정 필요'; document = $null
+                    issues = @([ordered]@{ issueKey = 'CLAUDE-R01-001'; target = 'document'; category = 'choice'; severity = 'major'; claim = '저장 주기를 정해야 합니다.'; evidence = @(); proposal = '5초 저장'; requiresUser = $true; blockingProposal = $true })
+                    issueResponses = @(); adoptions = @()
+                    openQuestions = @([ordered]@{ issueKey = 'CLAUDE-R01-001'; title = '저장 주기'; question = '어떻게 저장할까요?'; options = @('5초', '10초'); recommendedOption = '5초' })
+                    finalApproved = $null
+                }
+            }
+            $first = Merge-DuoForgeStageIssues -StageResults @($stage)
+            $issueId = [string]$first.issues[0].issueId
+            $decisions = @(
+                [ordered]@{ decisionId = 'decision-old'; issueId = $issueId; action = 'ANSWER'; revision = 1; selectedOption = '10초'; recordedAt = '2026-07-27T00:00:00Z' },
+                [ordered]@{ decisionId = 'decision-current'; issueId = $issueId; action = 'ANSWER'; revision = 2; selectedOption = '5초'; recordedAt = '2026-07-27T00:00:01Z' }
+            )
+            $merged = Merge-DuoForgeStageIssues -StageResults @($stage) -PreservedIssues @($first.issues) -UserDecisionRecords $decisions
+            [ordered]@{ issueId = $issueId; merged = $merged }
+        }
+        Assert-Equal @($decisionMerge.merged.questions).Count 0
+        $resolvedIssue = @($decisionMerge.merged.issues | Where-Object { [string]$_.issueId -eq [string]$decisionMerge.issueId })[0]
+        Assert-Equal $resolvedIssue.resolutionStatus 'RESOLVED'
+        Assert-False ([bool]$resolvedIssue.blocking)
+        Assert-Equal @($resolvedIssue.responses.user | Where-Object { $_.decisionId -eq 'decision-current' }).Count 1
+        Assert-Equal @($resolvedIssue.history | Where-Object { $_.event -eq 'USER_DECISION_APPLIED' -and $_.decisionId -eq 'decision-current' }).Count 1
+    }
+
+    Test-Case '사용자는 결정을 변경하고 자유 제약을 확인 후 적용하며 3라운드를 추가할 수 있다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'decision-round\input\brief.md')
+        $workspace = Join-Path $tempRoot 'decision-round-results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $waiting = & $module {
+            param($directory)
+            $callback = {
+                param($step)
+                $result = New-DuoForgeFakeStageResult -Step $step
+                if ([string]$step.stage -eq 'final-validation') {
+                    $result.finalApproved = $false
+                    $result.issues = @([ordered]@{ issueKey = 'CHANGE-R02-001'; target = 'shared-final-document'; category = 'preference'; severity = 'major'; claim = '배포 전략 선택이 필요합니다.'; evidence = @(); proposal = '점진 배포를 선택하세요.'; requiresUser = $true; blockingProposal = $true })
+                    $result.openQuestions = @([ordered]@{ issueKey = 'CHANGE-R02-001'; title = '배포 전략'; question = '어떤 전략을 선택할까요?'; options = @('점진 배포', '일괄 배포'); recommendedOption = '점진 배포'; reasonNow = '배포 전에 전략을 확정해야 합니다.'; plainExplanation = '출시 범위를 한 번에 넓힐지 나눌지 정하는 문제입니다.'; codexOpinion = '점진 배포를 권고합니다.'; claudeOpinion = '점진 배포를 권고합니다.'; estimatedCost = '중간'; reversibility = 'moderate'; confidence = 'high'; impactIfDeferred = '출시 지연'; safeDefault = '점진 배포'; experimentPossible = $true })
+                }
+                $result
+            }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory
+        Assert-Equal $waiting.status 'AWAITING_USER'
+        $pending = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'decisions\pending.json') | ConvertFrom-Json -Depth 50
+        $issueId = [string]$pending.questions[0].issueKey
+        $first = Set-DuoForgeIssueAnswer -RunId $run.runId -IssueId $issueId -Choice A -ResultsRoot $workspace
+        $changed = Set-DuoForgeIssueAnswer -RunId $run.runId -IssueId $issueId -Choice B -ResultsRoot $workspace -ReplacePrevious
+        Assert-Equal $first.revision 1
+        Assert-Equal $changed.revision 2
+        $decisionAudit = & $module {
+            param($directory)
+            $records = @(Read-DuoForgeJsonLines -Path (Join-Path $directory 'decisions\user-answers.jsonl') -AllowMissing)
+            [ordered]@{ records = $records; effective = @(Get-DuoForgeEffectiveUserDecisionsInternal -Records $records) }
+        } $run.runDirectory
+        Assert-Equal @($decisionAudit.records | Where-Object { $_.action -eq 'ANSWER' }).Count 2
+        Assert-Equal @($decisionAudit.effective | Where-Object { $_.action -eq 'ANSWER' }).Count 1
+        Assert-Equal @($decisionAudit.effective | Where-Object { $_.action -eq 'ANSWER' })[0].selectedOption '일괄 배포'
+        $multipleIssueDecisions = & $module {
+            $records = @(
+                [ordered]@{ action = 'ANSWER'; issueId = 'D-001'; revision = 1; selectedOption = '첫 답변'; recordedAt = '2026-07-27T00:00:00Z' },
+                [ordered]@{ action = 'ANSWER'; issueId = 'D-002'; revision = 1; selectedOption = '둘째 쟁점 답변'; recordedAt = '2026-07-27T00:00:01Z' },
+                [ordered]@{ action = 'ANSWER'; issueId = 'D-001'; revision = 2; selectedOption = '변경된 답변'; recordedAt = '2026-07-27T00:00:02Z' }
+            )
+            @(Get-DuoForgeEffectiveUserDecisionsInternal -Records $records)
+        }
+        Assert-Equal @($multipleIssueDecisions | Where-Object { $_.action -eq 'ANSWER' }).Count 2
+        Assert-Equal @($multipleIssueDecisions | Where-Object { $_.issueId -eq 'D-001' })[0].selectedOption '변경된 답변'
+        Assert-Equal @($multipleIssueDecisions | Where-Object { $_.issueId -eq 'D-002' })[0].selectedOption '둘째 쟁점 답변'
+        $preview = Get-DuoForgeDecisionConstraintPreview -RunId $run.runId -IssueId $issueId -Text '  개인정보는   국내에만 저장한다.  ' -ResultsRoot $workspace
+        Assert-Equal $preview.normalizedConstraint '개인정보는 국내에만 저장한다.'
+        $beforeConstraintCount = @($decisionAudit.records | Where-Object { $_.action -eq 'CONSTRAINT' }).Count
+        Assert-Equal $beforeConstraintCount 0
+        $constraint = Set-DuoForgeDecisionConstraint -RunId $run.runId -IssueId $issueId -Text '개인정보는 국내에만 저장한다.' -ResultsRoot $workspace -Confirm
+        Assert-Equal $constraint.status 'PAUSED_USER'
+        $extended = Add-DuoForgeRound -RunId $run.runId -ResultsRoot $workspace
+        Assert-Equal $extended.maxRounds 3
+        Assert-True ($extended.addedSteps -gt 0)
+        $extendedGraph = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'steps.json') | ConvertFrom-Json -Depth 100
+        Assert-Equal $extendedGraph.maxRounds 3
+        Assert-True (@($extendedGraph.steps | Where-Object { $_.round -eq 3 }).Count -gt 0)
+        $resumed = & $module {
+            param($directory)
+            $callback = { param($step) New-DuoForgeFakeStageResult -Step $step }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory
+        Assert-Equal $resumed.status 'COMPLETED' ($resumed | ConvertTo-Json -Depth 20 -Compress)
+        $repeatedInvalidation = & $module {
+            param($directory)
+            $graphPath = Join-Path $directory 'steps.json'
+            $before = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $graphPath)
+            foreach ($step in @($before.steps | Where-Object { [int]$_.round -eq 3 -and [string]$_.stage -in @('synthesis', 'final-validation') })) {
+                $step.history = @([ordered]@{ invalidatedAt = '2026-07-27T00:00:00Z'; reason = 'PREVIOUS_USER_DECISION'; previousArtifactHash = 'test'; preservedPath = 'history/test' })
+            }
+            Write-DuoForgeJsonAtomic -Path $graphPath -Value $before
+            $reset = Reset-DuoForgeDecisionAffectedSteps -RunDirectory $directory -Mode 'shared-document'
+            $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $graphPath)
+            [ordered]@{
+                reset = $reset
+                affectedHistories = @($graph.steps | Where-Object { [int]$_.round -eq 3 -and [string]$_.stage -in @('synthesis', 'final-validation') } | ForEach-Object { @($_.history).Count })
+            }
+        } $run.runDirectory
+        Assert-True (@($repeatedInvalidation.affectedHistories | Where-Object { $_ -eq 2 }).Count -eq 2) '반복 무효화 이력이 두 최종 단계에 누적되지 않았습니다.'
+    }
+
+    Test-Case '대용량 문맥은 배치와 예상 커버리지를 고정하고 부족하면 부분 완료 동의를 요구한다' {
+        $largeText = "# 대용량 문서`n`n" + ('x' * 400000)
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'large-context\input\large.md') -Text $largeText
+        $workspace = Join-Path $tempRoot 'large-context-results'
+        $config = New-TestConfig -ResultsRoot $workspace
+        $config.limits.maxInputBytesPerCall = 131072
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $blocked = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config $config
+        Assert-False ([bool]$blocked.valid)
+        Assert-Equal @($blocked.errors | Where-Object { $_.code -eq 'DF-PARTIAL-CONSENT-REQUIRED' }).Count 1
+        Assert-True ([bool]$blocked.contextPlan.enabled)
+        Assert-True ([bool]$blocked.contextPlan.requiresPartialConsent)
+
+        $allowedRequest = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd -AllowPartial $true
+        $allowed = Test-DuoForgeStartRequest -Request $allowedRequest -DoctorReport (New-FakeDoctor) -Config $config
+        Assert-True ([bool]$allowed.valid) ($allowed.errors | ConvertTo-Json -Depth 20 -Compress)
+        Assert-True ($allowed.executionPlan.contextBatchCount -gt 0)
+        $run = New-DuoForgeRun -ValidationResult $allowed
+        $contextPlan = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'inputs\context-plan.json') | ConvertFrom-Json -Depth 100
+        Assert-Equal @($contextPlan.batches).Count $allowed.contextPlan.selectedBatchCount
+        Assert-Equal $contextPlan.completionStatus 'COMPLETED_PARTIAL'
+        $result = & $module {
+            param($directory)
+            $callback = { param($step) New-DuoForgeFakeStageResult -Step $step }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory
+        Assert-Equal $result.status 'COMPLETED_PARTIAL'
+        Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'final\COVERAGE.md') -PathType Leaf)
+        $coverageText = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'final\COVERAGE.md')
+        Assert-ContainsText $coverageText '전체 입력에 대한 단정적 결론이 아닙니다.'
+    }
+
+    Test-Case '누적 모델 실행 90분 상한은 다음 공급자 호출 전에 실패 폐쇄한다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'runtime-limit\input\brief.md')
+        $workspace = Join-Path $tempRoot 'runtime-limit-results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $statePath = Join-Path $run.runDirectory 'state.json'
+        $state = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json -Depth 50
+        $state.runtimeSeconds = 5400.0
+        [System.IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json -Depth 50), [System.Text.UTF8Encoding]::new($false))
+        $control = @{ calls = 0 }
+        $result = & $module {
+            param($directory, $counter)
+            $callback = { param($step) $counter.calls++; New-DuoForgeFakeStageResult -Step $step }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory $control
+        Assert-Equal $result.status 'RESUMABLE_ERROR'
+        Assert-Equal $result.code 'DF-RUN-TIME-LIMIT'
+        Assert-Equal $control.calls 0
+    }
+
+    Test-Case '완료 산출물 손상은 해당 단계와 의존 단계만 감사 보존 후 재실행한다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'artifact-recovery\input\brief.md')
+        $workspace = Join-Path $tempRoot 'artifact-recovery-results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $complete = & $module {
+            param($directory)
+            $callback = { param($step) New-DuoForgeFakeStageResult -Step $step }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory
+        Assert-Equal $complete.status 'COMPLETED'
+        $graphBefore = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'steps.json') | ConvertFrom-Json -Depth 100
+        $damaged = @($graphBefore.steps | Where-Object { $_.stepKey -eq 'r01-codex-independent-draft' })[0]
+        $unaffected = @($graphBefore.steps | Where-Object { $_.stepKey -eq 'r01-claude-independent-draft' })[0]
+        $unaffectedHash = [string]$unaffected.artifactHash
+        [System.IO.File]::WriteAllText([string]$damaged.artifactPath, '{broken-json', [System.Text.UTF8Encoding]::new($false))
+        $control = @{ steps = @() }
+        $recovered = & $module {
+            param($directory, $counter)
+            $callback = { param($step) $counter.steps = @($counter.steps) + @([string]$step.stepKey); New-DuoForgeFakeStageResult -Step $step }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory $control
+        Assert-Equal $recovered.status 'COMPLETED'
+        Assert-True ('r01-codex-independent-draft' -in @($control.steps))
+        Assert-False ('r01-claude-independent-draft' -in @($control.steps))
+        $graphAfter = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'steps.json') | ConvertFrom-Json -Depth 100
+        Assert-Equal @($graphAfter.steps | Where-Object { $_.stepKey -eq 'r01-claude-independent-draft' })[0].artifactHash $unaffectedHash
+        Assert-True ((Get-ChildItem -LiteralPath (Join-Path $run.runDirectory 'history\stages') -File).Count -gt 0)
+        $recoveredStep = @($graphAfter.steps | Where-Object { $_.stepKey -eq 'r01-codex-independent-draft' })[0]
+        [System.IO.File]::WriteAllText([string]$recoveredStep.artifactPath, '{broken-again', [System.Text.UTF8Encoding]::new($false))
+        $secondRecovery = & $module {
+            param($directory)
+            $callback = { param($step) New-DuoForgeFakeStageResult -Step $step }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory
+        Assert-Equal $secondRecovery.status 'COMPLETED'
+        $graphAfterSecondRecovery = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'steps.json') | ConvertFrom-Json -Depth 100
+        Assert-Equal @(@($graphAfterSecondRecovery.steps | Where-Object { $_.stepKey -eq 'r01-codex-independent-draft' })[0].history).Count 2
+        $events = Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ForEach-Object { $_ | ConvertFrom-Json }
+        Assert-Equal @($events | Where-Object { $_.type -eq 'COMPLETED_OUTPUT_CORRUPTION_DETECTED' }).Count 2
     }
 }
 finally {

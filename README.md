@@ -60,10 +60,16 @@ Claude CLI는 계정별 `/model` 전체 행을 기계 판독 목록으로 내보
 
 ```powershell
 .\duoforge.cmd answer --run "run-20260727-..." --issue "D-001" --choice "A"
+.\duoforge.cmd answer --run "run-20260727-..." --issue "D-001" --choice "B" --replace
+.\duoforge.cmd constraint --run "run-20260727-..." --issue "D-001" --text "개인정보는 국내에만 저장한다."
+.\duoforge.cmd constraint --run "run-20260727-..." --issue "D-001" --text "개인정보는 국내에만 저장한다." --confirm
+.\duoforge.cmd extend-round --run "run-20260727-..."
 .\duoforge.cmd resume --run "run-20260727-..." --live
 ```
 
-Critical 쟁점은 보류할 수 없다. Major 쟁점의 부분 완료 보류는 대화형 확인 또는 명시적인 `--confirm-partial`이 필요하다.
+질문 카드는 우선순위 순으로 한 번에 최대 3개만 표시한다. 답변 변경은 `--replace`로 이력을 남기며, 자유 제약은 미리보기를 확인한 뒤 `--confirm`으로 적용한다. 세 번째 라운드는 호출 상한을 먼저 검사한 뒤 `extend-round`로 추가한다. 최신 사용자 답변은 양쪽 최종 단계에 공통 제약으로 주입되고 과거 라운드의 동일 질문은 최종 병합에서 확정 처리된다. Critical 쟁점은 보류할 수 없고, Major 쟁점의 부분 완료 보류는 대화형 확인 또는 명시적인 `--confirm-partial`이 필요하다.
+
+호출당 크기를 넘는 UTF-8 입력은 고정 문맥 배치로 분할하고 예상·실제 커버리지를 `COVERAGE.md`에 기록한다. 완전한 커버리지가 불가능하면 시작 시 `--allow-partial`이 있어야 `COMPLETED_PARTIAL`로 진행한다. 누적 모델 실행 시간이 90분에 도달하면 다음 공급자 호출 전에 실패 폐쇄한다. 구조 오류는 같은 프롬프트를 반복하지 않고 전용 `FORMAT_REPAIR` 요청으로 한 번만 복구하며, 완료 산출물이 손상되면 해당 단계와 의존 단계만 감사 이력으로 보존한 뒤 재실행한다.
 
 쟁점 설명은 Codex, Claude 또는 양쪽 관점과 초급·일반·전문가 수준을 선택할 수 있다. 저장된 설명 조회는 호출하지 않으며, 새 설명은 `--live`와 대화형 `LIVE` 확인이 모두 필요하다. 실행당 설명 호출은 최대 6회다.
 
@@ -91,7 +97,7 @@ Critical 쟁점은 보류할 수 없다. Major 쟁점의 부분 완료 보류는
 .\duoforge.cmd resume --run "run-20260727-..." --live
 ```
 
-공급자별 1회 라이브 스모크와 2라운드 전체 단계 E2E는 `gpt-5.6-sol/high`와 `Opus 5(opus)/high`로 통과했다. 전체 E2E에서 13/13 단계 커밋, 구조화 출력, 금지 도구 이벤트 0건, 원본 해시 동일, 임시 원문 정리와 호출 후 구독 인증 유지를 확인했으며 자세한 근거는 [docs/STAGE0_SPIKE.md](docs/STAGE0_SPIKE.md)에 기록했다. 3A Windows 격리 후보는 쓰기는 차단했지만 범위 밖 읽기와 자식 프로세스 실행을 허용하여 안전 게이트를 통과하지 못했으며, 상세 결과는 [docs/3A_ISOLATION_SPIKE.md](docs/3A_ISOLATION_SPIKE.md)에 기록했다.
+공급자별 1회 라이브 스모크와 두 문서 모드의 2라운드 전체 단계 E2E는 `gpt-5.6-sol/high`와 `Opus 5(opus)/high`로 통과했다. 공동 문서는 13/13 단계, 독립 문서는 12/12 단계를 커밋했고, 독립 문서 실행은 사용자 결정 8건을 반영한 뒤 `COMPLETED`에 도달했다. 두 실행에서 구조화 출력, 금지 도구 이벤트 0건, 원본 해시 동일, 임시 작업물 정리와 호출 후 구독 인증 유지를 확인했으며 자세한 근거는 [docs/STAGE0_SPIKE.md](docs/STAGE0_SPIKE.md)에 기록했다. 3A Windows 격리 후보는 쓰기는 차단했지만 범위 밖 읽기와 자식 프로세스 실행을 허용하여 안전 게이트를 통과하지 못했으며, 상세 결과는 [docs/3A_ISOLATION_SPIKE.md](docs/3A_ISOLATION_SPIKE.md)에 기록했다.
 
 ## 테스트
 

@@ -29,7 +29,8 @@
         "synthesis",
         "final-validation",
         "owner-response",
-        "owned-document-revision"
+        "owned-document-revision",
+        "context-batch-analysis"
       ]
     },
     "provider": { "type": "string", "enum": ["codex", "claude"] },
@@ -104,13 +105,28 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["issueKey", "title", "question", "options", "recommendedOption"],
+        "required": [
+          "issueKey", "title", "question", "options", "recommendedOption",
+          "reasonNow", "plainExplanation", "codexOpinion", "claudeOpinion",
+          "impactIfDeferred", "estimatedCost", "reversibility", "confidence",
+          "safeDefault", "experimentPossible"
+        ],
         "properties": {
           "issueKey": { "type": "string", "minLength": 1 },
           "title": { "type": "string", "minLength": 1 },
           "question": { "type": "string", "minLength": 1 },
           "options": { "type": "array", "items": { "type": "string" }, "minItems": 2 },
-          "recommendedOption": { "type": "string", "minLength": 1 }
+          "recommendedOption": { "type": "string", "minLength": 1 },
+          "reasonNow": { "type": "string" },
+          "plainExplanation": { "type": "string" },
+          "codexOpinion": { "type": "string" },
+          "claudeOpinion": { "type": "string" },
+          "impactIfDeferred": { "type": "string" },
+          "estimatedCost": { "type": "string" },
+          "reversibility": { "type": "string", "enum": ["easy", "moderate", "hard", "unknown"] },
+          "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
+          "safeDefault": { "type": "string" },
+          "experimentPossible": { "type": "boolean" }
         }
       }
     },

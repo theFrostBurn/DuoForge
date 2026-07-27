@@ -188,6 +188,8 @@ function New-DuoForgeRunInternal {
             openIssues = @()
             blockingIssues = @()
             answeredIssues = @()
+            coverage = $null
+            runtimeSeconds = 0.0
             createdAt = $now
             updatedAt = $now
         }
@@ -208,6 +210,14 @@ function New-DuoForgeRunInternal {
             roles = New-DuoForgeSnapshotRoles -ValidationResult $ValidationResult -SnapshotRecords $snapshotRecords
         }
         Write-DuoForgeJsonAtomic -Path (Join-Path $runDirectory 'inputs\inventory.json') -Value $inventory
+        $contextPlan = New-DuoForgeContextBatchFilesInternal -RunDirectory $runDirectory -Inventory $inventory -Plan $ValidationResult.contextPlan
+        Write-DuoForgeJsonAtomic -Path (Join-Path $runDirectory 'inputs\context-plan.json') -Value $contextPlan
+        $state.coverage = [ordered]@{
+            filePercent = [double]$contextPlan.actualFileCoveragePercent
+            bytePercent = [double]$contextPlan.actualByteCoveragePercent
+            completionStatus = [string]$contextPlan.completionStatus
+        }
+        Write-DuoForgeJsonAtomic -Path (Join-Path $runDirectory 'state.json') -Value $state
 
         $manifest = [ordered]@{
             schemaVersion = 2
@@ -222,6 +232,7 @@ function New-DuoForgeRunInternal {
             maxRounds = $request.maxRounds
             firstSynthesizer = $request.firstSynthesizer
             pauseAfterRound = [bool](Get-DuoForgeObjectValue -Object $request -Name 'pauseAfterRound' -Default $false)
+            allowPartial = [bool](Get-DuoForgeObjectValue -Object $request -Name 'allowPartial' -Default $false)
             subscriptionOnly = $true
             promptTemplateVersion = 'duoforge-stage-v1'
             providers = [ordered]@{
@@ -230,6 +241,8 @@ function New-DuoForgeRunInternal {
             }
             providerSelections = ConvertTo-DuoForgeHashtable -InputObject $requestSelections
             executionPlan = $ValidationResult.executionPlan
+            contextPlan = $contextPlan
+            maxWallClockMinutes = [int](Get-DuoForgeConfig).limits.maxWallClockMinutes
             inputSnapshotHashes = @($snapshotRecords | ForEach-Object { $_.snapshotHash })
         }
         Write-DuoForgeJsonAtomic -Path (Join-Path $runDirectory 'manifest.json') -Value $manifest

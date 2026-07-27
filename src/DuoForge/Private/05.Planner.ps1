@@ -11,7 +11,9 @@ function Get-DuoForgeExecutionPlanInternal {
         [ValidateSet('alternate', 'codex', 'claude')]
         [string]$FirstSynthesizer = 'alternate',
 
-        [int]$MaxCallsPerProvider = 24
+        [int]$MaxCallsPerProvider = 24,
+
+        [ValidateRange(0, 100)][int]$ContextBatchCount = 0
     )
 
     $calls = [ordered]@{
@@ -29,6 +31,11 @@ function Get-DuoForgeExecutionPlanInternal {
     }
 
     $synthesizers = [System.Collections.Generic.List[string]]::new()
+    if ($ContextBatchCount -gt 0) {
+        foreach ($provider in @('codex', 'claude')) {
+            for ($batch = 1; $batch -le $ContextBatchCount; $batch++) { & $addCall $provider 0 'context-batch-analysis' }
+        }
+    }
     if ($Mode -eq 'shared-document') {
         foreach ($provider in @('codex', 'claude')) {
             & $addCall $provider 1 'independent-draft'
@@ -101,5 +108,6 @@ function Get-DuoForgeExecutionPlanInternal {
         synthesizers = @($synthesizers)
         withinLimits = $withinLimits
         explanationCallsExcluded = $true
+        contextBatchCount = $ContextBatchCount
     }
 }
