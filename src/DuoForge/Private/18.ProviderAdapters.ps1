@@ -48,23 +48,27 @@ function Remove-DuoForgeProviderWorkDirectory {
     }
 }
 
-function Get-DuoForgeProviderCommandSpecInternal {
+function Get-DuoForgeStructuredProviderCommandSpecInternal {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateSet('codex', 'claude')][string]$Provider,
         [Parameter(Mandatory)][string]$RunDirectory,
-        [Parameter(Mandatory)][System.Collections.IDictionary]$Step,
-        [Parameter(Mandatory)][System.Collections.IDictionary]$Prompt
+        [Parameter(Mandatory)][string]$OperationKey,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Prompt,
+        [Parameter(Mandatory)]$Schema,
+        [Parameter(Mandatory)][string]$SchemaFileName
     )
 
+    if ($SchemaFileName -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]+\.json$') {
+        throw (New-DuoForgeException -Code 'DF-PROVIDER-SCHEMA-NAME' -Message '구조화 출력 스키마 파일명이 안전하지 않습니다.')
+    }
     $selections = Get-DuoForgeRunProviderSelectionsInternal -RunDirectory $RunDirectory
     $selection = Get-DuoForgeObjectValue -Object $selections -Name $Provider
     $model = [string](Get-DuoForgeObjectValue -Object $selection -Name 'model')
     $reasoningEffort = [string](Get-DuoForgeObjectValue -Object $selection -Name 'reasoningEffort')
-    $workDirectory = New-DuoForgeProviderWorkDirectory -RunDirectory $RunDirectory -StepKey ([string]$Step.stepKey)
-    $schema = Read-DuoForgeJson -Path (Get-DuoForgeStageSchemaPath)
-    $schemaPath = Join-Path $workDirectory 'stage-result.schema.json'
-    Write-DuoForgeJsonAtomic -Path $schemaPath -Value $schema
+    $workDirectory = New-DuoForgeProviderWorkDirectory -RunDirectory $RunDirectory -StepKey $OperationKey
+    $schemaPath = Join-Path $workDirectory $SchemaFileName
+    Write-DuoForgeJsonAtomic -Path $schemaPath -Value $Schema
 
     if ($Provider -eq 'codex') {
         $lastMessagePath = Join-Path $workDirectory 'last-message.json'
@@ -95,7 +99,7 @@ function Get-DuoForgeProviderCommandSpecInternal {
         }
     }
 
-    $schemaJson = $schema | ConvertTo-Json -Depth 100 -Compress
+    $schemaJson = $Schema | ConvertTo-Json -Depth 100 -Compress
     return [ordered]@{
         provider = $Provider
         commandName = 'claude'
@@ -118,6 +122,25 @@ function Get-DuoForgeProviderCommandSpecInternal {
         prompt = [string]$Prompt.text
         promptHash = [string]$Prompt.sha256
     }
+}
+
+function Get-DuoForgeProviderCommandSpecInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('codex', 'claude')][string]$Provider,
+        [Parameter(Mandatory)][string]$RunDirectory,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Step,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Prompt
+    )
+
+    $schema = Read-DuoForgeJson -Path (Get-DuoForgeStageSchemaPath)
+    return Get-DuoForgeStructuredProviderCommandSpecInternal `
+        -Provider $Provider `
+        -RunDirectory $RunDirectory `
+        -OperationKey ([string]$Step.stepKey) `
+        -Prompt $Prompt `
+        -Schema $schema `
+        -SchemaFileName 'stage-result.schema.json'
 }
 
 function Assert-DuoForgeCodexEventStreamSafe {
@@ -159,6 +182,53 @@ function ConvertFrom-DuoForgeClaudeEnvelope {
     return ConvertFrom-DuoForgeProviderResult -RawJson $raw -ExpectedStage $ExpectedStage -ExpectedProvider 'claude'
 }
 
+function Get-DuoForgeProviderFailureClassificationInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('codex', 'claude')][string]$Provider,
+        [Parameter(Mandatory)]$ProcessResult
+    )
+
+    $started = [bool](Get-DuoForgeObjectValue -Object $ProcessResult -Name 'started' -Default $false)
+    $timedOut = [bool](Get-DuoForgeObjectValue -Object $ProcessResult -Name 'timedOut' -Default $false)
+    $exitCodeValue = Get-DuoForgeObjectValue -Object $ProcessResult -Name 'exitCode'
+    $exitCode = if ($null -eq $exitCodeValue) { $null } else { [int]$exitCodeValue }
+    $errorCategory = [string](Get-DuoForgeObjectValue -Object $ProcessResult -Name 'errorCategory')
+    $diagnosticText = ([string](Get-DuoForgeObjectValue -Object $ProcessResult -Name 'stdout')) + [Environment]::NewLine + ([string](Get-DuoForgeObjectValue -Object $ProcessResult -Name 'stderr'))
+
+    if (-not $started -and $errorCategory -eq 'command-not-found') {
+        return [ordered]@{ category = 'command-not-found'; code = 'DF-PROVIDER-NOT-FOUND'; targetStatus = 'BLOCKED_PREFLIGHT'; retryable = $false; message = "$Provider CLI를 찾을 수 없습니다."; exitCode = $null }
+    }
+    if (-not $started) {
+        return [ordered]@{ category = 'process-start'; code = 'DF-PROVIDER-START'; targetStatus = 'RESUMABLE_ERROR'; retryable = $false; message = "$Provider CLI 프로세스를 시작하지 못했습니다."; exitCode = $null }
+    }
+    if ($timedOut) {
+        return [ordered]@{ category = 'timeout'; code = 'DF-PROVIDER-TIMEOUT'; targetStatus = 'RESUMABLE_ERROR'; retryable = $true; message = "$Provider CLI 호출 시간이 초과되었습니다."; exitCode = $null }
+    }
+    if ($diagnosticText -match "(?i)(usage\s+limit|quota|insufficient_quota|out\s+of\s+credits|plan\s+(?:usage\s+)?limit|limit\s+reached\s+for\s+your\s+plan|you(?:'|’)ve\s+hit\s+your\s+limit)") {
+        return [ordered]@{ category = 'subscription-quota'; code = 'DF-PROVIDER-QUOTA'; targetStatus = 'PAUSED_QUOTA'; retryable = $false; message = "$Provider 구독 사용 한도에 도달했습니다. API 과금 방식으로 자동 전환하지 않습니다."; exitCode = $exitCode }
+    }
+    if ($diagnosticText -match '(?i)(rate\s+limit|too\s+many\s+requests|temporarily\s+throttled)') {
+        return [ordered]@{ category = 'rate-limit'; code = 'DF-PROVIDER-RATE-LIMIT'; targetStatus = 'RESUMABLE_ERROR'; retryable = $true; message = "$Provider 요청 속도 제한이 감지되었습니다."; exitCode = $exitCode }
+    }
+    if ($diagnosticText -match '(?i)(not\s+logged\s+in|login\s+required|please\s+(?:log\s*in|login)|unauthorized|authentication\s+failed|invalid\s+(?:credential|token)|expired\s+(?:token|session))') {
+        return [ordered]@{ category = 'authentication'; code = 'DF-PROVIDER-AUTH'; targetStatus = 'BLOCKED_PREFLIGHT'; retryable = $false; message = "$Provider 구독 인증을 다시 확인해야 합니다."; exitCode = $exitCode }
+    }
+    return [ordered]@{ category = 'provider-process'; code = 'DF-PROVIDER-PROCESS'; targetStatus = 'RESUMABLE_ERROR'; retryable = $false; message = "$Provider CLI가 정상 완료되지 않았습니다. 종료 코드: $exitCode"; exitCode = $exitCode }
+}
+
+function New-DuoForgeProviderFailureExceptionInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Classification)
+
+    $exception = New-DuoForgeException -Code ([string]$Classification.code) -Message ([string]$Classification.message)
+    $exception.Data['DuoForgeFailureCategory'] = [string]$Classification.category
+    $exception.Data['DuoForgeFailureStatus'] = [string]$Classification.targetStatus
+    $exception.Data['DuoForgeRetryable'] = [bool]$Classification.retryable
+    if ($null -ne $Classification.exitCode) { $exception.Data['DuoForgeExitCode'] = [int]$Classification.exitCode }
+    return $exception
+}
+
 function Invoke-DuoForgeLiveProviderStage {
     [CmdletBinding()]
     param(
@@ -195,7 +265,8 @@ function Invoke-DuoForgeLiveProviderStage {
             -EnvironmentAllowList (Get-DuoForgeProviderEnvironmentAllowList)
 
         if (-not $processResult.started -or $processResult.timedOut -or [int]$processResult.exitCode -ne 0) {
-            throw (New-DuoForgeException -Code 'DF-PROVIDER-PROCESS' -Message "공급자 프로세스가 정상 완료되지 않았습니다: $($Step.provider)")
+            $classification = Get-DuoForgeProviderFailureClassificationInternal -Provider ([string]$Step.provider) -ProcessResult $processResult
+            throw (New-DuoForgeProviderFailureExceptionInternal -Classification $classification)
         }
 
         if ([string]$Step.provider -eq 'codex') {

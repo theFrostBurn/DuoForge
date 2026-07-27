@@ -1,6 +1,6 @@
 @{
     RootModule = 'DuoForge.psm1'
-    ModuleVersion = '0.3.0'
+    ModuleVersion = '0.4.0'
     GUID = '44d683b2-48c3-40cb-a935-c5f3ff5e3036'
     Author = 'DuoForge'
     CompanyName = 'DuoForge'
@@ -17,6 +17,10 @@
         'New-DuoForgeRun',
         'Get-DuoForgeRun',
         'Get-DuoForgeRuns',
+        'Get-DuoForgeIssueExplanations',
+        'Invoke-DuoForgeIssueExplanation',
+        'Request-DuoForgePause',
+        'Add-DuoForgeIssueEvidence',
         'Set-DuoForgeIssueAnswer',
         'Suspend-DuoForgeIssue',
         'Resolve-DuoForgePath',

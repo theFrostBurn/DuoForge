@@ -169,7 +169,7 @@ function New-DuoForgeRunInternal {
 
     return Invoke-WithDuoForgeRunLock -RunDirectory $runDirectory -ScriptBlock {
         foreach ($relativeDirectory in @(
-            'inputs\snapshots', 'inputs\context-packs', 'rounds', 'decisions', 'logs', 'final'
+            'inputs\snapshots', 'inputs\context-packs', 'rounds', 'decisions', 'control', 'logs', 'final'
         )) {
             [System.IO.Directory]::CreateDirectory((Join-Path $runDirectory $relativeDirectory)) | Out-Null
         }
@@ -221,6 +221,7 @@ function New-DuoForgeRunInternal {
             documentType = $request.documentType
             maxRounds = $request.maxRounds
             firstSynthesizer = $request.firstSynthesizer
+            pauseAfterRound = [bool](Get-DuoForgeObjectValue -Object $request -Name 'pauseAfterRound' -Default $false)
             subscriptionOnly = $true
             promptTemplateVersion = 'duoforge-stage-v1'
             providers = [ordered]@{

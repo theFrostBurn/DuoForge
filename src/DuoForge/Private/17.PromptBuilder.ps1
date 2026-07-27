@@ -89,6 +89,7 @@ function New-DuoForgeStagePrompt {
     $manifest = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json')
     $inventory = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'inputs\inventory.json'))
     $userDecisions = @(Read-DuoForgeJsonLines -Path (Join-Path $RunDirectory 'decisions\user-answers.jsonl') -AllowMissing)
+    $userEvidence = @(Read-DuoForgeJsonLines -Path (Join-Path $RunDirectory 'decisions\user-evidence.jsonl') -AllowMissing)
     $payload = [ordered]@{
         contractVersion = 'duoforge-stage-v1'
         mode = [string]$manifest.mode
@@ -113,6 +114,17 @@ function New-DuoForgeStagePrompt {
                 recordedAt = [string]$_.recordedAt
             }
         })
+        userEvidence = @($userEvidence | ForEach-Object {
+            [ordered]@{
+                evidenceId = [string]$_.evidenceId
+                issueId = [string]$_.issueId
+                issueFingerprint = [string]$_.issueFingerprint
+                externalKeys = @($_.externalKeys)
+                snapshotName = [string]$_.snapshotName
+                snapshotHash = [string]$_.snapshotHash
+                addedAt = [string]$_.addedAt
+            }
+        })
     }
     $payloadJson = $payload | ConvertTo-Json -Depth 100 -Compress
     $prompt = @"
@@ -127,6 +139,7 @@ function New-DuoForgeStagePrompt {
 - 해당 없는 document는 null, finalApproved는 null, 해당 없는 배열은 []로 반환하세요.
 - 쟁점 issueKey는 공급자와 라운드가 포함된 '$($Step.provider.ToUpperInvariant())-R$('{0:D2}' -f [int]$Step.round)-001' 형식으로 고유하게 부여하고, 근거 없는 주장은 만들지 마세요.
 - userDecisions가 있으면 이를 구속력 있는 사용자 결정으로 반영하세요. 안전하거나 논리적으로 불가능하면 조용히 무시하지 말고 새 Critical 쟁점을 제기하세요.
+- userEvidence가 있으면 연결된 근거 스냅샷을 해당 쟁점의 새 근거로 평가하고, issueId 또는 externalKeys 중 하나를 issueResponses.issueKey에 사용해 충분성 여부와 반영 결과를 기록하세요.
 
 <DUOFORGE_UNTRUSTED_DATA_JSON>
 $payloadJson

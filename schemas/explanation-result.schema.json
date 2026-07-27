@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://duoforge.local/schemas/explanation-result.schema.json",
+  "title": "DuoForge issue explanation result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "provider",
+    "issueId",
+    "level",
+    "summary",
+    "explanation",
+    "existingEvidence",
+    "newClaims",
+    "examples",
+    "tradeoffs",
+    "suggestedExperiment"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "provider": { "type": "string", "enum": ["codex", "claude"] },
+    "issueId": { "type": "string", "pattern": "^D-[0-9]{3,}$" },
+    "level": { "type": "string", "enum": ["beginner", "general", "expert"] },
+    "summary": { "type": "string", "minLength": 1 },
+    "explanation": { "type": "string", "minLength": 1 },
+    "existingEvidence": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "newClaims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claim", "status", "basis"],
+        "properties": {
+          "claim": { "type": "string", "minLength": 1 },
+          "status": {
+            "type": "string",
+            "enum": ["SUPPORTED_BY_INPUT", "UNVERIFIED_ASSUMPTION"]
+          },
+          "basis": { "type": "string" }
+        }
+      }
+    },
+    "examples": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "tradeoffs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["option", "benefits", "costs", "risks", "reversibility"],
+        "properties": {
+          "option": { "type": "string", "minLength": 1 },
+          "benefits": { "type": "array", "items": { "type": "string" } },
+          "costs": { "type": "array", "items": { "type": "string" } },
+          "risks": { "type": "array", "items": { "type": "string" } },
+          "reversibility": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "suggestedExperiment": { "type": ["string", "null"] }
+  }
+}

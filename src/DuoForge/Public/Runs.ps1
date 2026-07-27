@@ -16,6 +16,7 @@ function New-DuoForgeStartRequest {
         [ValidateRange(2, 3)][int]$MaxRounds = 2,
         [string]$Workspace,
         [ValidateSet('alternate', 'codex', 'claude')][string]$FirstSynthesizer = 'alternate',
+        [bool]$PauseAfterRound = $false,
         [string]$Name
     )
     return New-DuoForgeStartRequestInternal @PSBoundParameters

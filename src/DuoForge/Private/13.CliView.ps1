@@ -7,12 +7,15 @@ DuoForge
 사용법:
   duoforge
   duoforge doctor [--json]
-  duoforge start shared-document --brief <파일> --codex-model <모델> --codex-effort <단계> --claude-model <모델> --claude-effort <단계> [--plan-only]
-  duoforge start dual-document --codex <파일> --claude <파일> --codex-model <모델> --codex-effort <단계> --claude-model <모델> --claude-effort <단계> [--plan-only]
+  duoforge start shared-document --brief <파일> --codex-model <모델> --codex-effort <단계> --claude-model <모델> --claude-effort <단계> [--pause-after-round] [--plan-only]
+  duoforge start dual-document --codex <파일> --claude <파일> --codex-model <모델> --codex-effort <단계> --claude-model <모델> --claude-effort <단계> [--pause-after-round] [--plan-only]
   duoforge status --run <실행 ID> [--workspace <폴더>] [--json]
   duoforge issues --run <실행 ID> [--workspace <폴더>] [--json]
+  duoforge explain --run <실행 ID> --issue <쟁점 ID> [--provider codex|claude|both] [--level beginner|general|expert] [--focus general|evidence|examples|tradeoffs|experiment] [--live]
+  duoforge evidence --run <실행 ID> --issue <쟁점 ID> --file <Markdown 파일> [--workspace <폴더>]
   duoforge answer --run <실행 ID> --issue <쟁점 ID> --choice <A|B> [--workspace <폴더>]
   duoforge defer --run <실행 ID> --issue <쟁점 ID> [--workspace <폴더>] [--confirm-partial]
+  duoforge pause --run <실행 ID> [--workspace <폴더>]
   duoforge resume --run <실행 ID> [--workspace <폴더>] [--live]
   duoforge list [--workspace <폴더>] [--json]
 
@@ -74,6 +77,7 @@ function Write-DuoForgeExecutionPlan {
     Write-Host '실행 전 확인'
     Write-Host ('모드: {0}' -f $Validation.request.mode)
     Write-Host ('라운드: {0}' -f $Validation.request.maxRounds)
+    Write-Host ('라운드마다 일시정지: {0}' -f $(if ([bool](Get-DuoForgeObjectValue -Object $Validation.request -Name 'pauseAfterRound' -Default $false)) { '예' } else { '아니요' }))
     Write-Host ('결과 루트: {0}' -f $Validation.resultsRoot)
     Write-DuoForgeProviderSelectionSummary -ProviderSelections $Validation.request.providerSelections
     if ($Validation.request.mode -eq 'shared-document') {
@@ -102,6 +106,40 @@ function Write-DuoForgeIssueList {
         return
     }
     $Issues | Select-Object issueId, severity, blocking, resolutionStatus, claim | Format-Table -Wrap -AutoSize | Out-Host
+}
+
+function Write-DuoForgeExplanationRecords {
+    [CmdletBinding()]
+    param([AllowEmptyCollection()][Parameter(Mandatory)][object[]]$Records)
+
+    if ($Records.Count -eq 0) {
+        Write-Host '저장된 설명이 없습니다.'
+        return
+    }
+    foreach ($record in $Records) {
+        $result = $record.result
+        Write-Host ''
+        Write-Host ('{0} | {1} | {2} | {3}' -f $record.issueId, $record.provider, $record.level, $record.focus) -ForegroundColor Cyan
+        Write-Host ([string]$result.summary)
+        Write-Host ([string]$result.explanation)
+        if (@($result.existingEvidence).Count -gt 0) {
+            Write-Host '기존 입력 근거:'
+            foreach ($item in @($result.existingEvidence)) { Write-Host ("- $item") }
+        }
+        if (@($result.newClaims).Count -gt 0) {
+            Write-Host '새 주장 또는 가정:'
+            foreach ($item in @($result.newClaims)) { Write-Host ('- [{0}] {1} — {2}' -f $item.status, $item.claim, $item.basis) }
+        }
+        if (@($result.tradeoffs).Count -gt 0) {
+            Write-Host '선택지 비교:'
+            foreach ($item in @($result.tradeoffs)) {
+                Write-Host ('- {0}: 장점={1}; 비용={2}; 위험={3}; 되돌리기={4}' -f $item.option, (@($item.benefits) -join ', '), (@($item.costs) -join ', '), (@($item.risks) -join ', '), $item.reversibility)
+            }
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$result.suggestedExperiment)) {
+            Write-Host ('검증 실험 제안: {0}' -f $result.suggestedExperiment)
+        }
+    }
 }
 
 function Write-DuoForgeValidationErrors {

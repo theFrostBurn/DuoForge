@@ -150,6 +150,11 @@ function Invoke-DuoForgeStageEngine {
         $graph = Initialize-DuoForgeStageGraph -RunDirectory $RunDirectory
         $stepsPath = Join-Path $RunDirectory 'steps.json'
         $invoked = 0
+        $pendingPause = Get-DuoForgePendingPauseRequestInternal -RunDirectory $RunDirectory
+        if ($null -ne $pendingPause) {
+            $state = Set-DuoForgePauseCheckpointInternal -RunDirectory $RunDirectory -Reason 'user-request' -Checkpoint ([string]$state.lastCompletedStage) -Round ([int]$state.round) -PauseRequest $pendingPause
+            return [ordered]@{ status = $state.status; invoked = 0; pausedReason = 'user-request'; checkpoint = [string]$state.lastCompletedStage }
+        }
         $state = Set-DuoForgeRunStateInternal -RunDirectory $RunDirectory -Status 'RUNNING'
 
         while ($true) {
@@ -185,14 +190,44 @@ function Invoke-DuoForgeStageEngine {
                     $invoked++
                     Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph
                     $state = Set-DuoForgeRunStateInternal -RunDirectory $RunDirectory -Status 'RUNNING' -LastCompletedStage $step.stepKey -Round ([int]$step.round)
+                    $pendingPause = Get-DuoForgePendingPauseRequestInternal -RunDirectory $RunDirectory
+                    if ($null -ne $pendingPause) {
+                        $state = Set-DuoForgePauseCheckpointInternal -RunDirectory $RunDirectory -Reason 'user-request' -Checkpoint ([string]$step.stepKey) -Round ([int]$step.round) -PauseRequest $pendingPause
+                        return [ordered]@{ status = $state.status; invoked = $invoked; pausedReason = 'user-request'; checkpoint = [string]$step.stepKey }
+                    }
+                    if (Test-DuoForgePauseAfterRoundBoundaryInternal -RunDirectory $RunDirectory -Graph $graph -Step $step) {
+                        $state = Set-DuoForgePauseCheckpointInternal -RunDirectory $RunDirectory -Reason 'pause-after-round' -Checkpoint ([string]$step.stepKey) -Round ([int]$step.round)
+                        return [ordered]@{ status = $state.status; invoked = $invoked; pausedReason = 'pause-after-round'; checkpoint = [string]$step.stepKey; round = [int]$step.round }
+                    }
                 }
                 catch {
                     $step.status = 'FAILED'
                     $errorCode = if ($_.Exception.Data.Contains('DuoForgeCode')) { [string]$_.Exception.Data['DuoForgeCode'] } else { 'DF-STAGE-UNEXPECTED' }
-                    $step.lastError = [ordered]@{ category = 'provider-error'; code = $errorCode; exceptionType = $_.Exception.GetType().Name; commandName = [string]$_.CategoryInfo.TargetName; at = Get-DuoForgeUtcNow }
+                    $failureCategory = if ($_.Exception.Data.Contains('DuoForgeFailureCategory')) { [string]$_.Exception.Data['DuoForgeFailureCategory'] } else { 'provider-error' }
+                    $targetStatus = if ($_.Exception.Data.Contains('DuoForgeFailureStatus')) { [string]$_.Exception.Data['DuoForgeFailureStatus'] } else { 'RESUMABLE_ERROR' }
+                    $retryable = if ($_.Exception.Data.Contains('DuoForgeRetryable')) {
+                        [bool]$_.Exception.Data['DuoForgeRetryable']
+                    }
+                    else {
+                        $errorCode -in @('DF-STAGE-SCHEMA', 'DF-PROVIDER-JSON', 'DF-CLAUDE-ENVELOPE', 'DF-CLAUDE-RESULT', 'DF-CLAUDE-STRUCTURED-OUTPUT', 'DF-CODEX-LAST-MESSAGE')
+                    }
+                    $step.lastError = [ordered]@{
+                        category = $failureCategory
+                        code = $errorCode
+                        exceptionType = $_.Exception.GetType().Name
+                        commandName = [string]$_.CategoryInfo.TargetName
+                        retryable = $retryable
+                        attempt = [int]$step.attemptCount
+                        at = Get-DuoForgeUtcNow
+                    }
                     Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph
-                    $state = Set-DuoForgeRunStateInternal -RunDirectory $RunDirectory -Status 'RESUMABLE_ERROR' -Round ([int]$step.round)
-                    return [ordered]@{ status = $state.status; invoked = $invoked; failedStep = $step.stepKey }
+                    if ($retryable -and [int]$step.attemptCount -lt 2) {
+                        Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'STAGE_RETRY_SCHEDULED' -Status 'RUNNING' -Data ([ordered]@{ stepKey = $step.stepKey; provider = $step.provider; failedAttempt = $step.attemptCount; code = $errorCode; category = $failureCategory })
+                        continue
+                    }
+                    $state = Set-DuoForgeRunStateInternal -RunDirectory $RunDirectory -Status $targetStatus -Round ([int]$step.round)
+                    Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'STAGE_FAILED' -Status $targetStatus -Data ([ordered]@{ stepKey = $step.stepKey; provider = $step.provider; attempt = $step.attemptCount; code = $errorCode; category = $failureCategory; retryable = $retryable })
+                    return [ordered]@{ status = $state.status; invoked = $invoked; failedStep = $step.stepKey; code = $errorCode; category = $failureCategory; retryable = $retryable }
                 }
             }
         }
@@ -208,15 +243,20 @@ function Invoke-DuoForgeStageEngine {
             Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'FINAL_ARTIFACTS_RENDERED' -Status 'RUNNING' -Data ([ordered]@{ files = @($rendered.files | ForEach-Object { [System.IO.Path]::GetFileName($_) }) })
         }
         catch {
+            $rendererCode = if ($_.Exception.Data.Contains('DuoForgeCode')) { [string]$_.Exception.Data['DuoForgeCode'] } else { 'DF-FINAL-RENDERER' }
             $state = Set-DuoForgeRunStateInternal -RunDirectory $RunDirectory -Status 'RESUMABLE_ERROR'
-            Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'FINAL_ARTIFACTS_FAILED' -Status 'RESUMABLE_ERROR' -Data ([ordered]@{ category = 'renderer-error' })
-            return [ordered]@{ status = $state.status; invoked = $invoked; failedStep = 'final-renderer' }
+            Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'FINAL_ARTIFACTS_FAILED' -Status 'RESUMABLE_ERROR' -Data ([ordered]@{ category = 'renderer-error'; code = $rendererCode; exceptionType = $_.Exception.GetType().Name })
+            return [ordered]@{ status = $state.status; invoked = $invoked; failedStep = 'final-renderer'; code = $rendererCode }
         }
 
         $ledger = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'issues.json')
         $completion = Test-DuoForgeCompletionAllowedInternal -Issues @($ledger.issues)
         if (-not $completion.allowed) {
-            $state = Set-DuoForgeRunStateInternal -RunDirectory $RunDirectory -Status 'AWAITING_USER' -LastCompletedStage $state.lastCompletedStage
+            $awaitingEvidence = @($ledger.issues | Where-Object {
+                [bool]$_.blocking -and [string]$_.resolutionStatus -eq 'AWAITING_EVIDENCE'
+            }).Count -gt 0
+            $waitingStatus = if ($awaitingEvidence) { 'AWAITING_EVIDENCE' } else { 'AWAITING_USER' }
+            $state = Set-DuoForgeRunStateInternal -RunDirectory $RunDirectory -Status $waitingStatus -LastCompletedStage $state.lastCompletedStage
         }
         else {
             $state = Set-DuoForgeRunStateInternal -RunDirectory $RunDirectory -Status $completion.status -LastCompletedStage $state.lastCompletedStage

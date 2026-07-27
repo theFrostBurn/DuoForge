@@ -32,14 +32,71 @@ function Get-DuoForgeIssueFingerprint {
     return Get-DuoForgeSha256 -Bytes ([System.Text.UTF8Encoding]::new($false).GetBytes($normalized))
 }
 
+function Apply-DuoForgeUserEvidenceRecordsInternal {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()][Parameter(Mandatory)][object[]]$Issues,
+        [AllowEmptyCollection()][Parameter(Mandatory)][object[]]$EvidenceRecords
+    )
+
+    foreach ($record in $EvidenceRecords) {
+        $issue = @($Issues | Where-Object {
+            (-not [string]::IsNullOrWhiteSpace([string]$record.issueFingerprint) -and [string]$_.fingerprint -eq [string]$record.issueFingerprint) -or
+            [string]$_.issueId -eq [string]$record.issueId
+        } | Select-Object -First 1)
+        if ($issue.Count -ne 1) { continue }
+        $issue = $issue[0]
+        $evidenceId = [string]$record.evidenceId
+        if ($evidenceId -notin @($issue.evidence | ForEach-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'evidenceId' -Default '') })) {
+            $issue.evidence = @($issue.evidence) + @([ordered]@{
+                source = [string]$record.snapshotName
+                location = 'entire-document'
+                excerptHash = [string]$record.snapshotHash
+                addedBy = 'user'
+                evidenceId = $evidenceId
+            })
+        }
+        if ($evidenceId -notin @($issue.history | ForEach-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'evidenceId' -Default '') })) {
+            $issue.history = @($issue.history) + @([ordered]@{
+                at = [string]$record.addedAt
+                event = 'USER_EVIDENCE_ADDED'
+                actor = 'user'
+                status = 'OPEN'
+                evidenceId = $evidenceId
+                snapshotName = [string]$record.snapshotName
+            })
+        }
+        if ([string]$issue.resolutionStatus -eq 'AWAITING_EVIDENCE') {
+            $issue.resolutionStatus = 'OPEN'
+        }
+    }
+    return @($Issues)
+}
+
 function Merge-DuoForgeStageIssues {
     [CmdletBinding()]
-    param([AllowEmptyCollection()][Parameter(Mandatory)][object[]]$StageResults)
+    param(
+        [AllowEmptyCollection()][Parameter(Mandatory)][object[]]$StageResults,
+        [AllowEmptyCollection()][object[]]$UserEvidenceRecords = @(),
+        [AllowEmptyCollection()][object[]]$PreservedIssues = @()
+    )
 
     $issues = [System.Collections.Generic.List[object]]::new()
     $byFingerprint = @{}
     $byExternalKey = @{}
     $questions = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($preserved in @($PreservedIssues | Where-Object { $null -ne $_ })) {
+        $issue = ConvertTo-DuoForgeHashtable -InputObject $preserved
+        $fingerprint = [string]$issue.fingerprint
+        if ([string]::IsNullOrWhiteSpace($fingerprint) -or $byFingerprint.ContainsKey($fingerprint)) { continue }
+        $issues.Add($issue)
+        $byFingerprint[$fingerprint] = $issue
+        $byExternalKey[[string]$issue.issueId] = $issue
+        foreach ($externalKey in @($issue.externalKeys)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$externalKey)) { $byExternalKey[[string]$externalKey] = $issue }
+        }
+    }
 
     foreach ($stageRecord in $StageResults) {
         $stageResult = $stageRecord.result
@@ -112,7 +169,7 @@ function Merge-DuoForgeStageIssues {
             }
             $issue.ownerDecisions = @($issue.ownerDecisions) + @($decision)
             if ([string]$issue.severity -eq 'critical') {
-                $issue.resolutionStatus = 'AWAITING_USER'
+                $issue.resolutionStatus = if ([string]$response.disposition -eq 'NEEDS_EVIDENCE') { 'AWAITING_EVIDENCE' } else { 'AWAITING_USER' }
             }
             else {
                 switch ([string]$response.disposition) {
@@ -147,6 +204,7 @@ function Merge-DuoForgeStageIssues {
             $key = [string]$question.issueKey
             if ($byExternalKey.ContainsKey($key)) {
                 $issue = $byExternalKey[$key]
+                if ([string]$issue.resolutionStatus -in @('RESOLVED', 'SUPERSEDED', 'AWAITING_EVIDENCE')) { continue }
                 $questions.Add([ordered]@{
                     sourceStep = [string]$stageRecord.stepKey
                     provider = [string]$stageRecord.provider
@@ -163,7 +221,17 @@ function Merge-DuoForgeStageIssues {
         }
     }
 
+    if ($null -ne $UserEvidenceRecords -and @($UserEvidenceRecords | Where-Object { $null -ne $_ }).Count -gt 0) {
+        $issues = [System.Collections.Generic.List[object]]::new(@(Apply-DuoForgeUserEvidenceRecordsInternal -Issues @($issues) -EvidenceRecords @($UserEvidenceRecords)))
+    }
+    $activeIssueIds = @($issues | Where-Object { $_.resolutionStatus -notin @('RESOLVED', 'SUPERSEDED', 'AWAITING_EVIDENCE') } | ForEach-Object { [string]$_.issueId })
+    $questions = [System.Collections.Generic.List[object]]::new(@($questions | Where-Object { [string]$_.issueKey -in $activeIssueIds }))
+
     foreach ($issue in @($issues | Where-Object { $_.blocking -and $_.resolutionStatus -notin @('RESOLVED', 'SUPERSEDED') })) {
+        if ([string]$issue.resolutionStatus -eq 'AWAITING_EVIDENCE') {
+            $issue.requiresUser = $true
+            continue
+        }
         if (@($questions | Where-Object { $_.issueKey -eq $issue.issueId }).Count -gt 0) { continue }
         $questions.Add([ordered]@{
             sourceStep = @($issue.sourceSteps | Select-Object -Last 1)[0]
@@ -235,7 +303,10 @@ function New-DuoForgeDecisionsMarkdown {
         $lines.Add("- 심각도: $($issue.severity)")
         $lines.Add("- 상태: $($issue.resolutionStatus)")
         foreach ($decision in @($issue.ownerDecisions)) {
-            $lines.Add("- $($decision.actor): $($decision.disposition) — $($decision.rationale)")
+            $decisionActor = [string](Get-DuoForgeObjectValue -Object $decision -Name 'actor' -Default 'unknown')
+            $decisionDisposition = [string](Get-DuoForgeObjectValue -Object $decision -Name 'disposition' -Default 'UNKNOWN')
+            $decisionRationale = [string](Get-DuoForgeObjectValue -Object $decision -Name 'rationale' -Default '')
+            $lines.Add("- ${decisionActor}: $decisionDisposition — $decisionRationale")
         }
         $lines.Add('')
     }
@@ -282,7 +353,13 @@ function Render-DuoForgeFinalArtifacts {
 
     $manifest = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json')
     $stageResults = @(Get-DuoForgeCommittedStageResults -RunDirectory $RunDirectory -Graph $Graph)
-    $merged = Merge-DuoForgeStageIssues -StageResults $stageResults
+    $userEvidencePath = Join-Path $RunDirectory 'decisions\user-evidence.jsonl'
+    $userEvidence = @(Read-DuoForgeJsonLines -Path $userEvidencePath -AllowMissing)
+    $existingLedgerPath = Join-Path $RunDirectory 'issues.json'
+    $existingLedger = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $existingLedgerPath)
+    $evidenceIssueIds = @($userEvidence | ForEach-Object { [string]$_.issueId })
+    $preservedIssues = @($existingLedger.issues | Where-Object { [string]$_.issueId -in $evidenceIssueIds })
+    $merged = Merge-DuoForgeStageIssues -StageResults $stageResults -UserEvidenceRecords $userEvidence -PreservedIssues $preservedIssues
     Write-DuoForgeJsonAtomic -Path (Join-Path $RunDirectory 'issues.json') -Value ([ordered]@{ schemaVersion = 1; issues = @($merged.issues) })
     Write-DuoForgeJsonAtomic -Path (Join-Path $RunDirectory 'decisions\pending.json') -Value ([ordered]@{ schemaVersion = 1; questions = @($merged.questions) })
 
@@ -321,7 +398,12 @@ function Render-DuoForgeFinalArtifacts {
         $files.Add($comparisonPath)
         $adoptionLines = @('# 채택 기록', '') + @($merged.issues | ForEach-Object {
             $issue = $_
-            @($issue.adoptions | ForEach-Object { "- $($issue.issueId) / $($_.actor): $($_.disposition) — $($_.rationale)" })
+            @($issue.adoptions | ForEach-Object {
+                $adoptionActor = [string](Get-DuoForgeObjectValue -Object $_ -Name 'actor' -Default 'unknown')
+                $adoptionDisposition = [string](Get-DuoForgeObjectValue -Object $_ -Name 'disposition' -Default 'UNKNOWN')
+                $adoptionRationale = [string](Get-DuoForgeObjectValue -Object $_ -Name 'rationale' -Default '')
+                "- $($issue.issueId) / ${adoptionActor}: $adoptionDisposition — $adoptionRationale"
+            })
         })
         if ($adoptionLines.Count -eq 2) { $adoptionLines += '기록된 채택 항목이 없습니다.' }
         $adoptionPath = Join-Path $finalDirectory 'adoption-log.md'

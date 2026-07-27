@@ -22,6 +22,7 @@ function New-DuoForgeStartRequestInternal {
         [string]$Workspace,
         [ValidateSet('alternate', 'codex', 'claude')]
         [string]$FirstSynthesizer = 'alternate',
+        [bool]$PauseAfterRound = $false,
         [string]$Name
     )
 
@@ -31,6 +32,7 @@ function New-DuoForgeStartRequestInternal {
         documentType = $DocumentType
         maxRounds = $MaxRounds
         firstSynthesizer = $FirstSynthesizer
+        pauseAfterRound = $PauseAfterRound
         workspace = $Workspace
         providerSelections = [ordered]@{
             codex = [ordered]@{
