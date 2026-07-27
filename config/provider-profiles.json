@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "verifiedAt": "2026-07-27",
+  "liveE2EVerified": false,
+  "providers": {
+    "codex": {
+      "observedVersion": "0.145.0",
+      "documentProfile": {
+        "sandbox": "read-only",
+        "approvalPolicy": "never",
+        "ephemeral": true,
+        "ignoreUserConfig": true,
+        "ignoreRules": true,
+        "webSearch": "disabled",
+        "structuredOutput": true,
+        "jsonlAudit": true
+      },
+      "zeroToolSurfaceVerified": false
+    },
+    "claude": {
+      "observedVersion": "2.1.220",
+      "documentProfile": {
+        "safeMode": true,
+        "strictMcpConfig": true,
+        "tools": [],
+        "chrome": false,
+        "sessionPersistence": false,
+        "permissionMode": "dontAsk",
+        "singlePrintTurn": true,
+        "structuredOutput": true
+      },
+      "zeroToolSurfaceVerified": false
+    }
+  },
+  "dualProjectAuditEnabled": false
+}

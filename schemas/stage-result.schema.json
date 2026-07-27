@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://duoforge.local/schemas/stage-result.schema.json",
+  "title": "DuoForge stage result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "stage",
+    "provider",
+    "summary",
+    "document",
+    "issues",
+    "issueResponses",
+    "adoptions",
+    "openQuestions",
+    "finalApproved"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "stage": {
+      "type": "string",
+      "enum": [
+        "independent-draft",
+        "cross-review",
+        "author-response",
+        "joint-document-review",
+        "review-response",
+        "synthesis",
+        "final-validation",
+        "owner-response",
+        "owned-document-revision"
+      ]
+    },
+    "provider": { "type": "string", "enum": ["codex", "claude"] },
+    "summary": { "type": "string" },
+    "document": { "type": ["string", "null"] },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["issueKey", "target", "category", "severity", "claim", "evidence", "proposal", "requiresUser", "blockingProposal"],
+        "properties": {
+          "issueKey": { "type": "string", "minLength": 1 },
+          "target": { "type": "string", "minLength": 1 },
+          "category": { "type": "string", "minLength": 1 },
+          "severity": { "type": "string", "enum": ["critical", "major", "minor"] },
+          "claim": { "type": "string", "minLength": 1 },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["source", "location", "excerptHash"],
+              "properties": {
+                "source": { "type": "string" },
+                "location": { "type": "string" },
+                "excerptHash": { "type": "string" }
+              }
+            }
+          },
+          "proposal": { "type": "string" },
+          "requiresUser": { "type": "boolean" },
+          "blockingProposal": { "type": "boolean" }
+        }
+      }
+    },
+    "issueResponses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["issueKey", "disposition", "rationale", "locations"],
+        "properties": {
+          "issueKey": { "type": "string", "minLength": 1 },
+          "disposition": {
+            "type": "string",
+            "enum": ["ACCEPTED", "PARTIALLY_ACCEPTED", "REJECTED", "DEFERRED", "NEEDS_EVIDENCE", "ASK_USER"]
+          },
+          "rationale": { "type": "string", "minLength": 1 },
+          "locations": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "adoptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["issueKey", "sourceProvider", "target", "disposition", "rationale", "locations"],
+        "properties": {
+          "issueKey": { "type": "string", "minLength": 1 },
+          "sourceProvider": { "type": "string", "enum": ["codex", "claude"] },
+          "target": { "type": "string", "minLength": 1 },
+          "disposition": { "type": "string", "enum": ["ACCEPTED", "PARTIALLY_ACCEPTED", "REJECTED", "DEFERRED"] },
+          "rationale": { "type": "string", "minLength": 1 },
+          "locations": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "openQuestions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["issueKey", "title", "question", "options", "recommendedOption"],
+        "properties": {
+          "issueKey": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1 },
+          "question": { "type": "string", "minLength": 1 },
+          "options": { "type": "array", "items": { "type": "string" }, "minItems": 2 },
+          "recommendedOption": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "finalApproved": { "type": ["boolean", "null"] }
+  }
+}

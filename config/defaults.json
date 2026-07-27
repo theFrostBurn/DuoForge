@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "subscriptionOnly": true,
+  "defaultRounds": 2,
+  "maxRounds": 3,
+  "features": {
+    "sharedDocument": true,
+    "dualDocument": true,
+    "dualProjectAudit": false
+  },
+  "security": {
+    "allowWeb": false,
+    "allowMcp": false,
+    "allowProjectCommands": false,
+    "followLinks": false
+  },
+  "limits": {
+    "documentBytes": 2097152,
+    "projectTextBytes": 1048576,
+    "projectTextFiles": 5000,
+    "singleTextFileBytes": 524288,
+    "maxInputBytesPerCall": 524288,
+    "maxContextUtilizationPercent": 80,
+    "maxCallsPerProviderPerRun": 24,
+    "maxExplanationCallsPerRun": 6,
+    "maxWallClockMinutes": 90
+  }
+}

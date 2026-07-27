@@ -1,0 +1,85 @@
+function Test-DuoForgeSnapshotIntegrity {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$RunDirectory)
+
+    $inventory = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'inputs\inventory.json')
+    $problems = [System.Collections.Generic.List[string]]::new()
+    foreach ($record in @($inventory.snapshots)) {
+        $path = Join-Path $RunDirectory ("inputs\snapshots\{0}" -f [string]$record.snapshotName)
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            $problems.Add([string]$record.snapshotName)
+            continue
+        }
+        if ((Get-DuoForgeSha256 -Path $path) -ne [string]$record.snapshotHash) {
+            $problems.Add([string]$record.snapshotName)
+        }
+    }
+    return [ordered]@{ valid = $problems.Count -eq 0; invalidSnapshots = @($problems) }
+}
+
+function Get-DuoForgeRemainingCallBudget {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$RunDirectory)
+
+    $manifest = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json')
+    $stepsPath = Join-Path $RunDirectory 'steps.json'
+    if (Test-Path -LiteralPath $stepsPath -PathType Leaf) {
+        $graph = Read-DuoForgeJson -Path $stepsPath
+    }
+    else {
+        $firstSynthesizer = if ([string]::IsNullOrWhiteSpace([string]$manifest.firstSynthesizer)) { 'alternate' } else { [string]$manifest.firstSynthesizer }
+        $graph = New-DuoForgeStageGraph -Mode ([string]$manifest.mode) -MaxRounds ([int]$manifest.maxRounds) -FirstSynthesizer $firstSynthesizer
+    }
+
+    $providers = [ordered]@{}
+    foreach ($provider in @('codex', 'claude')) {
+        $planned = @($graph.steps | Where-Object { $_.provider -eq $provider }).Count
+        $completed = @($graph.steps | Where-Object { $_.provider -eq $provider -and $_.status -eq 'COMMITTED' }).Count
+        $attempted = 0
+        foreach ($step in @($graph.steps | Where-Object { $_.provider -eq $provider })) { $attempted += [int]$step.attemptCount }
+        $maximum = [int]$manifest.executionPlan.providers[$provider].maximumCalls
+        $providers[$provider] = [ordered]@{
+            plannedRemaining = [Math]::Max(0, $planned - $completed)
+            maximumAdditionalCalls = [Math]::Max(0, $maximum - $attempted)
+            attempted = $attempted
+        }
+    }
+    return [ordered]@{ providers = $providers }
+}
+
+function Invoke-DuoForgeResumeLiveInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RunId,
+        [string]$ResultsRoot,
+        [Parameter(Mandatory)][bool]$LiveConsent
+    )
+
+    if (-not $LiveConsent) {
+        throw (New-DuoForgeException -Code 'DF-LIVE-CONSENT' -Message '라이브 공급자 호출 동의가 없습니다.')
+    }
+    $run = Get-DuoForgeRunInternal -RunId $RunId -ResultsRoot $ResultsRoot
+    if ([string]$run.manifest.mode -eq 'dual-project-audit') {
+        throw (New-DuoForgeException -Code 'DF-MODE-3A-DISABLED' -Message '3A는 격리 계약이 증명될 때까지 비활성화되어 있습니다.')
+    }
+    if ([string]$run.state.status -in @('COMPLETED', 'COMPLETED_PARTIAL')) {
+        return [ordered]@{ status = [string]$run.state.status; invoked = 0 }
+    }
+
+    $integrity = Test-DuoForgeSnapshotIntegrity -RunDirectory ([string]$run.runDirectory)
+    if (-not $integrity.valid) {
+        throw (New-DuoForgeException -Code 'DF-SNAPSHOT-INTEGRITY' -Message ('실행 스냅샷 무결성 검증에 실패했습니다: ' + ($integrity.invalidSnapshots -join ', ')))
+    }
+
+    $doctor = Invoke-DuoForgeDoctorInternal
+    if (-not [bool]$doctor.readyForDocumentModes) {
+        throw (New-DuoForgeException -Code 'DF-DOCTOR-BLOCKED' -Message '현재 환경 진단이 문서 모드 라이브 실행을 허용하지 않습니다.')
+    }
+
+    $directory = [string]$run.runDirectory
+    $callback = {
+        param($step, $prompt, $graph)
+        Invoke-DuoForgeLiveProviderStage -RunDirectory $directory -Graph $graph -Step $step -Prompt $prompt -LiveConsent $true
+    }
+    return Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+}
