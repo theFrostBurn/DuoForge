@@ -244,6 +244,8 @@ function Invoke-DuoForgeStageEngine {
     )
 
     return Invoke-WithDuoForgeRunLock -RunDirectory $RunDirectory -ScriptBlock {
+        $manifest = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json')
+        $null = Assert-DuoForgeStagePromptPolicyInternal -Manifest $manifest
         $state = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'state.json')
         $graph = Initialize-DuoForgeStageGraph -RunDirectory $RunDirectory
         $stepsPath = Join-Path $RunDirectory 'steps.json'

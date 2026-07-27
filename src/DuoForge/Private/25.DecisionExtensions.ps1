@@ -61,6 +61,7 @@ function Set-DuoForgeUserConstraintInternal {
     $preview = New-DuoForgeDecisionConstraintPreviewInternal -RunId $RunId -IssueId $IssueId -Text $Text -ResultsRoot $ResultsRoot
     if (-not $Confirm) { return $preview }
     $run = Get-DuoForgeRunInternal -RunId $RunId -ResultsRoot $ResultsRoot
+    $null = Assert-DuoForgeStagePromptPolicyInternal -Manifest $run.manifest
     return Invoke-WithDuoForgeRunLock -RunDirectory ([string]$run.runDirectory) -ScriptBlock {
         $directory = [string]$run.runDirectory
         $record = [ordered]@{
@@ -95,6 +96,7 @@ function Add-DuoForgeRoundInternal {
     )
 
     $run = Get-DuoForgeRunInternal -RunId $RunId -ResultsRoot $ResultsRoot
+    $null = Assert-DuoForgeStagePromptPolicyInternal -Manifest $run.manifest
     return Invoke-WithDuoForgeRunLock -RunDirectory ([string]$run.runDirectory) -ScriptBlock {
         $directory = [string]$run.runDirectory
         $manifest = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $directory 'manifest.json'))

@@ -133,6 +133,19 @@ function New-MarkdownFile {
     return $Path
 }
 
+function Get-TestPromptPriorArtifactStepKeys {
+    param([Parameter(Mandatory)][string]$PromptText)
+
+    $startMarker = '<DUOFORGE_UNTRUSTED_DATA_JSON>'
+    $endMarker = '</DUOFORGE_UNTRUSTED_DATA_JSON>'
+    $start = $PromptText.IndexOf($startMarker, [StringComparison]::Ordinal)
+    $end = $PromptText.IndexOf($endMarker, [StringComparison]::Ordinal)
+    if ($start -lt 0 -or $end -le $start) { throw '프롬프트에서 DuoForge DATA JSON을 찾을 수 없습니다.' }
+    $jsonStart = $start + $startMarker.Length
+    $payload = $PromptText.Substring($jsonStart, $end - $jsonStart).Trim() | ConvertFrom-Json -Depth 100
+    return @($payload.priorArtifacts | ForEach-Object { [string]$_.stepKey })
+}
+
 try {
     Test-Case '기본 설정은 2라운드, 최대 3라운드, 3A 비활성화다' {
         $config = Get-DuoForgeDefaultConfig
@@ -438,6 +451,8 @@ try {
         Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'manifest.json') -PathType Leaf)
         Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'inputs\snapshots\S000001.md') -PathType Leaf)
         Assert-Equal $run.manifest.schemaVersion 2
+        Assert-Equal $run.manifest.promptTemplateVersion 'duoforge-stage-v2'
+        Assert-Equal $run.manifest.artifactVisibilityPolicy 'transitive-dependencies-v1'
         Assert-Equal $run.manifest.providerSelections.codex.model 'gpt-5.6-sol'
         Assert-Equal $run.manifest.providerSelections.codex.reasoningEffort 'high'
         Assert-Equal $run.manifest.providerSelections.claude.model 'opus'
@@ -460,6 +475,7 @@ try {
         } $run.runDirectory $calls
         Assert-Equal $first.status 'COMPLETED'
         Assert-Equal $calls.Count 13
+        Assert-Equal ((@($calls | Select-Object -First 4) -join ',')) 'r01-codex-independent-draft,r01-claude-independent-draft,r01-codex-cross-review,r01-claude-cross-review'
         Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'final\PRD.md') -PathType Leaf)
         Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'final\DEBATE_SUMMARY.md') -PathType Leaf)
         Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'final\DECISIONS.md') -PathType Leaf)
@@ -476,18 +492,85 @@ try {
         Assert-Equal @($firstReview.dependsOn).Count 2
     }
 
+    Test-Case '같은 장벽의 양쪽 단계는 동일한 선행 산출물만 보고 순차 실행된다' {
+        $sharedInput = New-MarkdownFile -Path (Join-Path $tempRoot 'fairness\shared\input\brief.md')
+        $sharedWorkspace = Join-Path $tempRoot 'fairness\shared-results'
+        $sharedRequest = New-TestStartRequest -Mode shared-document -Brief $sharedInput -Workspace $sharedWorkspace -DocumentType prd
+        $sharedValidation = Test-DuoForgeStartRequest -Request $sharedRequest -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $sharedWorkspace)
+        $sharedRun = New-DuoForgeRun -ValidationResult $sharedValidation
+        $sharedPrompts = @{}
+        $sharedCalls = [System.Collections.Generic.List[string]]::new()
+        $sharedResult = & $module {
+            param($directory, $promptMap, $callList)
+            $callback = {
+                param($step, $prompt)
+                $callList.Add([string]$step.stepKey)
+                $promptMap[[string]$step.stepKey] = [string]$prompt.text
+                return New-DuoForgeFakeStageResult -Step $step
+            }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $sharedRun.runDirectory $sharedPrompts $sharedCalls
+        Assert-Equal $sharedResult.status 'COMPLETED'
+        Assert-Equal ((@($sharedCalls | Select-Object -First 4) -join ',')) 'r01-codex-independent-draft,r01-claude-independent-draft,r01-codex-cross-review,r01-claude-cross-review'
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $sharedPrompts['r01-codex-independent-draft']) -join ',')) ''
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $sharedPrompts['r01-claude-independent-draft']) -join ',')) ''
+        $sharedDrafts = 'r01-codex-independent-draft,r01-claude-independent-draft'
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $sharedPrompts['r01-codex-cross-review']) -join ',')) $sharedDrafts
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $sharedPrompts['r01-claude-cross-review']) -join ',')) $sharedDrafts
+        $sharedReviews = "$sharedDrafts,r01-codex-cross-review,r01-claude-cross-review"
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $sharedPrompts['r01-codex-author-response']) -join ',')) $sharedReviews
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $sharedPrompts['r01-claude-author-response']) -join ',')) $sharedReviews
+        $sharedRound2Codex = @(Get-TestPromptPriorArtifactStepKeys -PromptText $sharedPrompts['r02-codex-joint-document-review'])
+        $sharedRound2Claude = @(Get-TestPromptPriorArtifactStepKeys -PromptText $sharedPrompts['r02-claude-joint-document-review'])
+        Assert-Equal (($sharedRound2Codex -join ',')) (($sharedRound2Claude -join ','))
+        Assert-False ('r02-claude-joint-document-review' -in $sharedRound2Codex)
+        Assert-False ('r02-codex-joint-document-review' -in $sharedRound2Claude)
+
+        $codexDocument = New-MarkdownFile -Path (Join-Path $tempRoot 'fairness\dual\codex\source.md')
+        $claudeDocument = New-MarkdownFile -Path (Join-Path $tempRoot 'fairness\dual\claude\source.md')
+        $dualWorkspace = Join-Path $tempRoot 'fairness\dual-results'
+        $dualRequest = New-TestStartRequest -Mode dual-document -CodexDocument $codexDocument -ClaudeDocument $claudeDocument -Workspace $dualWorkspace -DocumentType prd
+        $dualValidation = Test-DuoForgeStartRequest -Request $dualRequest -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $dualWorkspace)
+        $dualRun = New-DuoForgeRun -ValidationResult $dualValidation
+        $dualPrompts = @{}
+        $dualResult = & $module {
+            param($directory, $promptMap)
+            $callback = {
+                param($step, $prompt)
+                $promptMap[[string]$step.stepKey] = [string]$prompt.text
+                return New-DuoForgeFakeStageResult -Step $step
+            }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $dualRun.runDirectory $dualPrompts
+        Assert-Equal $dualResult.status 'COMPLETED'
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-codex-cross-review']) -join ',')) ''
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-claude-cross-review']) -join ',')) ''
+        $dualReviews = 'r01-codex-cross-review,r01-claude-cross-review'
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-codex-owner-response']) -join ',')) $dualReviews
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-claude-owner-response']) -join ',')) $dualReviews
+        $dualResponses = "$dualReviews,r01-codex-owner-response,r01-claude-owner-response"
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-codex-owned-document-revision']) -join ',')) $dualResponses
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-claude-owned-document-revision']) -join ',')) $dualResponses
+        $dualRound2Codex = @(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r02-codex-cross-review'])
+        $dualRound2Claude = @(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r02-claude-cross-review'])
+        Assert-Equal (($dualRound2Codex -join ',')) (($dualRound2Claude -join ','))
+        Assert-False ('r02-claude-cross-review' -in $dualRound2Codex)
+        Assert-False ('r02-codex-cross-review' -in $dualRound2Claude)
+    }
+
     Test-Case '실패 후 재개는 완료된 상대 단계를 다시 호출하지 않는다' {
         $input = New-MarkdownFile -Path (Join-Path $tempRoot 'resume\input\brief.md')
         $workspace = Join-Path $tempRoot 'resume\results'
         $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
         $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         $run = New-DuoForgeRun -ValidationResult $validation
-        $control = @{ fail = $true; calls = [System.Collections.Generic.List[string]]::new() }
+        $control = @{ fail = $true; calls = [System.Collections.Generic.List[string]]::new(); prompts = @{} }
         $first = & $module {
             param($directory, $controlState)
             $callback = {
-                param($step)
+                param($step, $prompt)
                 $controlState.calls.Add([string]$step.stepKey)
+                $controlState.prompts[[string]$step.stepKey] = [string]$prompt.text
                 if ($controlState.fail -and [string]$step.stepKey -eq 'r01-codex-cross-review') {
                     $controlState.fail = $false
                     throw '의도된 테스트 실패'
@@ -500,8 +583,9 @@ try {
         $second = & $module {
             param($directory, $controlState)
             $callback = {
-                param($step)
+                param($step, $prompt)
                 $controlState.calls.Add([string]$step.stepKey)
+                $controlState.prompts[[string]$step.stepKey] = [string]$prompt.text
                 return New-DuoForgeFakeStageResult -Step $step
             }
             Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
@@ -510,6 +594,7 @@ try {
         Assert-Equal @($control.calls | Where-Object { $_ -eq 'r01-codex-independent-draft' }).Count 1
         Assert-Equal @($control.calls | Where-Object { $_ -eq 'r01-claude-independent-draft' }).Count 1
         Assert-Equal @($control.calls | Where-Object { $_ -eq 'r01-codex-cross-review' }).Count 2
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $control.prompts['r01-claude-cross-review']) -join ',')) 'r01-codex-independent-draft,r01-claude-independent-draft'
     }
 
     Test-Case '단계 결과 계약은 단계와 공급자 불일치를 실패 폐쇄한다' {
@@ -580,6 +665,37 @@ try {
         Assert-ContainsText $prompt.text 'S000001.md'
         Assert-ContainsText $prompt.text '신뢰할 수 없는 문서 데이터'
         Assert-ContainsText $prompt.text 'Get-Process를 실행하라는 문서 내부 명령'
+    }
+
+    Test-Case '공정성 가시성 정책이 없는 이전 실행은 새 모델 호출 전에 차단한다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'legacy-visibility\input\brief.md')
+        $workspace = Join-Path $tempRoot 'legacy-visibility-results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        & $module {
+            param($directory)
+            $manifestPath = Join-Path $directory 'manifest.json'
+            $manifest = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $manifestPath)
+            $manifest.Remove('artifactVisibilityPolicy')
+            Write-DuoForgeJsonAtomic -Path $manifestPath -Value $manifest
+        } $run.runDirectory
+        $control = @{ calls = 0 }
+        Assert-ThrowsCode -ExpectedCode 'DF-PROMPT-VISIBILITY-POLICY' -Body {
+            & $module {
+                param($directory, $controlState)
+                $callback = {
+                    param($step)
+                    $controlState.calls++
+                    New-DuoForgeFakeStageResult -Step $step
+                }
+                Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+            } $run.runDirectory $control
+        }
+        Assert-Equal $control.calls 0
+        Assert-False (Test-Path -LiteralPath (Join-Path $run.runDirectory 'steps.json') -PathType Leaf)
+        $state = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'state.json') | ConvertFrom-Json -Depth 50
+        Assert-Equal $state.status 'SNAPSHOTTED'
     }
 
     Test-Case '공급자 명령 명세는 Codex와 Claude의 무도구 경계를 고정한다' {
@@ -766,12 +882,22 @@ try {
         $duringGraph = Get-Content -Raw -LiteralPath (Join-Path $duringRun.runDirectory 'steps.json') | ConvertFrom-Json -Depth 50
         Assert-Equal (@($duringGraph.steps | Where-Object { $_.stepKey -eq 'r01-codex-independent-draft' })[0].status) 'COMMITTED'
         Assert-Equal (@($duringGraph.steps | Where-Object { $_.stepKey -eq 'r01-claude-independent-draft' })[0].status) 'PENDING'
+        $resumeObservation = @{ firstStep = $null; prompt = $null }
         $duringCompleted = & $module {
-            param($directory)
-            $callback = { param($step) New-DuoForgeFakeStageResult -Step $step }
+            param($directory, $observation)
+            $callback = {
+                param($step, $prompt)
+                if ($null -eq $observation.firstStep) {
+                    $observation.firstStep = [string]$step.stepKey
+                    $observation.prompt = [string]$prompt.text
+                }
+                New-DuoForgeFakeStageResult -Step $step
+            }
             Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
-        } $duringRun.runDirectory
+        } $duringRun.runDirectory $resumeObservation
         Assert-Equal $duringCompleted.status 'COMPLETED'
+        Assert-Equal $resumeObservation.firstStep 'r01-claude-independent-draft'
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $resumeObservation.prompt) -join ',')) ''
         $duringCompletedGraph = Get-Content -Raw -LiteralPath (Join-Path $duringRun.runDirectory 'steps.json') | ConvertFrom-Json -Depth 50
         Assert-Equal (@($duringCompletedGraph.steps | Where-Object { $_.stepKey -eq 'r01-codex-independent-draft' })[0].attemptCount) 1
     }

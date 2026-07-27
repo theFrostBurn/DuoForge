@@ -8,6 +8,7 @@ function Add-DuoForgeIssueEvidenceInternal {
     )
 
     $run = Get-DuoForgeRunInternal -RunId $RunId -ResultsRoot $ResultsRoot
+    $null = Assert-DuoForgeStagePromptPolicyInternal -Manifest $run.manifest
     $directory = [string]$run.runDirectory
     $config = Get-DuoForgeConfig
     $source = Assert-DuoForgeMarkdownFile -Path $File -MaximumBytes ([long]$config.limits.documentBytes)

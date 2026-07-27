@@ -234,7 +234,8 @@ function New-DuoForgeRunInternal {
             pauseAfterRound = [bool](Get-DuoForgeObjectValue -Object $request -Name 'pauseAfterRound' -Default $false)
             allowPartial = [bool](Get-DuoForgeObjectValue -Object $request -Name 'allowPartial' -Default $false)
             subscriptionOnly = $true
-            promptTemplateVersion = 'duoforge-stage-v1'
+            promptTemplateVersion = 'duoforge-stage-v2'
+            artifactVisibilityPolicy = 'transitive-dependencies-v1'
             providers = [ordered]@{
                 codex = [ordered]@{ version = $ValidationResult.doctor.providers.codex.version; authType = $ValidationResult.doctor.providers.codex.authType }
                 claude = [ordered]@{ version = $ValidationResult.doctor.providers.claude.version; authType = $ValidationResult.doctor.providers.claude.authType }

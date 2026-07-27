@@ -263,6 +263,8 @@ function Invoke-DuoForgeLiveProviderStage {
         provider = [string]$Step.provider
         promptHash = [string]$Prompt.sha256
         promptBytes = [int]$Prompt.bytes
+        visibleArtifactStepKeys = @($Prompt.artifactStepKeys)
+        visibleArtifactHashes = @($Prompt.artifactHashes)
     })
 
     try {

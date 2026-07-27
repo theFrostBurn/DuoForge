@@ -44,6 +44,9 @@ function Get-DuoForgePromptDocuments {
         $name = [string]$record.snapshotName
         if (-not $roleLookup.ContainsKey($name)) { continue }
         $snapshotPath = Join-Path $RunDirectory ("inputs\snapshots\{0}" -f $name)
+        if ((Get-DuoForgeSha256 -Path $snapshotPath) -ne [string]$record.snapshotHash) {
+            throw (New-DuoForgeException -Code 'DF-PROMPT-SNAPSHOT-INTEGRITY' -Message "프롬프트 입력 스냅샷의 무결성이 변경되었습니다: $name")
+        }
         $role = if ([string](Get-DuoForgeObjectValue -Object $record -Name 'role' -Default '') -eq 'user-evidence') { 'user-evidence' } else { [string]$roleLookup[$name] }
         $documents.Add([ordered]@{
             snapshotName = $name
@@ -55,6 +58,71 @@ function Get-DuoForgePromptDocuments {
     return @($documents)
 }
 
+function Assert-DuoForgeStagePromptPolicyInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Manifest)
+
+    $templateVersion = [string](Get-DuoForgeObjectValue -Object $Manifest -Name 'promptTemplateVersion' -Default '')
+    $visibilityPolicy = [string](Get-DuoForgeObjectValue -Object $Manifest -Name 'artifactVisibilityPolicy' -Default '')
+    if ($templateVersion -ne 'duoforge-stage-v2' -or $visibilityPolicy -ne 'transitive-dependencies-v1') {
+        throw (New-DuoForgeException -Code 'DF-PROMPT-VISIBILITY-POLICY' -Message '이 실행은 공정한 단계 입력 가시성 정책이 적용되기 전에 생성되었습니다. 입력에서 새 실행을 만들어 주세요.')
+    }
+    return $true
+}
+
+function Get-DuoForgeVisibleStageDependencyKeysInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Graph,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$CurrentStep
+    )
+
+    $stepsByKey = @{}
+    foreach ($step in @($Graph.steps)) {
+        $stepKey = [string]$step.stepKey
+        if ([string]::IsNullOrWhiteSpace($stepKey)) {
+            throw (New-DuoForgeException -Code 'DF-PROMPT-DEPENDENCY' -Message '단계 그래프에 식별자가 없는 단계가 있습니다.')
+        }
+        if ($stepsByKey.ContainsKey($stepKey)) {
+            throw (New-DuoForgeException -Code 'DF-PROMPT-DEPENDENCY' -Message "단계 그래프에 중복 식별자가 있습니다: $stepKey")
+        }
+        $stepsByKey[$stepKey] = $step
+    }
+
+    $visibleKeys = @{}
+    $pending = [System.Collections.Generic.Queue[string]]::new()
+    foreach ($dependencyKey in @($CurrentStep.dependsOn)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$dependencyKey)) {
+            $pending.Enqueue([string]$dependencyKey)
+        }
+    }
+
+    while ($pending.Count -gt 0) {
+        $dependencyKey = $pending.Dequeue()
+        if ($visibleKeys.ContainsKey($dependencyKey)) { continue }
+        if (-not $stepsByKey.ContainsKey($dependencyKey)) {
+            throw (New-DuoForgeException -Code 'DF-PROMPT-DEPENDENCY' -Message "단계 그래프에서 선행 단계를 찾을 수 없습니다: $dependencyKey")
+        }
+
+        $dependency = $stepsByKey[$dependencyKey]
+        if ([string]$dependency.status -ne 'COMMITTED') {
+            throw (New-DuoForgeException -Code 'DF-PROMPT-DEPENDENCY' -Message "완료되지 않은 선행 단계는 프롬프트에 사용할 수 없습니다: $dependencyKey")
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$dependency.artifactPath) -or -not (Test-Path -LiteralPath ([string]$dependency.artifactPath) -PathType Leaf)) {
+            throw (New-DuoForgeException -Code 'DF-PROMPT-DEPENDENCY' -Message "선행 단계 산출물을 찾을 수 없습니다: $dependencyKey")
+        }
+
+        $visibleKeys[$dependencyKey] = $true
+        foreach ($ancestorKey in @($dependency.dependsOn)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$ancestorKey)) {
+                $pending.Enqueue([string]$ancestorKey)
+            }
+        }
+    }
+
+    return $visibleKeys
+}
+
 function Get-DuoForgePriorStageArtifacts {
     [CmdletBinding()]
     param(
@@ -63,10 +131,13 @@ function Get-DuoForgePriorStageArtifacts {
         [Parameter(Mandatory)][System.Collections.IDictionary]$CurrentStep
     )
 
+    $visibleKeys = Get-DuoForgeVisibleStageDependencyKeysInternal -Graph $Graph -CurrentStep $CurrentStep
     $artifacts = [System.Collections.Generic.List[object]]::new()
     foreach ($step in @($Graph.steps)) {
-        if ([string]$step.status -ne 'COMMITTED' -or [int]$step.round -gt [int]$CurrentStep.round) { continue }
-        if ([string]::IsNullOrWhiteSpace([string]$step.artifactPath) -or -not (Test-Path -LiteralPath ([string]$step.artifactPath) -PathType Leaf)) { continue }
+        if (-not $visibleKeys.ContainsKey([string]$step.stepKey)) { continue }
+        if ([string]::IsNullOrWhiteSpace([string]$step.artifactHash) -or (Get-DuoForgeSha256 -Path ([string]$step.artifactPath)) -ne [string]$step.artifactHash) {
+            throw (New-DuoForgeException -Code 'DF-PROMPT-DEPENDENCY-INTEGRITY' -Message "선행 단계 산출물의 무결성이 변경되었습니다: $($step.stepKey)")
+        }
         $wrapper = Read-DuoForgeJson -Path ([string]$step.artifactPath)
         $artifacts.Add([ordered]@{
             stepKey = [string]$step.stepKey
@@ -89,6 +160,7 @@ function New-DuoForgeStagePrompt {
     )
 
     $manifest = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json')
+    $null = Assert-DuoForgeStagePromptPolicyInternal -Manifest $manifest
     $inventory = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'inputs\inventory.json'))
     $contextPlanPath = Join-Path $RunDirectory 'inputs\context-plan.json'
     $contextPlan = if (Test-Path -LiteralPath $contextPlanPath -PathType Leaf) { ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $contextPlanPath) } else { $null }
@@ -96,7 +168,7 @@ function New-DuoForgeStagePrompt {
     $userDecisions = @(Get-DuoForgeEffectiveUserDecisionsInternal -Records $userDecisionRecords)
     $userEvidence = @(Read-DuoForgeJsonLines -Path (Join-Path $RunDirectory 'decisions\user-evidence.jsonl') -AllowMissing)
     $payload = [ordered]@{
-        contractVersion = 'duoforge-stage-v1'
+        contractVersion = [string]$manifest.promptTemplateVersion
         mode = [string]$manifest.mode
         documentType = [string]$manifest.documentType
         round = [int]$Step.round
@@ -110,6 +182,9 @@ function New-DuoForgeStagePrompt {
                 $batchId = [string](Get-DuoForgeObjectValue -Object $Step -Name 'contextBatchId')
                 $batch = @($contextPlan.batches | Where-Object { [string]$_.batchId -eq $batchId } | Select-Object -First 1)
                 if ($batch.Count -ne 1) { throw (New-DuoForgeException -Code 'DF-CONTEXT-BATCH' -Message "문맥 배치를 찾을 수 없습니다: $batchId") }
+                if ((Get-DuoForgeSha256 -Path ([string]$batch[0].path)) -ne [string]$batch[0].sha256) {
+                    throw (New-DuoForgeException -Code 'DF-PROMPT-SNAPSHOT-INTEGRITY' -Message "문맥 배치의 무결성이 변경되었습니다: $batchId")
+                }
                 [ordered]@{ snapshotName = $batchId; role = 'context-batch'; sha256 = [string]$batch[0].sha256; content = [System.IO.File]::ReadAllText([string]$batch[0].path, [System.Text.UTF8Encoding]::new($false, $true)) }
             }
             elseif ($null -eq $contextPlan -or -not [bool]$contextPlan.enabled) {
@@ -178,6 +253,7 @@ $payloadJson
         bytes = $bytes.Length
         kind = 'STAGE'
         snapshotNames = @($payload.documents | ForEach-Object { $_.snapshotName })
+        artifactStepKeys = @($payload.priorArtifacts | ForEach-Object { $_.stepKey })
         artifactHashes = @($payload.priorArtifacts | ForEach-Object { $_.sha256 })
     }
 }
@@ -219,6 +295,7 @@ $([string]$OriginalPrompt.text)
         bytes = $bytes.Length
         kind = 'FORMAT_REPAIR'
         snapshotNames = @($OriginalPrompt.snapshotNames)
+        artifactStepKeys = @($OriginalPrompt.artifactStepKeys)
         artifactHashes = @($OriginalPrompt.artifactHashes)
     }
 }

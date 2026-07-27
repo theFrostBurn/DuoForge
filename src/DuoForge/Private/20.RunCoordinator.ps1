@@ -66,6 +66,7 @@ function Invoke-DuoForgeResumeLiveInternal {
     if ([string]$run.state.status -in @('COMPLETED', 'COMPLETED_PARTIAL')) {
         return [ordered]@{ status = [string]$run.state.status; invoked = 0 }
     }
+    $null = Assert-DuoForgeStagePromptPolicyInternal -Manifest $run.manifest
 
     $integrity = Test-DuoForgeSnapshotIntegrity -RunDirectory ([string]$run.runDirectory)
     if (-not $integrity.valid) {

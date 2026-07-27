@@ -85,6 +85,7 @@ function Set-DuoForgeUserDecisionInternal {
     )
 
     $run = Get-DuoForgeRunInternal -RunId $RunId -ResultsRoot $ResultsRoot
+    $null = Assert-DuoForgeStagePromptPolicyInternal -Manifest $run.manifest
     return Invoke-WithDuoForgeRunLock -RunDirectory ([string]$run.runDirectory) -ScriptBlock {
         $directory = [string]$run.runDirectory
         $statePath = Join-Path $directory 'state.json'
