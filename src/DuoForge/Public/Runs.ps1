@@ -1,8 +1,10 @@
 function New-DuoForgeStartRequest {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][ValidateSet('shared-document', 'dual-document', 'dual-project-audit')][string]$Mode,
+        [Parameter(Mandatory)][ValidateSet('shared-document', 'document-merge', 'dual-document', 'dual-project-audit')][string]$Mode,
         [string]$Brief,
+        [string]$DocumentA,
+        [string]$DocumentB,
         [string]$CodexDocument,
         [string]$ClaudeDocument,
         [string]$CodexProject,

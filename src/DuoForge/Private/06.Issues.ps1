@@ -19,6 +19,16 @@ function Get-DuoForgeIssueBlockingValue {
     if ($Category -in @('safety', 'required-artifact', 'core-requirement', 'consistency')) { return $true }
     return $BlockingProposal
 }
+
+function Get-DuoForgeIssueTargetInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Issue)
+
+    $targetDocumentId = [string](Get-DuoForgeObjectValue -Object $Issue -Name 'targetDocumentId' -Default '')
+    if (-not [string]::IsNullOrWhiteSpace($targetDocumentId)) { return $targetDocumentId }
+    return [string](Get-DuoForgeObjectValue -Object $Issue -Name 'target' -Default '')
+}
+
 function New-DuoForgeIssueInternal {
     [CmdletBinding()]
     param(

@@ -100,6 +100,8 @@ function New-TestStartRequest {
     param(
         [Parameter(Mandatory)][string]$Mode,
         [string]$Brief,
+        [string]$DocumentA,
+        [string]$DocumentB,
         [string]$CodexDocument,
         [string]$ClaudeDocument,
         [string]$CodexProject,
@@ -341,6 +343,79 @@ try {
         Assert-False $normalized.Contains('claudeDocument')
     }
 
+    Test-Case '공개 요청과 계획 API는 네 내부 모드를 수용한다' {
+        foreach ($mode in @('shared-document', 'document-merge', 'dual-document', 'dual-project-audit')) {
+            $parameters = @{
+                Mode = $mode
+                CodexModel = 'gpt-5.6-sol'
+                CodexReasoningEffort = 'high'
+                ClaudeModel = 'opus'
+                ClaudeReasoningEffort = 'high'
+            }
+            if ($mode -eq 'shared-document') { $parameters.Brief = '.\brief.md' }
+            elseif ($mode -eq 'dual-project-audit') { $parameters.CodexProject = '.\project-a'; $parameters.ClaudeProject = '.\project-b' }
+            else { $parameters.DocumentA = '.\A\main.md'; $parameters.DocumentB = '.\B\main.md' }
+            $request = New-DuoForgeStartRequest @parameters
+            Assert-Equal $request.mode $mode
+            $plan = Get-DuoForgeExecutionPlan -Mode $mode -MaxRounds 2
+            Assert-Equal $plan.mode $mode
+        }
+    }
+
+    Test-Case '새 작업 메뉴는 네 모드를 A/B 용어로 표시하고 모드 4를 실패 폐쇄한다' {
+        $surface = & $module {
+            [ordered]@{
+                options = @(Get-DuoForgeInteractiveNewModeOptionsInternal)
+                modeLabels = @(
+                    Get-DuoForgeProgressModeLabelInternal -Mode shared-document
+                    Get-DuoForgeProgressModeLabelInternal -Mode document-merge
+                    Get-DuoForgeProgressModeLabelInternal -Mode dual-document
+                    Get-DuoForgeProgressModeLabelInternal -Mode dual-project-audit
+                )
+                stageLabels = @(
+                    Get-DuoForgeProgressStageLabelInternal -Stage independent-merge-draft
+                    Get-DuoForgeProgressStageLabelInternal -Stage document-review
+                    Get-DuoForgeProgressStageLabelInternal -Stage document-revision
+                    Get-DuoForgeProgressStageLabelInternal -Stage document-validation
+                )
+            }
+        }
+        Assert-Equal @($surface.options).Count 4
+        Assert-Equal ((@($surface.options.key) -join ',')) '1,2,3,4'
+        Assert-Equal ((@($surface.options.mode) -join ',')) 'shared-document,document-merge,dual-document,dual-project-audit'
+        Assert-Equal (@($surface.options | Where-Object { [bool]$_.enabled }).Count) 3
+        Assert-False ([bool]$surface.options[3].enabled)
+        Assert-ContainsText ([string]$surface.options[3].disabledReason) 'DF-PREFLIGHT-3A-ISOLATION'
+        Assert-Equal ((@($surface.modeLabels) -join ',')) '컨셉으로 공동 문서 만들기,두 문서를 하나로 합의하기,두 문서를 각각 개선하기,두 프로젝트 비교하기(비활성)'
+        Assert-Equal ((@($surface.stageLabels) -join ',')) '독립 병합 후보,문서 A/B 검토,대상 문서 개정,대상 문서 최종 검증'
+
+        $interactiveSource = Get-Content -LiteralPath (Join-Path $projectRoot 'src\DuoForge\Private\14.Interactive.ps1') -Raw
+        Assert-NotContainsText $interactiveSource "Role 'codex-document'"
+        Assert-NotContainsText $interactiveSource "Role 'claude-document'"
+        Assert-ContainsText $interactiveSource '-DocumentA $documentA -DocumentB $documentB'
+    }
+
+    Test-Case '모드 2와 3의 공개 요청은 정규 A/B 필드만 기록한다' {
+        foreach ($mode in @('document-merge', 'dual-document')) {
+            $request = New-TestStartRequest -Mode $mode -DocumentA '.\A\main.md' -DocumentB '.\B\main.md'
+            Assert-Equal $request.inputs.documentA '.\A\main.md'
+            Assert-Equal $request.inputs.documentB '.\B\main.md'
+            Assert-False $request.inputs.Contains('codexDocument')
+            Assert-False $request.inputs.Contains('claudeDocument')
+            Assert-Equal @($request.compatibilityWarnings).Count 0
+        }
+    }
+
+    Test-Case '공개 레거시 문서 별칭은 정규 요청으로 변환되고 경고한다' {
+        $request = New-TestStartRequest -Mode dual-document -CodexDocument '.\A\legacy.md' -ClaudeDocument '.\B\legacy.md'
+        Assert-Equal $request.inputs.documentA '.\A\legacy.md'
+        Assert-Equal $request.inputs.documentB '.\B\legacy.md'
+        Assert-False $request.inputs.Contains('codexDocument')
+        Assert-False $request.inputs.Contains('claudeDocument')
+        Assert-Equal @($request.compatibilityWarnings).Count 1
+        Assert-Equal $request.compatibilityWarnings[0].code 'DF-DEPRECATED-DOCUMENT-ALIASES'
+    }
+
     Test-Case '레거시 문서 별칭은 A/B로만 정규화되고 경로 없는 경고를 남긴다' {
         $normalized = & $module {
             Resolve-DuoForgeDocumentInputAliasesInternal -CodexDocument 'C:\private\A.md' -ClaudeDocument 'D:\private\B.md'
@@ -383,6 +458,17 @@ try {
         }
     }
 
+    Test-Case '신규 실행 요청은 레거시 워크플로로 낮춰 저장할 수 없다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'workflow-downgrade\input\brief.md')
+        $workspace = Join-Path $tempRoot 'workflow-downgrade-results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace
+        $request.workflowVersion = 'workflow-v1'
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        Assert-False ([bool]$validation.valid)
+        Assert-Equal @($validation.errors | Where-Object { $_.code -eq 'DF-WORKFLOW-NEW-RUN' }).Count 1
+        Assert-False (Test-Path -LiteralPath $workspace)
+    }
+
     Test-Case '이미 저장된 레거시 단계 그래프는 초기화 시 재해석하거나 다시 쓰지 않는다' {
         $runDirectory = Join-Path $tempRoot 'legacy-graph'
         [System.IO.Directory]::CreateDirectory($runDirectory) | Out-Null
@@ -403,6 +489,36 @@ try {
         Assert-Equal $after $before
         Assert-Equal $loaded.steps[0].stage 'owner-response'
         Assert-Equal $loaded.steps[1].stage 'owned-document-revision'
+    }
+
+    Test-Case 'workflow-v1과 v2의 dual-document 단계 의미는 명시적으로 분리된다' {
+        $graphs = & $module {
+            [ordered]@{
+                legacy = New-DuoForgeStageGraph -Mode dual-document -MaxRounds 2 -WorkflowVersion workflow-v1
+                current = New-DuoForgeStageGraph -Mode dual-document -MaxRounds 2 -WorkflowVersion workflow-v2
+            }
+        }
+        $plans = [ordered]@{
+            legacy = Get-DuoForgeExecutionPlan -Mode dual-document -MaxRounds 2 -WorkflowVersion workflow-v1
+            current = Get-DuoForgeExecutionPlan -Mode dual-document -MaxRounds 2 -WorkflowVersion workflow-v2
+        }
+        Assert-True ('owner-response' -in @($graphs.legacy.steps.stage))
+        Assert-True ('owned-document-revision' -in @($graphs.legacy.steps.stage))
+        Assert-False ('document-review' -in @($graphs.legacy.steps.stage))
+        Assert-True ('document-review' -in @($graphs.current.steps.stage))
+        Assert-True ('document-revision' -in @($graphs.current.steps.stage))
+        Assert-True ('document-validation' -in @($graphs.current.steps.stage))
+        Assert-False ('owner-response' -in @($graphs.current.steps.stage))
+        $round1A = @($graphs.current.steps | Where-Object { $_.round -eq 1 -and $_.targetDocumentId -eq 'A' -and $_.stage -eq 'document-revision' })[0]
+        $round2A = @($graphs.current.steps | Where-Object { $_.round -eq 2 -and $_.targetDocumentId -eq 'A' -and $_.stage -eq 'document-revision' })[0]
+        Assert-Equal $round1A.provider 'codex'
+        Assert-Equal $round2A.provider 'claude'
+        Assert-True ('owner-response' -in @($plans.legacy.providers.codex.calls.stage))
+        Assert-False ('document-validation' -in @($plans.legacy.providers.codex.calls.stage))
+        Assert-True ('document-review' -in @($plans.current.providers.codex.calls.stage))
+        Assert-True ('document-validation' -in @($plans.current.providers.codex.calls.stage))
+        Assert-Equal $plans.legacy.workflowVersion 'workflow-v1'
+        Assert-Equal $plans.current.workflowVersion 'workflow-v2'
     }
 
     Test-Case '공동 문서 요청은 입력 폴더 안의 결과 루트를 차단한다' {
@@ -433,8 +549,60 @@ try {
         $request = New-TestStartRequest -Mode dual-document -CodexDocument $codex -ClaudeDocument $claude -Workspace $workspace -DocumentType prd
         $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         Assert-True ([bool]$validation.valid)
-        Assert-Equal $validation.inputs.codex.context.includedFiles 2
-        Assert-Equal $validation.inputs.claude.context.includedFiles 2
+        Assert-Equal $validation.inputs.documents.A.context.includedFiles 2
+        Assert-Equal $validation.inputs.documents.B.context.includedFiles 2
+    }
+
+    Test-Case '모드 2와 3은 같은 A/B 검증 및 경로 경계를 공유한다' {
+        foreach ($mode in @('document-merge', 'dual-document')) {
+            $sameA = New-MarkdownFile -Path (Join-Path $tempRoot "$mode-same\A.md")
+            $sameB = New-MarkdownFile -Path (Join-Path $tempRoot "$mode-same\B.md")
+            $sameWorkspace = Join-Path $tempRoot "$mode-same-results"
+            $sameRequest = New-TestStartRequest -Mode $mode -DocumentA $sameA -DocumentB $sameB -Workspace $sameWorkspace
+            $sameValidation = Test-DuoForgeStartRequest -Request $sameRequest -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $sameWorkspace)
+            Assert-False ([bool]$sameValidation.valid)
+            Assert-Equal @($sameValidation.errors | Where-Object code -eq 'DF-PATH-DUAL-DOCUMENT-OVERLAP').Count 1
+
+            $a = New-MarkdownFile -Path (Join-Path $tempRoot "$mode-ok\A\main.md")
+            $null = New-MarkdownFile -Path (Join-Path $tempRoot "$mode-ok\A\context.md")
+            $b = New-MarkdownFile -Path (Join-Path $tempRoot "$mode-ok\B\main.md")
+            $null = New-MarkdownFile -Path (Join-Path $tempRoot "$mode-ok\B\context.md")
+            $workspace = Join-Path $tempRoot "$mode-ok-results"
+            $request = New-TestStartRequest -Mode $mode -DocumentA $a -DocumentB $b -Workspace $workspace
+            $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+            Assert-True ([bool]$validation.valid) ($validation.errors | ConvertTo-Json -Depth 10 -Compress)
+            Assert-Equal $validation.inputs.documents.A.context.includedFiles 2
+            Assert-Equal $validation.inputs.documents.B.context.includedFiles 2
+            $sourcePaths = & $module { param($value) @(Get-DuoForgeValidationSourceRecordsInternal -ValidationResult $value | ForEach-Object path) } $validation
+            Assert-Equal @($sourcePaths | Sort-Object -Unique).Count @($sourcePaths).Count
+
+            $nestedWorkspace = Join-Path ([System.IO.Path]::GetDirectoryName($a)) 'results'
+            $nestedRequest = New-TestStartRequest -Mode $mode -DocumentA $a -DocumentB $b -Workspace $nestedWorkspace
+            $nestedValidation = Test-DuoForgeStartRequest -Request $nestedRequest -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $nestedWorkspace)
+            Assert-False ([bool]$nestedValidation.valid)
+            Assert-Equal @($nestedValidation.errors | Where-Object code -eq 'DF-PATH-OUTPUT-IN-INPUT').Count 1
+        }
+    }
+
+    Test-Case '신규 A/B 실행은 workflow-v2와 문서 계보 역할만 저장한다' {
+        $a = New-MarkdownFile -Path (Join-Path $tempRoot 'v2-run\A\main.md')
+        $null = New-MarkdownFile -Path (Join-Path $tempRoot 'v2-run\A\context.md')
+        $b = New-MarkdownFile -Path (Join-Path $tempRoot 'v2-run\B\main.md')
+        $workspace = Join-Path $tempRoot 'v2-run-results'
+        $request = New-TestStartRequest -Mode document-merge -DocumentA $a -DocumentB $b -Workspace $workspace
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        Assert-True ([bool]$validation.valid) ($validation.errors | ConvertTo-Json -Depth 10 -Compress)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        Assert-Equal $run.manifest.workflowVersion 'workflow-v2'
+        Assert-Equal $run.manifest.promptTemplateVersion 'duoforge-stage-v3'
+        $inventory = Get-Content -LiteralPath (Join-Path $run.runDirectory 'inputs\inventory.json') -Raw | ConvertFrom-Json -Depth 50
+        Assert-True ($null -ne $inventory.roles.documents.A)
+        Assert-True ($null -ne $inventory.roles.documents.B)
+        Assert-True ($null -eq $inventory.roles.codex)
+        Assert-True ($null -eq $inventory.roles.claude)
+        $manifestText = Get-Content -LiteralPath (Join-Path $run.runDirectory 'manifest.json') -Raw
+        Assert-NotContainsText $manifestText 'codexDocument'
+        Assert-NotContainsText $manifestText 'claudeDocument'
     }
 
     Test-Case '호출 계획은 라운드와 재시도를 포함해 강제 상한 안에 있다' {
@@ -530,8 +698,9 @@ try {
         Assert-Equal $run.status 'SNAPSHOTTED'
         Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'manifest.json') -PathType Leaf)
         Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'inputs\snapshots\S000001.md') -PathType Leaf)
-        Assert-Equal $run.manifest.schemaVersion 2
-        Assert-Equal $run.manifest.promptTemplateVersion 'duoforge-stage-v2'
+        Assert-Equal $run.manifest.schemaVersion 3
+        Assert-Equal $run.manifest.workflowVersion 'workflow-v2'
+        Assert-Equal $run.manifest.promptTemplateVersion 'duoforge-stage-v3'
         Assert-Equal $run.manifest.artifactVisibilityPolicy 'transitive-dependencies-v1'
         Assert-Equal $run.manifest.providerSelections.codex.model 'gpt-5.6-sol'
         Assert-Equal $run.manifest.providerSelections.codex.reasoningEffort 'high'
@@ -669,6 +838,8 @@ try {
         Assert-Equal (($firstStepEvents -join ',')) 'STAGE_STARTED,STAGE_RESULT_RECEIVED,STAGE_COMMITTED'
         $committed = @($events | Where-Object { [string]$_.type -eq 'STAGE_COMMITTED' })
         Assert-Equal $committed.Count 13
+        Assert-Equal $committed[0].data.workflowVersion 'workflow-v2'
+        Assert-Equal $committed[0].data.targetDocumentId 'merged'
         Assert-False $committed[0].data.Contains('summary')
         Assert-False $committed[0].data.Contains('document')
         $observerJson = $events | ConvertTo-Json -Depth 100 -Compress
@@ -682,6 +853,8 @@ try {
         $durableEventLines = $durableEventText -split "`r?`n"
         $durableEvents = @($durableEventLines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ConvertFrom-Json | Where-Object type -eq 'STAGE_COMMITTED')
         Assert-Equal $durableEvents.Count 13
+        Assert-Equal $durableEvents[0].data.workflowVersion 'workflow-v2'
+        Assert-Equal $durableEvents[0].data.targetDocumentId 'merged'
     }
 
     Test-Case '형식 복구 재시도는 실패 응답을 확정 요약으로 표시하지 않는다' {
@@ -817,7 +990,7 @@ try {
         $codexDocument = New-MarkdownFile -Path (Join-Path $tempRoot 'fairness\dual\codex\source.md')
         $claudeDocument = New-MarkdownFile -Path (Join-Path $tempRoot 'fairness\dual\claude\source.md')
         $dualWorkspace = Join-Path $tempRoot 'fairness\dual-results'
-        $dualRequest = New-TestStartRequest -Mode dual-document -CodexDocument $codexDocument -ClaudeDocument $claudeDocument -Workspace $dualWorkspace -DocumentType prd
+        $dualRequest = New-TestStartRequest -Mode dual-document -DocumentA $codexDocument -DocumentB $claudeDocument -Workspace $dualWorkspace -DocumentType prd
         $dualValidation = Test-DuoForgeStartRequest -Request $dualRequest -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $dualWorkspace)
         $dualRun = New-DuoForgeRun -ValidationResult $dualValidation
         $dualPrompts = @{}
@@ -831,19 +1004,19 @@ try {
             Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
         } $dualRun.runDirectory $dualPrompts
         Assert-Equal $dualResult.status 'COMPLETED'
-        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-codex-cross-review']) -join ',')) ''
-        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-claude-cross-review']) -join ',')) ''
-        $dualReviews = 'r01-codex-cross-review,r01-claude-cross-review'
-        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-codex-owner-response']) -join ',')) $dualReviews
-        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-claude-owner-response']) -join ',')) $dualReviews
-        $dualResponses = "$dualReviews,r01-codex-owner-response,r01-claude-owner-response"
-        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-codex-owned-document-revision']) -join ',')) $dualResponses
-        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-claude-owned-document-revision']) -join ',')) $dualResponses
-        $dualRound2Codex = @(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r02-codex-cross-review'])
-        $dualRound2Claude = @(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r02-claude-cross-review'])
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-codex-document-review']) -join ',')) ''
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-claude-document-review']) -join ',')) ''
+        $dualReviews = 'r01-codex-document-review,r01-claude-document-review'
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-codex-review-response']) -join ',')) $dualReviews
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-claude-review-response']) -join ',')) $dualReviews
+        $dualResponses = "$dualReviews,r01-codex-review-response,r01-claude-review-response"
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-codex-document-a-revision']) -join ',')) $dualResponses
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-claude-document-b-revision']) -join ',')) $dualResponses
+        $dualRound2Codex = @(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r02-codex-document-review'])
+        $dualRound2Claude = @(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r02-claude-document-review'])
         Assert-Equal (($dualRound2Codex -join ',')) (($dualRound2Claude -join ','))
-        Assert-False ('r02-claude-cross-review' -in $dualRound2Codex)
-        Assert-False ('r02-codex-cross-review' -in $dualRound2Claude)
+        Assert-False ('r02-claude-document-review' -in $dualRound2Codex)
+        Assert-False ('r02-codex-document-review' -in $dualRound2Claude)
     }
 
     Test-Case '실패 후 재개는 완료된 상대 단계를 다시 호출하지 않는다' {
@@ -903,6 +1076,78 @@ try {
             catch { return @($_.Exception.Data['DuoForgeValidationErrors']) }
         } $step
         Assert-ContainsText ($diagnostic -join ' ') 'document'
+    }
+
+    Test-Case 'workflow-v2 단계 결과는 작업자와 대상 문서 및 출처 배열을 엄격히 검증한다' {
+        $step = [ordered]@{
+            stepKey = 'r01-codex-document-a-revision'
+            provider = 'codex'
+            performedBy = 'codex'
+            targetDocumentId = 'A'
+            sourceDocumentIds = @('A', 'B')
+            stage = 'document-revision'
+            round = 1
+        }
+        $valid = & $module {
+            param($s)
+            $result = New-DuoForgeFakeStageResult -Step $s
+            Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $s.stage -ExpectedProvider $s.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $s.sourceDocumentIds
+        } $step
+        Assert-True ([bool]$valid.valid)
+
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+            & $module {
+                param($s)
+                $result = New-DuoForgeFakeStageResult -Step $s
+                $result.performedBy = 'claude'
+                Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $s.stage -ExpectedProvider $s.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $s.sourceDocumentIds -ThrowOnError
+            } $step
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+            & $module {
+                param($s)
+                $result = New-DuoForgeFakeStageResult -Step $s
+                $result.targetDocumentId = 'B'
+                Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $s.stage -ExpectedProvider $s.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $s.sourceDocumentIds -ThrowOnError
+            } $step
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+            & $module {
+                param($s)
+                $result = New-DuoForgeFakeStageResult -Step $s
+                $result.sourceDocumentIds = 'A'
+                Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $s.stage -ExpectedProvider $s.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $s.sourceDocumentIds -ThrowOnError
+            } $step
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+            & $module {
+                param($s)
+                $result = New-DuoForgeFakeStageResult -Step $s
+                $result.sourceDocumentIds = @('A')
+                Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $s.stage -ExpectedProvider $s.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $s.sourceDocumentIds -ThrowOnError
+            } $step
+        }
+    }
+
+    Test-Case '문서별 최종 검증 거부는 대상 계보의 Critical 쟁점으로 실패 폐쇄한다' {
+        $merged = & $module {
+            $step = [ordered]@{
+                stepKey = 'r02-claude-document-a-validation'; provider = 'claude'; performedBy = 'claude'
+                targetDocumentId = 'A'; sourceDocumentIds = @('A'); stage = 'document-validation'; round = 2
+            }
+            $result = New-DuoForgeFakeStageResult -Step $step
+            $result.finalApproved = $false
+            Merge-DuoForgeStageIssues -StageResults @([ordered]@{
+                stepKey = $step.stepKey; provider = $step.provider; performedBy = $step.performedBy
+                targetDocumentId = $step.targetDocumentId; sourceDocumentIds = $step.sourceDocumentIds
+                stage = $step.stage; round = $step.round; result = $result
+            }) -WorkflowVersion workflow-v2
+        }
+        Assert-Equal @($merged.issues).Count 1
+        Assert-Equal $merged.issues[0].severity 'critical'
+        Assert-Equal $merged.issues[0].targetDocumentId 'A'
+        Assert-True ($null -eq $merged.issues[0].PSObject.Properties['target'])
+        Assert-False ([bool](Test-DuoForgeCompletionAllowed -Issues @($merged.issues)).allowed)
     }
 
     Test-Case '비밀 제거 후 빈 구조화 배열은 두 번째 정규화에서도 배열로 유지된다' {
@@ -1030,9 +1275,24 @@ try {
 
     Test-Case '구조화 출력 스키마의 상수 필드는 Codex 호환 타입을 명시한다' {
         $stageSchema = Get-Content -LiteralPath (Join-Path $projectRoot 'schemas\stage-result.schema.json') -Raw | ConvertFrom-Json -Depth 100
+        $stageSchemaV2 = Get-Content -LiteralPath (Join-Path $projectRoot 'schemas\stage-result-v2.schema.json') -Raw | ConvertFrom-Json -Depth 100
         $explanationSchema = Get-Content -LiteralPath (Join-Path $projectRoot 'schemas\explanation-result.schema.json') -Raw | ConvertFrom-Json -Depth 100
         Assert-Equal $stageSchema.properties.schemaVersion.type 'integer'
         Assert-Equal $stageSchema.properties.schemaVersion.const 1
+        Assert-False ('independent-merge-draft' -in @($stageSchema.properties.stage.enum))
+        Assert-False ('document-review' -in @($stageSchema.properties.stage.enum))
+        Assert-Equal $stageSchemaV2.properties.schemaVersion.type 'integer'
+        Assert-Equal $stageSchemaV2.properties.schemaVersion.const 2
+        Assert-True ('independent-merge-draft' -in @($stageSchemaV2.properties.stage.enum))
+        Assert-True ('document-review' -in @($stageSchemaV2.properties.stage.enum))
+        foreach ($requiredName in @('performedBy', 'targetDocumentId', 'sourceDocumentIds')) {
+            Assert-True ($requiredName -in @($stageSchemaV2.required))
+        }
+        Assert-True ('targetDocumentId' -in @($stageSchemaV2.properties.issues.items.required))
+        Assert-False ('target' -in @($stageSchemaV2.properties.issues.items.required))
+        foreach ($requiredName in @('sourceDocumentId', 'proposedByProvider', 'path', 'location', 'excerptHash')) {
+            Assert-True ($requiredName -in @($stageSchemaV2.properties.issues.items.properties.evidence.items.required))
+        }
         Assert-Equal $explanationSchema.properties.schemaVersion.type 'integer'
         Assert-Equal $explanationSchema.properties.schemaVersion.const 1
     }
@@ -1262,26 +1522,99 @@ try {
         }
     }
 
+    Test-Case '문서 병합 모드는 같은 A/B에서 독립 후보를 만들고 합의 문서와 출처 추적표를 만든다' {
+        $a = New-MarkdownFile -Path (Join-Path $tempRoot 'merge-e2e\A\source.md') -Text '# 문서 A'
+        $b = New-MarkdownFile -Path (Join-Path $tempRoot 'merge-e2e\B\source.md') -Text '# 문서 B'
+        $beforeA = (Get-FileHash -LiteralPath $a -Algorithm SHA256).Hash
+        $beforeB = (Get-FileHash -LiteralPath $b -Algorithm SHA256).Hash
+        $workspace = Join-Path $tempRoot 'merge-e2e-results'
+        $request = New-TestStartRequest -Mode document-merge -DocumentA $a -DocumentB $b -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $prompts = @{}
+        $result = & $module {
+            param($directory, $promptMap)
+            $callback = {
+                param($step, $prompt)
+                $promptMap[[string]$step.stepKey] = [string]$prompt.text
+                $stageResult = New-DuoForgeFakeStageResult -Step $step
+                if ([string]$step.stepKey -eq 'r01-codex-cross-review') {
+                    $stageResult.issues = @([ordered]@{
+                        issueKey = 'MERGE-R01-001'; targetDocumentId = 'merged'; category = 'coverage'; severity = 'minor'
+                        claim = '문서 A의 안전 조건을 합의 문서에 반영해야 합니다.'; evidence = @(); proposal = '안전 조건을 합의 문서에 포함하세요.'
+                        requiresUser = $false; blockingProposal = $false
+                    })
+                }
+                if ([string]$step.stepKey -eq 'r01-codex-synthesis') {
+                    $stageResult.adoptions = @([ordered]@{
+                        issueKey = 'MERGE-R01-001'; sourceDocumentId = 'A'; proposedByProvider = 'codex'; targetDocumentId = 'merged'
+                        disposition = 'ACCEPTED'; rationale = '안전 조건을 합의 문서에 채택했습니다.'; locations = @('안전 경계')
+                    })
+                }
+                return $stageResult
+            }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory $prompts
+        Assert-Equal $result.status 'COMPLETED'
+        $drafts = 'r01-codex-independent-merge-draft,r01-claude-independent-merge-draft'
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $prompts['r01-codex-independent-merge-draft']) -join ',')) ''
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $prompts['r01-claude-independent-merge-draft']) -join ',')) ''
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $prompts['r01-codex-cross-review']) -join ',')) $drafts
+        Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $prompts['r01-claude-cross-review']) -join ',')) $drafts
+        foreach ($name in @('PRD.md', 'source-trace.md', 'DEBATE_SUMMARY.md', 'DECISIONS.md', 'OPEN_QUESTIONS.md')) {
+            Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory "final\$name") -PathType Leaf)
+        }
+        $trace = Get-Content -LiteralPath (Join-Path $run.runDirectory 'final\source-trace.md') -Raw
+        Assert-ContainsText $trace '| 쟁점 | 원천 문서 | 제안 작업자 | 대상 문서 | 채택 상태 | 이유 | 반영 위치 | 라운드 |'
+        Assert-ContainsText $trace '| D-001 | A | codex | merged | ACCEPTED | 안전 조건을 합의 문서에 채택했습니다. | 안전 경계 | 1 |'
+        $mergeLedger = Get-Content -LiteralPath (Join-Path $run.runDirectory 'issues.json') -Raw | ConvertFrom-Json -Depth 50
+        Assert-Equal $mergeLedger.issues[0].targetDocumentId 'merged'
+        Assert-True ($null -eq $mergeLedger.issues[0].PSObject.Properties['target'])
+        Assert-Equal $mergeLedger.issues[0].resolutionStatus 'RESOLVED'
+        Assert-Equal (Get-FileHash -LiteralPath $a -Algorithm SHA256).Hash $beforeA
+        Assert-Equal (Get-FileHash -LiteralPath $b -Algorithm SHA256).Hash $beforeB
+    }
+
     Test-Case '독립 문서 모드는 양쪽 원본을 보존하고 최종 비교 산출물을 만든다' {
-        $codex = New-MarkdownFile -Path (Join-Path $tempRoot 'dual-e2e\codex\main.md') -Text '# Codex 원본'
-        $claude = New-MarkdownFile -Path (Join-Path $tempRoot 'dual-e2e\claude\main.md') -Text '# Claude 원본'
-        $beforeCodex = (Get-FileHash -LiteralPath $codex -Algorithm SHA256).Hash
-        $beforeClaude = (Get-FileHash -LiteralPath $claude -Algorithm SHA256).Hash
+        $documentA = New-MarkdownFile -Path (Join-Path $tempRoot 'dual-e2e\A\main.md') -Text '# 문서 A 원본'
+        $documentB = New-MarkdownFile -Path (Join-Path $tempRoot 'dual-e2e\B\main.md') -Text '# 문서 B 원본'
+        $beforeA = (Get-FileHash -LiteralPath $documentA -Algorithm SHA256).Hash
+        $beforeB = (Get-FileHash -LiteralPath $documentB -Algorithm SHA256).Hash
         $workspace = Join-Path $tempRoot 'dual-e2e-results'
-        $request = New-TestStartRequest -Mode dual-document -CodexDocument $codex -ClaudeDocument $claude -Workspace $workspace -DocumentType prd
+        $request = New-TestStartRequest -Mode dual-document -DocumentA $documentA -DocumentB $documentB -Workspace $workspace -DocumentType prd
         $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         $run = New-DuoForgeRun -ValidationResult $validation
         $result = & $module {
             param($directory)
-            $callback = { param($step) New-DuoForgeFakeStageResult -Step $step }
+            $callback = {
+                param($step)
+                $stageResult = New-DuoForgeFakeStageResult -Step $step
+                if ([string]$step.stepKey -eq 'r01-codex-document-review') {
+                    $stageResult.issues = @([ordered]@{
+                        issueKey = 'DUAL-R01-001'; targetDocumentId = 'A'; category = 'clarity'; severity = 'minor'
+                        claim = '문서 B의 용어 정의를 문서 A에 선택적으로 반영할 수 있습니다.'; evidence = @(); proposal = '용어 정의를 반영하세요.'
+                        requiresUser = $false; blockingProposal = $false
+                    })
+                }
+                if ([string]$step.stepKey -eq 'r01-codex-document-a-revision') {
+                    $stageResult.adoptions = @([ordered]@{
+                        issueKey = 'DUAL-R01-001'; sourceDocumentId = 'B'; proposedByProvider = 'claude'; targetDocumentId = 'A'
+                        disposition = 'PARTIALLY_ACCEPTED'; rationale = '문서 A의 목적에 맞는 정의만 반영했습니다.'; locations = @('용어 정의')
+                    })
+                }
+                return $stageResult
+            }
             Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
         } $run.runDirectory
         Assert-Equal $result.status 'COMPLETED'
-        foreach ($name in @('codex-final.md', 'claude-final.md', 'comparison.md', 'adoption-log.md', 'OPEN_QUESTIONS.md')) {
+        foreach ($name in @('document-A-final.md', 'document-B-final.md', 'comparison.md', 'adoption-log.md', 'OPEN_QUESTIONS.md')) {
             Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory "final\$name") -PathType Leaf)
         }
-        Assert-Equal (Get-FileHash -LiteralPath $codex -Algorithm SHA256).Hash $beforeCodex
-        Assert-Equal (Get-FileHash -LiteralPath $claude -Algorithm SHA256).Hash $beforeClaude
+        $adoptionLog = Get-Content -LiteralPath (Join-Path $run.runDirectory 'final\adoption-log.md') -Raw
+        Assert-ContainsText $adoptionLog '| 쟁점 | 원천 문서 | 제안 작업자 | 편집 작업자 | 대상 문서 | 채택 상태 | 이유 | 반영 위치 | 라운드 |'
+        Assert-ContainsText $adoptionLog '| D-001 | B | claude | codex | A | PARTIALLY_ACCEPTED | 문서 A의 목적에 맞는 정의만 반영했습니다. | 용어 정의 | 1 |'
+        Assert-Equal (Get-FileHash -LiteralPath $documentA -Algorithm SHA256).Hash $beforeA
+        Assert-Equal (Get-FileHash -LiteralPath $documentB -Algorithm SHA256).Hash $beforeB
     }
 
     Test-Case '최종 검증의 Critical 쟁점은 완료를 사용자 결정 대기로 바꾼다' {
@@ -1299,7 +1632,7 @@ try {
                     $stageResult.finalApproved = $false
                     $stageResult.issues = @([ordered]@{
                         issueKey = 'CODEX-R02-001'
-                        target = 'shared-final-document'
+                        targetDocumentId = 'merged'
                         category = 'safety'
                         severity = 'critical'
                         claim = '필수 안전 경계가 누락되었습니다.'
@@ -1347,11 +1680,11 @@ try {
                     $stageResult.finalApproved = $false
                     $stageResult.issues = @([ordered]@{
                         issueKey = 'CLAUDE-R02-001'
-                        target = 'shared-final-document'
+                        targetDocumentId = 'merged'
                         category = 'core-requirement'
                         severity = 'critical'
                         claim = '데이터 보존 정책을 사용자가 결정해야 합니다.'
-                        evidence = @([ordered]@{ source = 'S000001.md'; location = '본문'; excerptHash = 'sha256:test' })
+                        evidence = @([ordered]@{ sourceDocumentId = 'brief'; proposedByProvider = 'codex'; path = 'S000001.md'; location = '본문'; excerptHash = 'sha256:test' })
                         proposal = '보존 기간을 선택하세요.'
                         requiresUser = $true
                         blockingProposal = $true
@@ -1429,7 +1762,7 @@ try {
                     $stageResult.finalApproved = $false
                     $stageResult.issues = @([ordered]@{
                         issueKey = 'EVIDENCE-R02-001'
-                        target = 'shared-final-document'
+                        targetDocumentId = 'merged'
                         category = 'core-requirement'
                         severity = 'major'
                         claim = '보존 기간을 확인할 근거가 없습니다.'
@@ -1627,7 +1960,7 @@ try {
                 $result = New-DuoForgeFakeStageResult -Step $step
                 if ([string]$step.stage -eq 'final-validation') {
                     $result.finalApproved = $false
-                    $result.issues = @([ordered]@{ issueKey = 'CHANGE-R02-001'; target = 'shared-final-document'; category = 'preference'; severity = 'major'; claim = '배포 전략 선택이 필요합니다.'; evidence = @(); proposal = '점진 배포를 선택하세요.'; requiresUser = $true; blockingProposal = $true })
+                    $result.issues = @([ordered]@{ issueKey = 'CHANGE-R02-001'; targetDocumentId = 'merged'; category = 'preference'; severity = 'major'; claim = '배포 전략 선택이 필요합니다.'; evidence = @(); proposal = '점진 배포를 선택하세요.'; requiresUser = $true; blockingProposal = $true })
                     $result.openQuestions = @([ordered]@{ issueKey = 'CHANGE-R02-001'; title = '배포 전략'; question = '어떤 전략을 선택할까요?'; options = @('점진 배포', '일괄 배포'); recommendedOption = '점진 배포'; reasonNow = '배포 전에 전략을 확정해야 합니다.'; plainExplanation = '출시 범위를 한 번에 넓힐지 나눌지 정하는 문제입니다.'; codexOpinion = '점진 배포를 권고합니다.'; claudeOpinion = '점진 배포를 권고합니다.'; estimatedCost = '중간'; reversibility = 'moderate'; confidence = 'high'; impactIfDeferred = '출시 지연'; safeDefault = '점진 배포'; experimentPossible = $true })
                 }
                 $result

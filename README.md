@@ -1,8 +1,17 @@
 # DuoForge
 
-DuoForge는 Codex와 Claude가 같은 입력 스냅샷을 독립적으로 검토하고 서로의 결과를 비평하도록 조율하는 Windows 로컬 우선 CLI다.
+DuoForge는 Codex와 Claude가 불변 입력 스냅샷을 검토하고 토론하도록 조율하는 Windows 로컬 우선 CLI다. 문서 A/B는 공급자 소유권이 아닌 안정적인 문서 계보이며, Codex와 Claude는 교체 가능한 검토자·응답자·편집자·합성자·검증자다.
 
-현재 저장소는 PRD v1.5의 문서 모드 Core Beta 구현이다. 공통 안전 기반, 진단, 필수 모델·추론 정도 선택, 실행 계획, 불변 스냅샷, 구조화 토론 단계, 재개 가능한 상태 저장, 고정형 토론 진행판, 쟁점 설명·근거 추가·사용자 결정과 최종 산출물 렌더링을 제공한다. 프로젝트 읽기 전용 비교(3A)는 현재 Windows 격리 후보가 범위 밖 읽기와 자식 프로세스 차단에 실패하여 의도적으로 비활성화되어 있다.
+현재 저장소는 PRD v1.6의 문서 모드 확장 Beta 구현이다. 공통 안전 기반, 진단, 필수 모델·추론 정도 선택, 실행 계획, 불변 스냅샷, 구조화 토론 단계, 재개 가능한 상태 저장, 고정형 토론 진행판, 쟁점 설명·근거 추가·사용자 결정과 최종 산출물 렌더링을 제공한다.
+
+| 화면 모드 | 내부 ID | 입력 | 결과 | 상태 |
+|---|---|---|---|---|
+| 1. 컨셉으로 공동 문서 만들기 | `shared-document` | brief 또는 컨셉 C | 공동 문서 C' | 활성 |
+| 2. 두 문서를 하나로 합의하기 | `document-merge` | 문서 A/B | 합의 문서 C와 출처 추적표 | 오프라인 검증 |
+| 3. 두 문서를 각각 개선하기 | `dual-document` | 문서 A/B | 개선 문서 A'/B'와 채택 기록 | 오프라인 검증 |
+| 4. 두 프로젝트 비교하기 | `dual-project-audit` | 프로젝트 A/B | 비교 보고서 | 격리 실패로 비활성 |
+
+모드 4는 Windows 격리 후보가 범위 밖 읽기와 자식 프로세스 차단에 실패하여 `DF-PREFLIGHT-3A-ISOLATION`으로 입력 전송과 모델 호출 전에 차단된다. 사용자 확인으로 이 게이트를 열 수 없다.
 
 ## 요구 환경
 
@@ -40,7 +49,35 @@ DuoForge는 Codex와 Claude가 같은 입력 스냅샷을 독립적으로 검토
   --plan-only
 ```
 
+문서 A/B를 사용하는 모드 2와 3은 공급자 이름이 아닌 정규 문서 옵션을 사용한다.
+
+```powershell
+.\duoforge.cmd start document-merge `
+  --document-a ".\docs-a\PRD.md" `
+  --document-b ".\docs-b\PRD.md" `
+  --codex-model "gpt-5.6-sol" --codex-effort "high" `
+  --claude-model "opus" --claude-effort "high" `
+  --type "prd" --max-rounds 2 --plan-only
+
+.\duoforge.cmd start dual-document `
+  --document-a ".\docs-a\PRD.md" `
+  --document-b ".\docs-b\PRD.md" `
+  --codex-model "gpt-5.6-sol" --codex-effort "high" `
+  --claude-model "opus" --claude-effort "high" `
+  --type "prd" --max-rounds 2 --plan-only
+```
+
+모드 2·3은 문서 A/B의 폴더가 같거나 중첩되면 보조 Markdown 문맥이 섞이지 않도록 시작 전에 차단한다. 기존 `--codex`와 `--claude` 문서 옵션은 A/B로 변환하고 사용 중단 예정 경고를 남기지만, 신규 실행 기록에는 `documentA/documentB`만 저장한다.
+
 `--plan-only`는 모델을 호출하거나 확정 실행을 만들지 않고 선택한 모델·추론 정도, 검증·전송 범위와 최악 호출 수만 보여준다. 네 선택 옵션은 생략할 수 없으며, 인수 없이 여는 대화형 메뉴에서는 각 항목을 번호로 반드시 선택한다.
+
+신규 실행은 `workflow-v2`와 문서 계보 A/B, 단계 작업자 `performedBy`를 분리해 기록한다. `workflowVersion`이 없는 기존 실행은 `workflow-v1`로 읽으며 기존 단계 그래프, `owner-response`/`owned-document-revision`, 파일명과 프롬프트 의미를 묵시적으로 바꾸거나 재작성하지 않는다.
+
+완료 산출물은 실행 폴더의 `final` 아래에 생성된다.
+
+- 모드 1: 문서 유형별 최종 문서, `DEBATE_SUMMARY.md`, `DECISIONS.md`, `OPEN_QUESTIONS.md`
+- 모드 2: 합의 문서 C, `source-trace.md`, `DEBATE_SUMMARY.md`, `DECISIONS.md`, `OPEN_QUESTIONS.md`
+- 모드 3: `document-A-final.md`, `document-B-final.md`, `comparison.md`, `adoption-log.md`, `OPEN_QUESTIONS.md`
 
 Codex 메뉴는 DuoForge 프로세스를 시작할 때 CLI의 `app-server model/list`를 호출해 현재 계정에 노출된 모델, 기본 모델과 모델별 기본·지원 추론 정도를 다시 받는다. 이 호출이 실패하면 CLI 로컬 캐시, 마지막으로 제한된 내장 목록 순서로 폴백하며 메뉴에 출처와 경고를 표시한다. CLI가 지정한 기본 모델을 권장하고, `high`가 해당 모델에 실제로 존재할 때만 `high`를 권장한다. `high`가 사라지면 CLI 기본 추론 정도, `medium`, 첫 지원값 순서로 이동한다.
 
@@ -101,7 +138,7 @@ Claude CLI는 계정별 `/model` 전체 행을 기계 판독 목록으로 내보
 
 ### 고정형 토론 진행판
 
-대화형 메뉴의 `R → LIVE`와 명시적 `resume --live`는 PowerShell 7 터미널에서 고정형 진행판을 연다. 진행판은 실제 단계 장벽을 `독립 초안 → 교차 비평 → 응답 → 합성 → 최종 검증` 순서로 표시하고, 현재 공급자·단계·경과 시간과 가장 최근에 검증·저장된 구조화 요약을 보여준다.
+대화형 메뉴의 `R → LIVE`와 명시적 `resume --live`는 PowerShell 7 터미널에서 고정형 진행판을 연다. 진행판은 선택한 모드의 실제 단계 장벽을 표시하고, 현재 공급자·작업 단계·대상 문서·경과 시간과 가장 최근에 검증·저장된 구조화 요약을 보여준다.
 
 ```text
 DUOFORGE  토론 진행판
@@ -121,12 +158,12 @@ DUOFORGE  토론 진행판
 
 Windows Terminal 또는 VS Code 통합 터미널에서 VT 지원, 입출력 비리디렉션, 최소 `72×20` 크기를 모두 만족할 때 대체 화면 버퍼를 사용한다. 조건을 만족하지 않거나 실행 중 화면 갱신이 실패하면 모델 실행을 중단하지 않고 ANSI 없는 누적 진행 로그로 자동 전환한다. 종료 화면에서 Enter를 누르면 기존 터미널 화면과 작업 메뉴로 돌아간다.
 
-공급자별 1회 라이브 스모크와 두 문서 모드의 2라운드 전체 단계 E2E는 `gpt-5.6-sol/high`와 `Opus 5(opus)/high`로 통과했다. 공동 문서는 13/13 단계, 독립 문서는 12/12 단계를 커밋했고, 독립 문서 실행은 사용자 결정 8건을 반영한 뒤 `COMPLETED`에 도달했다. 두 실행에서 구조화 출력, 금지 도구 이벤트 0건, 원본 해시 동일, 임시 작업물 정리와 호출 후 구독 인증 유지를 확인했으며 자세한 근거는 [docs/STAGE0_SPIKE.md](docs/STAGE0_SPIKE.md)에 기록했다. 3A Windows 격리 후보는 쓰기는 차단했지만 범위 밖 읽기와 자식 프로세스 실행을 허용하여 안전 게이트를 통과하지 못했으며, 상세 결과는 [docs/3A_ISOLATION_SPIKE.md](docs/3A_ISOLATION_SPIKE.md)에 기록했다.
+기존 공급자별 라이브 스모크와 2라운드 전체 단계 E2E는 `workflow-v1 shared-document/dual-document`의 역사적 증거다. 공동 문서는 13/13 단계, 독립 문서는 12/12 단계를 커밋했으며 자세한 근거는 [docs/STAGE0_SPIKE.md](docs/STAGE0_SPIKE.md)에 기록했다. 이 결과를 신규 `document-merge`나 `workflow-v2 dual-document`의 라이브 완료 증거로 재해석하지 않는다. 신규 모드 1~3은 가짜 공급자 2라운드 E2E와 오프라인 회귀로 검증하며, 실제 공급자 E2E는 전체 로컬 테스트 통과 뒤 기존의 명시적 `LIVE` 확인 절차로 별도 수행한다.
 
 ## 테스트
 
 ```powershell
-& "C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo -NoProfile -File ".\tests\Run-Tests.ps1"
+& 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -File '.\tests\Run-Tests.ps1'
 ```
 
 구현 단계와 안전 판단은 [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md), 현재 CLI 검증 근거는 [docs/STAGE0_SPIKE.md](docs/STAGE0_SPIKE.md), 3A 격리 판정은 [docs/3A_ISOLATION_SPIKE.md](docs/3A_ISOLATION_SPIKE.md)를 참고한다.

@@ -38,10 +38,12 @@ function New-DuoForgeStartRequestInternal {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('shared-document', 'dual-document', 'dual-project-audit')]
+        [ValidateSet('shared-document', 'document-merge', 'dual-document', 'dual-project-audit')]
         [string]$Mode,
 
         [string]$Brief,
+        [string]$DocumentA,
+        [string]$DocumentB,
         [string]$CodexDocument,
         [string]$ClaudeDocument,
         [string]$CodexProject,
@@ -63,7 +65,15 @@ function New-DuoForgeStartRequestInternal {
         [string]$Name
     )
 
+    $documentInputs = Resolve-DuoForgeDocumentInputAliasesInternal `
+        -DocumentA $DocumentA `
+        -DocumentB $DocumentB `
+        -CodexDocument $CodexDocument `
+        -ClaudeDocument $ClaudeDocument
+
     return [ordered]@{
+        schemaVersion = 2
+        workflowVersion = 'workflow-v2'
         mode = $Mode
         name = $Name
         documentType = $DocumentType
@@ -72,6 +82,7 @@ function New-DuoForgeStartRequestInternal {
         pauseAfterRound = $PauseAfterRound
         allowPartial = $AllowPartial
         workspace = $Workspace
+        compatibilityWarnings = @($documentInputs.warnings)
         providerSelections = [ordered]@{
             codex = [ordered]@{
                 model = ([string]$CodexModel).Trim()
@@ -84,8 +95,8 @@ function New-DuoForgeStartRequestInternal {
         }
         inputs = [ordered]@{
             brief = $Brief
-            codexDocument = $CodexDocument
-            claudeDocument = $ClaudeDocument
+            documentA = [string]$documentInputs.documentA
+            documentB = [string]$documentInputs.documentB
             codexProject = $CodexProject
             claudeProject = $ClaudeProject
             requirements = $Requirements
@@ -126,7 +137,16 @@ function Test-DuoForgeStartRequestInternal {
     $warnings = [System.Collections.Generic.List[object]]::new()
     $inputs = [ordered]@{}
     $mode = [string]$Request.mode
+    $requestWorkflowVersion = [string](Get-DuoForgeObjectValue -Object $Request -Name 'workflowVersion' -Default '')
     $resultsRoot = if ([string]::IsNullOrWhiteSpace([string]$Request.workspace)) { [string]$Config.resultsRoot } else { [string]$Request.workspace }
+
+    if ($requestWorkflowVersion -ne 'workflow-v2') {
+        $errors.Add([ordered]@{ code = 'DF-WORKFLOW-NEW-RUN'; message = '신규 실행 요청은 workflow-v2 계약으로만 만들 수 있습니다.' })
+    }
+
+    foreach ($warning in @(Get-DuoForgeObjectValue -Object $Request -Name 'compatibilityWarnings' -Default @())) {
+        $warnings.Add((ConvertTo-DuoForgeHashtable -InputObject $warning))
+    }
 
     try {
         $resultsRoot = Resolve-DuoForgePathInternal -Path $resultsRoot -ExpectedType Directory -AllowMissing
@@ -159,26 +179,28 @@ function Test-DuoForgeStartRequestInternal {
             $errors.Add([ordered]@{ code = Get-DuoForgeExceptionCode -Exception $_.Exception; message = $_.Exception.Message })
         }
     }
-    elseif ($mode -eq 'dual-document') {
+    elseif ($mode -in @('document-merge', 'dual-document')) {
         try {
-            if ([string]::IsNullOrWhiteSpace([string]$Request.inputs.codexDocument) -or [string]::IsNullOrWhiteSpace([string]$Request.inputs.claudeDocument)) {
-                throw (New-DuoForgeException -Code 'DF-INPUT-DUAL-REQUIRED' -Message '독립 문서 모드에는 --codex와 --claude Markdown 파일이 모두 필요합니다.')
+            if ([string]::IsNullOrWhiteSpace([string]$Request.inputs.documentA) -or [string]::IsNullOrWhiteSpace([string]$Request.inputs.documentB)) {
+                throw (New-DuoForgeException -Code 'DF-INPUT-DUAL-REQUIRED' -Message '문서 모드에는 --document-a와 --document-b Markdown 파일이 모두 필요합니다.')
             }
-            $codexPrimary = Assert-DuoForgeMarkdownFile -Path ([string]$Request.inputs.codexDocument) -MaximumBytes ([long]$Config.limits.documentBytes)
-            $claudePrimary = Assert-DuoForgeMarkdownFile -Path ([string]$Request.inputs.claudeDocument) -MaximumBytes ([long]$Config.limits.documentBytes)
-            $codexParent = [System.IO.Path]::GetDirectoryName($codexPrimary.path)
-            $claudeParent = [System.IO.Path]::GetDirectoryName($claudePrimary.path)
-            Assert-DuoForgeDisjointPaths -PathA $codexParent -PathB $claudeParent -Code 'DF-PATH-DUAL-DOCUMENT-OVERLAP' -LabelA 'Codex 문서 폴더' -LabelB 'Claude 문서 폴더'
+            $documentAPrimary = Assert-DuoForgeMarkdownFile -Path ([string]$Request.inputs.documentA) -MaximumBytes ([long]$Config.limits.documentBytes)
+            $documentBPrimary = Assert-DuoForgeMarkdownFile -Path ([string]$Request.inputs.documentB) -MaximumBytes ([long]$Config.limits.documentBytes)
+            $documentAParent = [System.IO.Path]::GetDirectoryName($documentAPrimary.path)
+            $documentBParent = [System.IO.Path]::GetDirectoryName($documentBPrimary.path)
+            Assert-DuoForgeDisjointPaths -PathA $documentAParent -PathB $documentBParent -Code 'DF-PATH-DUAL-DOCUMENT-OVERLAP' -LabelA '문서 A 폴더' -LabelB '문서 B 폴더'
             if ($errors.Count -eq 0) {
-                Assert-DuoForgeOutputBoundary -ResultsRoot $resultsRoot -InputBoundaries @($codexParent, $claudeParent)
+                Assert-DuoForgeOutputBoundary -ResultsRoot $resultsRoot -InputBoundaries @($documentAParent, $documentBParent)
             }
-            $inputs['codex'] = [ordered]@{
-                primary = $codexPrimary
-                context = Get-DuoForgeMarkdownInventoryInternal -Directory $codexParent -MaximumFileBytes ([long]$Config.limits.documentBytes)
-            }
-            $inputs['claude'] = [ordered]@{
-                primary = $claudePrimary
-                context = Get-DuoForgeMarkdownInventoryInternal -Directory $claudeParent -MaximumFileBytes ([long]$Config.limits.documentBytes)
+            $inputs['documents'] = [ordered]@{
+                A = [ordered]@{
+                    primary = $documentAPrimary
+                    context = Get-DuoForgeMarkdownInventoryInternal -Directory $documentAParent -MaximumFileBytes ([long]$Config.limits.documentBytes)
+                }
+                B = [ordered]@{
+                    primary = $documentBPrimary
+                    context = Get-DuoForgeMarkdownInventoryInternal -Directory $documentBParent -MaximumFileBytes ([long]$Config.limits.documentBytes)
+                }
             }
         }
         catch {
@@ -196,7 +218,7 @@ function Test-DuoForgeStartRequestInternal {
     }
 
     $authenticationGate = Get-DuoForgeAuthenticationGateInternal -Report $DoctorReport
-    if (-not [bool]$authenticationGate.modelCallsAllowed -and $mode -in @('shared-document', 'dual-document')) {
+    if (-not [bool]$authenticationGate.modelCallsAllowed -and $mode -in @('shared-document', 'document-merge', 'dual-document')) {
         $errors.Add([ordered]@{
             code = [string]$authenticationGate.blockCode
             message = '두 공급자의 구독 인증과 안전 실행 프로필이 모두 준비되지 않았습니다. duoforge doctor 결과를 확인해 주세요.'
@@ -206,10 +228,10 @@ function Test-DuoForgeStartRequestInternal {
     $plan = $null
     $contextPlan = $null
     try {
-        $basePlan = Get-DuoForgeExecutionPlanInternal -Mode $mode -MaxRounds ([int]$Request.maxRounds) -FirstSynthesizer ([string]$Request.firstSynthesizer) -MaxCallsPerProvider ([int]$Config.limits.maxCallsPerProviderPerRun)
+        $basePlan = Get-DuoForgeExecutionPlanInternal -Mode $mode -MaxRounds ([int]$Request.maxRounds) -FirstSynthesizer ([string]$Request.firstSynthesizer) -MaxCallsPerProvider ([int]$Config.limits.maxCallsPerProviderPerRun) -WorkflowVersion 'workflow-v2'
         $partialValidation = [ordered]@{ request = $Request; inputs = $inputs }
         $contextPlan = New-DuoForgeContextBatchPlanInternal -ValidationResult $partialValidation -Config $Config -BaseExecutionPlan $basePlan
-        $plan = Get-DuoForgeExecutionPlanInternal -Mode $mode -MaxRounds ([int]$Request.maxRounds) -FirstSynthesizer ([string]$Request.firstSynthesizer) -MaxCallsPerProvider ([int]$Config.limits.maxCallsPerProviderPerRun) -ContextBatchCount ([int]$contextPlan.selectedBatchCount)
+        $plan = Get-DuoForgeExecutionPlanInternal -Mode $mode -MaxRounds ([int]$Request.maxRounds) -FirstSynthesizer ([string]$Request.firstSynthesizer) -MaxCallsPerProvider ([int]$Config.limits.maxCallsPerProviderPerRun) -ContextBatchCount ([int]$contextPlan.selectedBatchCount) -WorkflowVersion 'workflow-v2'
         if (-not $plan.withinLimits) {
             $errors.Add([ordered]@{ code = 'DF-PLAN-CALL-LIMIT'; message = '최악 호출 계획이 공급자별 강제 호출 상한을 초과합니다.' })
         }

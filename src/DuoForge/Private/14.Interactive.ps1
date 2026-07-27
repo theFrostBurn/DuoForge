@@ -70,18 +70,43 @@ function Invoke-DuoForgeInteractiveSetup {
     }
 }
 
+function Get-DuoForgeInteractiveNewModeOptionsInternal {
+    [CmdletBinding()]
+    param()
+
+    return @(
+        [ordered]@{ key = '1'; mode = 'shared-document'; label = '컨셉으로 공동 문서 만들기'; enabled = $true; disabledReason = $null }
+        [ordered]@{ key = '2'; mode = 'document-merge'; label = '두 문서를 하나로 합의하기'; enabled = $true; disabledReason = $null }
+        [ordered]@{ key = '3'; mode = 'dual-document'; label = '두 문서를 각각 개선하기'; enabled = $true; disabledReason = $null }
+        [ordered]@{ key = '4'; mode = 'dual-project-audit'; label = '두 프로젝트 비교하기'; enabled = $false; disabledReason = 'DF-PREFLIGHT-3A-ISOLATION: Windows 격리 게이트가 범위 밖 읽기와 자식 프로세스 차단을 증명하지 못했습니다.' }
+    )
+}
+
 function Invoke-DuoForgeInteractiveNew {
     [CmdletBinding()]
     param()
 
     Write-Host ''
     Write-Host '무엇을 하시겠습니까?'
-    Write-Host '[1] 하나의 문서를 함께 검토하고 완성'
-    Write-Host '[2] 두 문서를 서로 비교하여 각각 개선'
+    $modeOptions = @(Get-DuoForgeInteractiveNewModeOptionsInternal)
+    foreach ($option in $modeOptions) {
+        $suffix = if ([bool]$option.enabled) { '' } else { ' — 비활성화' }
+        Write-Host ("[{0}] {1}{2}" -f [string]$option.key, [string]$option.label, $suffix)
+    }
     Write-Host '[B] 이전으로'
-    Write-Host '프로젝트 비교(3A)는 현재 Windows 격리 후보가 필수 차단 계약을 충족하지 못해 표시하지 않습니다.' -ForegroundColor DarkYellow
     $choice = (Read-Host '선택').Trim()
     if ($choice -ieq 'B') { return }
+
+    $selectedOption = @($modeOptions | Where-Object { [string]$_.key -eq $choice }) | Select-Object -First 1
+    if ($null -eq $selectedOption) {
+        Write-Host '올바른 항목을 선택해 주세요.' -ForegroundColor Yellow
+        return
+    }
+    if (-not [bool]$selectedOption.enabled) {
+        Write-Host ([string]$selectedOption.disabledReason) -ForegroundColor DarkYellow
+        Write-Host '입력 전송과 모델 호출 없이 종료합니다.' -ForegroundColor DarkYellow
+        return
+    }
 
     if ($choice -eq '1') {
         $brief = Read-DuoForgePathChoice -Prompt '입력 Markdown 문서를 선택해 주세요.' -Role 'shared-brief' -Type File
@@ -92,20 +117,16 @@ function Invoke-DuoForgeInteractiveNew {
             -CodexModel ([string]$selections.codex.model) -CodexReasoningEffort ([string]$selections.codex.reasoningEffort) `
             -ClaudeModel ([string]$selections.claude.model) -ClaudeReasoningEffort ([string]$selections.claude.reasoningEffort)
     }
-    elseif ($choice -eq '2') {
-        $codexDocument = Read-DuoForgePathChoice -Prompt 'Codex 측 Markdown 문서를 선택해 주세요.' -Role 'codex-document' -Type File
-        if ($null -eq $codexDocument) { return }
-        $claudeDocument = Read-DuoForgePathChoice -Prompt 'Claude 측 Markdown 문서를 선택해 주세요.' -Role 'claude-document' -Type File
-        if ($null -eq $claudeDocument) { return }
+    elseif ($choice -in @('2', '3')) {
+        $documentA = Read-DuoForgePathChoice -Prompt '문서 A의 주요 Markdown 파일을 선택해 주세요.' -Role 'document-a' -Type File
+        if ($null -eq $documentA) { return }
+        $documentB = Read-DuoForgePathChoice -Prompt '문서 B의 주요 Markdown 파일을 선택해 주세요.' -Role 'document-b' -Type File
+        if ($null -eq $documentB) { return }
         $selections = Complete-DuoForgeInteractiveProviderSelectionsInternal
         if ($null -eq $selections) { Write-Host '모델 선택을 취소했습니다.'; return }
-        $request = New-DuoForgeStartRequestInternal -Mode 'dual-document' -CodexDocument $codexDocument -ClaudeDocument $claudeDocument -DocumentType 'custom' -MaxRounds 2 `
+        $request = New-DuoForgeStartRequestInternal -Mode ([string]$selectedOption.mode) -DocumentA $documentA -DocumentB $documentB -DocumentType 'custom' -MaxRounds 2 `
             -CodexModel ([string]$selections.codex.model) -CodexReasoningEffort ([string]$selections.codex.reasoningEffort) `
             -ClaudeModel ([string]$selections.claude.model) -ClaudeReasoningEffort ([string]$selections.claude.reasoningEffort)
-    }
-    else {
-        Write-Host '올바른 항목을 선택해 주세요.' -ForegroundColor Yellow
-        return
     }
 
     $validation = Test-DuoForgeStartRequestInternal -Request $request

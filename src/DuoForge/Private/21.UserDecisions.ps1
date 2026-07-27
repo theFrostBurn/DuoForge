@@ -32,9 +32,14 @@ function Reset-DuoForgeDecisionAffectedSteps {
         throw (New-DuoForgeException -Code 'DF-DECISION-NO-STEPS' -Message '사용자 결정을 반영할 단계 그래프가 없습니다.')
     }
     $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $stepsPath)
+    $manifest = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json')
+    $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
     $maximumRound = [int]$graph.maxRounds
-    if ($Mode -eq 'shared-document') {
+    if ($Mode -in @('shared-document', 'document-merge')) {
         $affected = @($graph.steps | Where-Object { [int]$_.round -eq $maximumRound -and [string]$_.stage -in @('synthesis', 'final-validation') })
+    }
+    elseif ($workflowVersion -eq 'workflow-v2') {
+        $affected = @($graph.steps | Where-Object { [int]$_.round -eq $maximumRound -and [string]$_.stage -in @('document-revision', 'document-validation') })
     }
     else {
         $affected = @($graph.steps | Where-Object { [int]$_.round -eq $maximumRound -and [string]$_.stage -eq 'owned-document-revision' })

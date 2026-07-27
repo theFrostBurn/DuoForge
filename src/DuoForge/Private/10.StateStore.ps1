@@ -102,11 +102,11 @@ function Get-DuoForgeSnapshotFilesFromValidation {
         $file = $ValidationResult.inputs.primary
         $filesByPath[[string]$file.path] = $file
     }
-    elseif ($ValidationResult.request.mode -eq 'dual-document') {
-        foreach ($side in @('codex', 'claude')) {
-            $primary = $ValidationResult.inputs[$side].primary
+    elseif ($ValidationResult.request.mode -in @('document-merge', 'dual-document')) {
+        foreach ($documentId in @('A', 'B')) {
+            $primary = $ValidationResult.inputs.documents[$documentId].primary
             $filesByPath[[string]$primary.path] = $primary
-            foreach ($contextFile in @($ValidationResult.inputs[$side].context.files | Where-Object { $_.included })) {
+            foreach ($contextFile in @($ValidationResult.inputs.documents[$documentId].context.files | Where-Object { $_.included })) {
                 $record = ConvertTo-DuoForgeHashtable -InputObject $contextFile
                 $filesByPath[[string]$record.path] = $record
             }
@@ -132,19 +132,19 @@ function New-DuoForgeSnapshotRoles {
         return [ordered]@{ shared = [ordered]@{ primary = $bySource[$primaryPath]; context = @() } }
     }
 
-    $roles = [ordered]@{}
-    foreach ($side in @('codex', 'claude')) {
-        $primaryPath = [string]$ValidationResult.inputs[$side].primary.path
+    $documentRoles = [ordered]@{}
+    foreach ($documentId in @('A', 'B')) {
+        $primaryPath = [string]$ValidationResult.inputs.documents[$documentId].primary.path
         $contextNames = [System.Collections.Generic.List[string]]::new()
-        foreach ($item in @($ValidationResult.inputs[$side].context.files | Where-Object { $_.included })) {
+        foreach ($item in @($ValidationResult.inputs.documents[$documentId].context.files | Where-Object { $_.included })) {
             $path = [string]$item.path
             if ($path -ne $primaryPath -and $bySource.ContainsKey($path)) {
                 $contextNames.Add($bySource[$path])
             }
         }
-        $roles[$side] = [ordered]@{ primary = $bySource[$primaryPath]; context = @($contextNames) }
+        $documentRoles[$documentId] = [ordered]@{ primary = $bySource[$primaryPath]; context = @($contextNames) }
     }
-    return $roles
+    return [ordered]@{ documents = $documentRoles }
 }
 
 function New-DuoForgeRunInternal {
@@ -220,7 +220,8 @@ function New-DuoForgeRunInternal {
         Write-DuoForgeJsonAtomic -Path (Join-Path $runDirectory 'state.json') -Value $state
 
         $manifest = [ordered]@{
-            schemaVersion = 2
+            schemaVersion = 3
+            workflowVersion = 'workflow-v2'
             runId = $runId
             name = if ([string]::IsNullOrWhiteSpace([string]$request.name)) { [System.IO.Path]::GetFileNameWithoutExtension([string]$sourceFiles[0].path) } else { $request.name }
             mode = $request.mode
@@ -234,7 +235,7 @@ function New-DuoForgeRunInternal {
             pauseAfterRound = [bool](Get-DuoForgeObjectValue -Object $request -Name 'pauseAfterRound' -Default $false)
             allowPartial = [bool](Get-DuoForgeObjectValue -Object $request -Name 'allowPartial' -Default $false)
             subscriptionOnly = $true
-            promptTemplateVersion = 'duoforge-stage-v2'
+            promptTemplateVersion = 'duoforge-stage-v3'
             artifactVisibilityPolicy = 'transitive-dependencies-v1'
             providers = [ordered]@{
                 codex = [ordered]@{ version = $ValidationResult.doctor.providers.codex.version; authType = $ValidationResult.doctor.providers.codex.authType }

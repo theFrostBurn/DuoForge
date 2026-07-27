@@ -8,7 +8,8 @@ DuoForge
   duoforge
   duoforge doctor [--json]
   duoforge start shared-document --brief <파일> --codex-model <모델> --codex-effort <단계> --claude-model <모델> --claude-effort <단계> [--pause-after-round] [--allow-partial] [--plan-only]
-  duoforge start dual-document --codex <파일> --claude <파일> --codex-model <모델> --codex-effort <단계> --claude-model <모델> --claude-effort <단계> [--pause-after-round] [--allow-partial] [--plan-only]
+  duoforge start document-merge --document-a <파일> --document-b <파일> --codex-model <모델> --codex-effort <단계> --claude-model <모델> --claude-effort <단계> [--pause-after-round] [--allow-partial] [--plan-only]
+  duoforge start dual-document --document-a <파일> --document-b <파일> --codex-model <모델> --codex-effort <단계> --claude-model <모델> --claude-effort <단계> [--pause-after-round] [--allow-partial] [--plan-only]
   duoforge status --run <실행 ID> [--workspace <폴더>] [--json]
   duoforge issues --run <실행 ID> [--workspace <폴더>] [--json]
   duoforge explain --run <실행 ID> --issue <쟁점 ID> [--provider codex|claude|both] [--level beginner|general|expert] [--focus general|evidence|examples|tradeoffs|experiment] [--live]
@@ -30,6 +31,9 @@ DuoForge
   - 새 실행마다 두 공급자의 모델과 추론 정도를 명시적으로 선택합니다.
   - 모델 호출 전 입력, 전송 범위와 최악 호출 수를 확인합니다.
   - 3A는 현재 Windows 격리 후보가 필수 차단 계약을 충족하지 못해 비활성화되어 있습니다.
+
+호환 별칭:
+  - 문서 모드의 --codex와 --claude는 각각 --document-a와 --document-b로 정규화되며 사용 중단 예정 경고가 표시됩니다.
 '@ | Write-Host
 }
 
@@ -90,11 +94,14 @@ function Write-DuoForgeExecutionPlan {
     if ($Validation.request.mode -eq 'shared-document') {
         Write-Host ('입력: {0} ({1})' -f $Validation.inputs.primary.path, (Format-DuoForgeByteSize -Bytes $Validation.inputs.primary.bytes))
     }
-    elseif ($Validation.request.mode -eq 'dual-document') {
-        foreach ($side in @('codex', 'claude')) {
-            $context = $Validation.inputs[$side].context
-            Write-Host ('{0}: {1}, 자동 문맥 {2}개 / {3}' -f $side, $Validation.inputs[$side].primary.path, $context.includedFiles, (Format-DuoForgeByteSize -Bytes $context.includedBytes))
+    elseif ($Validation.request.mode -in @('document-merge', 'dual-document')) {
+        foreach ($documentId in @('A', 'B')) {
+            $context = $Validation.inputs.documents[$documentId].context
+            Write-Host ('문서 {0}: {1}, 자동 문맥 {2}개 / {3}' -f $documentId, $Validation.inputs.documents[$documentId].primary.path, $context.includedFiles, (Format-DuoForgeByteSize -Bytes $context.includedBytes))
         }
+    }
+    foreach ($warning in @($Validation.warnings)) {
+        Write-Host ("경고 [$($warning.code)] $($warning.message)") -ForegroundColor Yellow
     }
     foreach ($provider in @('codex', 'claude')) {
         $providerPlan = $Validation.executionPlan.providers[$provider]

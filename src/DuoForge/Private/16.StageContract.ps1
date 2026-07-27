@@ -1,8 +1,9 @@
 function Get-DuoForgeStageSchemaPath {
     [CmdletBinding()]
-    param()
+    param([ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion = 'workflow-v1')
 
-    return Join-Path $script:ProjectRoot 'schemas\stage-result.schema.json'
+    $fileName = if ($WorkflowVersion -eq 'workflow-v2') { 'stage-result-v2.schema.json' } else { 'stage-result.schema.json' }
+    return Join-Path $script:ProjectRoot "schemas\$fileName"
 }
 
 function Get-DuoForgeObjectValue {
@@ -29,6 +30,9 @@ function Test-DuoForgeStageResultInternal {
         [Parameter(Mandatory)]$Result,
         [Parameter(Mandatory)][string]$ExpectedStage,
         [Parameter(Mandatory)][ValidateSet('codex', 'claude')][string]$ExpectedProvider,
+        [ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion = 'workflow-v1',
+        [AllowNull()][string]$ExpectedTargetDocumentId,
+        [AllowEmptyCollection()][string[]]$ExpectedSourceDocumentIds = @(),
         [switch]$ThrowOnError
     )
 
@@ -43,8 +47,17 @@ function Test-DuoForgeStageResultInternal {
         }
     }
 
-    if ([int](Get-DuoForgeObjectValue -Object $Result -Name 'schemaVersion' -Default 0) -ne 1) {
-        $errors.Add('schemaVersion은 1이어야 합니다.')
+    if ($WorkflowVersion -eq 'workflow-v2') {
+        foreach ($name in @('performedBy', 'targetDocumentId', 'sourceDocumentIds')) {
+            if ($Result -isnot [System.Collections.IDictionary] -or -not $Result.Contains($name)) {
+                $errors.Add("필수 속성이 없습니다: $name")
+            }
+        }
+    }
+
+    $expectedSchemaVersion = if ($WorkflowVersion -eq 'workflow-v2') { 2 } else { 1 }
+    if ([int](Get-DuoForgeObjectValue -Object $Result -Name 'schemaVersion' -Default 0) -ne $expectedSchemaVersion) {
+        $errors.Add("schemaVersion은 $expectedSchemaVersion 이어야 합니다.")
     }
     if ([string](Get-DuoForgeObjectValue -Object $Result -Name 'stage') -cne $ExpectedStage) {
         $errors.Add("stage가 예상값과 다릅니다: $ExpectedStage")
@@ -52,13 +65,40 @@ function Test-DuoForgeStageResultInternal {
     if ([string](Get-DuoForgeObjectValue -Object $Result -Name 'provider') -cne $ExpectedProvider) {
         $errors.Add("provider가 예상값과 다릅니다: $ExpectedProvider")
     }
+    if ($WorkflowVersion -eq 'workflow-v2') {
+        if ([string](Get-DuoForgeObjectValue -Object $Result -Name 'performedBy') -cne $ExpectedProvider) {
+            $errors.Add("performedBy가 예상값과 다릅니다: $ExpectedProvider")
+        }
+        $actualTarget = Get-DuoForgeObjectValue -Object $Result -Name 'targetDocumentId'
+        $expectedTarget = if ([string]::IsNullOrWhiteSpace($ExpectedTargetDocumentId)) { $null } else { $ExpectedTargetDocumentId }
+        if (($null -eq $expectedTarget -and $null -ne $actualTarget) -or ($null -ne $expectedTarget -and [string]$actualTarget -cne [string]$expectedTarget)) {
+            $errors.Add("targetDocumentId가 예상값과 다릅니다: $expectedTarget")
+        }
+        $sourceIds = $null
+        if ($Result -is [System.Collections.IDictionary] -and $Result.Contains('sourceDocumentIds')) {
+            $sourceIds = $Result['sourceDocumentIds']
+        }
+        elseif ($null -ne $Result.PSObject.Properties['sourceDocumentIds']) {
+            $sourceIds = $Result.PSObject.Properties['sourceDocumentIds'].Value
+        }
+        if ($null -eq $sourceIds -or $sourceIds -is [string] -or $sourceIds -isnot [System.Collections.IEnumerable]) {
+            $errors.Add('sourceDocumentIds 속성은 배열이어야 합니다.')
+        }
+        else {
+            $actualSources = @($sourceIds | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+            $expectedSources = @($ExpectedSourceDocumentIds | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+            if (($actualSources -join ',') -cne ($expectedSources -join ',')) {
+                $errors.Add("sourceDocumentIds가 예상값과 다릅니다: $($expectedSources -join ',')")
+            }
+        }
+    }
 
-    $documentStages = @('independent-draft', 'synthesis', 'owned-document-revision')
+    $documentStages = @('independent-draft', 'independent-merge-draft', 'synthesis', 'owned-document-revision', 'document-revision')
     if ($ExpectedStage -in $documentStages -and [string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $Result -Name 'document'))) {
         $errors.Add("$ExpectedStage 단계에는 비어 있지 않은 document가 필요합니다.")
     }
-    if ($ExpectedStage -eq 'final-validation' -and (Get-DuoForgeObjectValue -Object $Result -Name 'finalApproved') -isnot [bool]) {
-        $errors.Add('final-validation 단계에는 boolean finalApproved가 필요합니다.')
+    if ($ExpectedStage -in @('final-validation', 'document-validation') -and (Get-DuoForgeObjectValue -Object $Result -Name 'finalApproved') -isnot [bool]) {
+        $errors.Add("$ExpectedStage 단계에는 boolean finalApproved가 필요합니다.")
     }
 
     foreach ($collectionName in @('issues', 'issueResponses', 'adoptions', 'openQuestions')) {
@@ -76,9 +116,27 @@ function Test-DuoForgeStageResultInternal {
     foreach ($issue in @($issueItems)) {
         $severity = [string](Get-DuoForgeObjectValue -Object $issue -Name 'severity')
         if ($severity -notin @('critical', 'major', 'minor')) { $errors.Add('issue.severity 값이 잘못되었습니다.') }
-        foreach ($name in @('issueKey', 'target', 'category', 'claim')) {
+        $issueTargetName = if ($WorkflowVersion -eq 'workflow-v2') { 'targetDocumentId' } else { 'target' }
+        foreach ($name in @('issueKey', $issueTargetName, 'category', 'claim')) {
             if ([string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $issue -Name $name))) {
                 $errors.Add("issue.$name 값이 비어 있습니다.")
+            }
+        }
+        if ($WorkflowVersion -eq 'workflow-v2') {
+            $issueTarget = [string](Get-DuoForgeObjectValue -Object $issue -Name 'targetDocumentId')
+            if ($issueTarget -notin @('A', 'B', 'merged')) { $errors.Add('issue.targetDocumentId 값이 잘못되었습니다.') }
+            foreach ($evidence in @(Get-DuoForgeObjectValue -Object $issue -Name 'evidence' -Default @())) {
+                foreach ($name in @('sourceDocumentId', 'proposedByProvider', 'path', 'location', 'excerptHash')) {
+                    if ([string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $evidence -Name $name))) {
+                        $errors.Add("issue.evidence.$name 값이 비어 있습니다.")
+                    }
+                }
+                if ([string](Get-DuoForgeObjectValue -Object $evidence -Name 'sourceDocumentId') -notin @('brief', 'A', 'B', 'merged')) {
+                    $errors.Add('issue.evidence.sourceDocumentId 값이 잘못되었습니다.')
+                }
+                if ([string](Get-DuoForgeObjectValue -Object $evidence -Name 'proposedByProvider') -notin @('codex', 'claude')) {
+                    $errors.Add('issue.evidence.proposedByProvider 값이 잘못되었습니다.')
+                }
             }
         }
         foreach ($name in @('requiresUser', 'blockingProposal')) {
@@ -98,6 +156,40 @@ function Test-DuoForgeStageResultInternal {
             }
             if ([string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $response -Name 'issueKey'))) {
                 $errors.Add('issueResponses.issueKey 값이 비어 있습니다.')
+            }
+        }
+    }
+
+    $adoptionItems = if ($Result -is [System.Collections.IDictionary] -and $Result.Contains('adoptions')) { $Result['adoptions'] } else { @() }
+    foreach ($adoption in @($adoptionItems)) {
+        foreach ($name in @('issueKey', 'rationale')) {
+            if ([string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $adoption -Name $name))) {
+                $errors.Add("adoptions.$name 값이 비어 있습니다.")
+            }
+        }
+        if ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'disposition') -notin @('ACCEPTED', 'PARTIALLY_ACCEPTED', 'REJECTED', 'DEFERRED')) {
+            $errors.Add('adoptions.disposition 값이 잘못되었습니다.')
+        }
+        $locations = $null
+        if ($adoption -is [System.Collections.IDictionary] -and $adoption.Contains('locations')) { $locations = $adoption['locations'] }
+        elseif ($null -ne $adoption.PSObject.Properties['locations']) { $locations = $adoption.PSObject.Properties['locations'].Value }
+        if ($null -eq $locations -or $locations -is [string] -or $locations -isnot [System.Collections.IEnumerable]) {
+            $errors.Add('adoptions.locations 속성은 배열이어야 합니다.')
+        }
+        if ($WorkflowVersion -eq 'workflow-v2') {
+            foreach ($name in @('sourceDocumentId', 'proposedByProvider', 'targetDocumentId')) {
+                if ([string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $adoption -Name $name))) {
+                    $errors.Add("adoptions.$name 값이 비어 있습니다.")
+                }
+            }
+            if ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'sourceDocumentId') -notin @('brief', 'A', 'B', 'merged')) {
+                $errors.Add('adoptions.sourceDocumentId 값이 잘못되었습니다.')
+            }
+            if ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'proposedByProvider') -notin @('codex', 'claude')) {
+                $errors.Add('adoptions.proposedByProvider 값이 잘못되었습니다.')
+            }
+            if ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'targetDocumentId') -notin @('A', 'B', 'merged')) {
+                $errors.Add('adoptions.targetDocumentId 값이 잘못되었습니다.')
             }
         }
     }
@@ -177,7 +269,10 @@ function ConvertFrom-DuoForgeProviderResult {
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$RawJson,
         [Parameter(Mandatory)][string]$ExpectedStage,
-        [Parameter(Mandatory)][ValidateSet('codex', 'claude')][string]$ExpectedProvider
+        [Parameter(Mandatory)][ValidateSet('codex', 'claude')][string]$ExpectedProvider,
+        [ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion = 'workflow-v1',
+        [AllowNull()][string]$ExpectedTargetDocumentId,
+        [AllowEmptyCollection()][string[]]$ExpectedSourceDocumentIds = @()
     )
 
     $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($RawJson)
@@ -191,7 +286,7 @@ function ConvertFrom-DuoForgeProviderResult {
 
     $redactions = 0
     $protected = Protect-DuoForgeObjectInternal -Value $parsed -RedactionCount ([ref]$redactions)
-    $null = Test-DuoForgeStageResultInternal -Result $protected -ExpectedStage $ExpectedStage -ExpectedProvider $ExpectedProvider -ThrowOnError
+    $null = Test-DuoForgeStageResultInternal -Result $protected -ExpectedStage $ExpectedStage -ExpectedProvider $ExpectedProvider -WorkflowVersion $WorkflowVersion -ExpectedTargetDocumentId $ExpectedTargetDocumentId -ExpectedSourceDocumentIds $ExpectedSourceDocumentIds -ThrowOnError
     return [ordered]@{
         rawHash = $rawHash
         redactionCount = $redactions

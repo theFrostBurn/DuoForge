@@ -2,7 +2,7 @@ function Get-DuoForgeExecutionPlanInternal {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('shared-document', 'dual-document', 'dual-project-audit')]
+        [ValidateSet('shared-document', 'document-merge', 'dual-document', 'dual-project-audit')]
         [string]$Mode,
 
         [ValidateRange(2, 3)]
@@ -13,8 +13,14 @@ function Get-DuoForgeExecutionPlanInternal {
 
         [int]$MaxCallsPerProvider = 24,
 
-        [ValidateRange(0, 100)][int]$ContextBatchCount = 0
+        [ValidateRange(0, 100)][int]$ContextBatchCount = 0,
+
+        [ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion = 'workflow-v2'
     )
+
+    if ($Mode -eq 'document-merge' -and $WorkflowVersion -ne 'workflow-v2') {
+        throw (New-DuoForgeException -Code 'DF-WORKFLOW-MODE' -Message 'document-merge는 workflow-v2에서만 지원합니다.')
+    }
 
     $calls = [ordered]@{
         codex = [System.Collections.Generic.List[object]]::new()
@@ -36,11 +42,13 @@ function Get-DuoForgeExecutionPlanInternal {
             for ($batch = 1; $batch -le $ContextBatchCount; $batch++) { & $addCall $provider 0 'context-batch-analysis' }
         }
     }
-    if ($Mode -eq 'shared-document') {
+    if ($Mode -in @('shared-document', 'document-merge')) {
+        $initialDraftStage = if ($Mode -eq 'document-merge') { 'independent-merge-draft' } else { 'independent-draft' }
+        $initialResponseStage = if ($Mode -eq 'document-merge') { 'review-response' } else { 'author-response' }
         foreach ($provider in @('codex', 'claude')) {
-            & $addCall $provider 1 'independent-draft'
+            & $addCall $provider 1 $initialDraftStage
             & $addCall $provider 1 'cross-review'
-            & $addCall $provider 1 'author-response'
+            & $addCall $provider 1 $initialResponseStage
         }
 
         $first = if ($FirstSynthesizer -eq 'claude') { 'claude' } else { 'codex' }
@@ -62,12 +70,24 @@ function Get-DuoForgeExecutionPlanInternal {
         & $addCall $validator $MaxRounds 'final-validation'
     }
     elseif ($Mode -eq 'dual-document') {
-        for ($round = 1; $round -le $MaxRounds; $round++) {
-            foreach ($provider in @('codex', 'claude')) {
-                & $addCall $provider $round 'cross-review'
-                & $addCall $provider $round 'owner-response'
-                & $addCall $provider $round 'owned-document-revision'
+        if ($WorkflowVersion -eq 'workflow-v1') {
+            for ($round = 1; $round -le $MaxRounds; $round++) {
+                foreach ($provider in @('codex', 'claude')) {
+                    & $addCall $provider $round 'cross-review'
+                    & $addCall $provider $round 'owner-response'
+                    & $addCall $provider $round 'owned-document-revision'
+                }
             }
+        }
+        else {
+            for ($round = 1; $round -le $MaxRounds; $round++) {
+                foreach ($provider in @('codex', 'claude')) {
+                    & $addCall $provider $round 'document-review'
+                    & $addCall $provider $round 'review-response'
+                    & $addCall $provider $round 'document-revision'
+                }
+            }
+            foreach ($provider in @('codex', 'claude')) { & $addCall $provider $MaxRounds 'document-validation' }
         }
     }
     else {
@@ -100,6 +120,7 @@ function Get-DuoForgeExecutionPlanInternal {
 
     return [ordered]@{
         schemaVersion = 1
+        workflowVersion = $WorkflowVersion
         mode = $Mode
         maxRounds = $MaxRounds
         minimumNormalRounds = 2

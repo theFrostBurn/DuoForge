@@ -41,7 +41,7 @@ function New-DuoForgeDecisionConstraintPreviewInternal {
         issueId = $IssueId
         originalText = $Text
         normalizedConstraint = $normalized
-        affectedTarget = [string]$issue[0].target
+        affectedTarget = Get-DuoForgeIssueTargetInternal -Issue $issue[0]
         appliesToProviders = @('codex', 'claude')
         application = '구속력 있는 공통 제약으로 마지막 문서 생성과 검증 단계에 주입'
         requiresConfirmation = $true
@@ -101,11 +101,12 @@ function Add-DuoForgeRoundInternal {
         $directory = [string]$run.runDirectory
         $manifest = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $directory 'manifest.json'))
         if ([int]$manifest.maxRounds -ge 3) { throw (New-DuoForgeException -Code 'DF-ROUND-MAX' -Message '이미 최대 3라운드로 설정되어 있습니다.') }
-        if ([string]$manifest.mode -notin @('shared-document', 'dual-document')) { throw (New-DuoForgeException -Code 'DF-ROUND-MODE' -Message '이 모드에서는 추가 라운드를 지원하지 않습니다.') }
+        if ([string]$manifest.mode -notin @('shared-document', 'document-merge', 'dual-document')) { throw (New-DuoForgeException -Code 'DF-ROUND-MODE' -Message '이 모드에서는 추가 라운드를 지원하지 않습니다.') }
 
         $contextBatchCount = @((Read-DuoForgeJson -Path (Join-Path $directory 'inputs\context-plan.json')).batches).Count
         $config = Get-DuoForgeConfig
-        $nextPlan = Get-DuoForgeExecutionPlanInternal -Mode ([string]$manifest.mode) -MaxRounds 3 -FirstSynthesizer ([string]$manifest.firstSynthesizer) -MaxCallsPerProvider ([int]$config.limits.maxCallsPerProviderPerRun) -ContextBatchCount $contextBatchCount
+        $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
+        $nextPlan = Get-DuoForgeExecutionPlanInternal -Mode ([string]$manifest.mode) -MaxRounds 3 -FirstSynthesizer ([string]$manifest.firstSynthesizer) -MaxCallsPerProvider ([int]$config.limits.maxCallsPerProviderPerRun) -ContextBatchCount $contextBatchCount -WorkflowVersion $workflowVersion
         if (-not [bool]$nextPlan.withinLimits) { throw (New-DuoForgeException -Code 'DF-PLAN-CALL-LIMIT' -Message '추가 라운드의 최악 호출 계획이 강제 상한을 초과합니다. 입력 범위를 줄인 새 실행이 필요합니다.') }
 
         $oldGraph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $directory 'steps.json'))
@@ -113,7 +114,7 @@ function Add-DuoForgeRoundInternal {
         [System.IO.Directory]::CreateDirectory($historyDirectory) | Out-Null
         Write-DuoForgeJsonAtomic -Path (Join-Path $historyDirectory ("steps-before-round-3-{0}.json" -f [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'))) -Value $oldGraph
 
-        $newGraph = New-DuoForgeStageGraph -Mode ([string]$manifest.mode) -MaxRounds 3 -FirstSynthesizer ([string]$manifest.firstSynthesizer) -ContextBatchCount $contextBatchCount
+        $newGraph = New-DuoForgeStageGraph -Mode ([string]$manifest.mode) -MaxRounds 3 -FirstSynthesizer ([string]$manifest.firstSynthesizer) -ContextBatchCount $contextBatchCount -WorkflowVersion $workflowVersion
         $oldByKey = @{}
         foreach ($step in @($oldGraph.steps)) { $oldByKey[[string]$step.stepKey] = $step }
         for ($index = 0; $index -lt @($newGraph.steps).Count; $index++) {

@@ -220,6 +220,8 @@ function Invoke-DuoForgeCli {
             $request = New-DuoForgeStartRequestInternal `
                 -Mode $mode `
                 -Brief ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'brief' -Default '')) `
+                -DocumentA ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'document-a' -Default '')) `
+                -DocumentB ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'document-b' -Default '')) `
                 -CodexDocument ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'codex' -Default '')) `
                 -ClaudeDocument ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'claude' -Default '')) `
                 -CodexProject ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'codex-project' -Default '')) `

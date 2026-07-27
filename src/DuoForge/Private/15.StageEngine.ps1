@@ -5,10 +5,13 @@ function New-DuoForgeStageRecord {
         [Parameter(Mandatory)][string]$Provider,
         [Parameter(Mandatory)][int]$Round,
         [Parameter(Mandatory)][string]$Stage,
-        [string[]]$DependsOn = @()
+        [string[]]$DependsOn = @(),
+        [ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion = 'workflow-v2',
+        [ValidateSet('A', 'B', 'merged')][string]$TargetDocumentId,
+        [string[]]$SourceDocumentIds = @()
     )
 
-    return [ordered]@{
+    $record = [ordered]@{
         stepKey = $StepKey
         provider = $Provider
         round = $Round
@@ -24,16 +27,27 @@ function New-DuoForgeStageRecord {
         lastPromptKind = $null
         history = @()
     }
+    if ($WorkflowVersion -eq 'workflow-v2') {
+        $record.performedBy = $Provider
+        $record.targetDocumentId = if ([string]::IsNullOrWhiteSpace($TargetDocumentId)) { $null } else { $TargetDocumentId }
+        $record.sourceDocumentIds = @($SourceDocumentIds)
+    }
+    return $record
 }
 
 function New-DuoForgeStageGraph {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][ValidateSet('shared-document', 'dual-document')][string]$Mode,
+        [Parameter(Mandatory)][ValidateSet('shared-document', 'document-merge', 'dual-document')][string]$Mode,
         [ValidateRange(2, 3)][int]$MaxRounds = 2,
         [ValidateSet('alternate', 'codex', 'claude')][string]$FirstSynthesizer = 'alternate',
-        [ValidateRange(0, 100)][int]$ContextBatchCount = 0
+        [ValidateRange(0, 100)][int]$ContextBatchCount = 0,
+        [ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion = 'workflow-v2'
     )
+
+    if ($Mode -eq 'document-merge' -and $WorkflowVersion -ne 'workflow-v2') {
+        throw (New-DuoForgeException -Code 'DF-WORKFLOW-MODE' -Message 'document-merge는 workflow-v2에서만 지원합니다.')
+    }
 
     $steps = [System.Collections.Generic.List[object]]::new()
     $contextBarrier = [System.Collections.Generic.List[string]]::new()
@@ -42,7 +56,7 @@ function New-DuoForgeStageGraph {
             $batchId = 'batch-{0:D3}' -f $batch
             foreach ($provider in @('codex', 'claude')) {
                 $key = "context-$batchId-$provider-analysis"
-                $record = New-DuoForgeStageRecord -StepKey $key -Provider $provider -Round 0 -Stage 'context-batch-analysis'
+                $record = New-DuoForgeStageRecord -StepKey $key -Provider $provider -Round 0 -Stage 'context-batch-analysis' -WorkflowVersion $WorkflowVersion -SourceDocumentIds $(if ($Mode -eq 'shared-document') { @('brief') } else { @('A', 'B') })
                 $record.contextBatchId = $batchId
                 $steps.Add($record)
                 $contextBarrier.Add($key)
@@ -50,13 +64,16 @@ function New-DuoForgeStageGraph {
         }
     }
     $previousBarrier = @($contextBarrier)
-    if ($Mode -eq 'shared-document') {
+    if ($Mode -in @('shared-document', 'document-merge')) {
+        $sourceDocumentIds = if ($Mode -eq 'shared-document') { @('brief') } else { @('A', 'B') }
+        $targetDocumentId = 'merged'
+        $initialDraftStage = if ($Mode -eq 'document-merge') { 'independent-merge-draft' } else { 'independent-draft' }
         $first = if ($FirstSynthesizer -eq 'claude') { 'claude' } else { 'codex' }
         for ($round = 1; $round -le $MaxRounds; $round++) {
             if ($round -eq 1) {
-                $drafts = @('codex', 'claude') | ForEach-Object { "r$('{0:D2}' -f $round)-$_-independent-draft" }
+                $drafts = @('codex', 'claude') | ForEach-Object { "r$('{0:D2}' -f $round)-$_-$initialDraftStage" }
                 foreach ($provider in @('codex', 'claude')) {
-                    $steps.Add((New-DuoForgeStageRecord -StepKey "r$('{0:D2}' -f $round)-$provider-independent-draft" -Provider $provider -Round $round -Stage 'independent-draft' -DependsOn $previousBarrier))
+                    $steps.Add((New-DuoForgeStageRecord -StepKey "r$('{0:D2}' -f $round)-$provider-$initialDraftStage" -Provider $provider -Round $round -Stage $initialDraftStage -DependsOn $previousBarrier -WorkflowVersion $WorkflowVersion -TargetDocumentId $targetDocumentId -SourceDocumentIds $sourceDocumentIds))
                 }
                 $reviewDependencies = $drafts
                 $reviewStage = 'cross-review'
@@ -68,45 +85,79 @@ function New-DuoForgeStageGraph {
 
             $reviews = @('codex', 'claude') | ForEach-Object { "r$('{0:D2}' -f $round)-$_-$reviewStage" }
             foreach ($provider in @('codex', 'claude')) {
-                $steps.Add((New-DuoForgeStageRecord -StepKey "r$('{0:D2}' -f $round)-$provider-$reviewStage" -Provider $provider -Round $round -Stage $reviewStage -DependsOn $reviewDependencies))
+                $steps.Add((New-DuoForgeStageRecord -StepKey "r$('{0:D2}' -f $round)-$provider-$reviewStage" -Provider $provider -Round $round -Stage $reviewStage -DependsOn $reviewDependencies -WorkflowVersion $WorkflowVersion -TargetDocumentId $targetDocumentId -SourceDocumentIds $sourceDocumentIds))
             }
 
-            $responseStage = if ($round -eq 1) { 'author-response' } else { 'review-response' }
+            $responseStage = if ($round -eq 1 -and $Mode -eq 'shared-document') { 'author-response' } else { 'review-response' }
             $responses = @('codex', 'claude') | ForEach-Object { "r$('{0:D2}' -f $round)-$_-$responseStage" }
             foreach ($provider in @('codex', 'claude')) {
-                $steps.Add((New-DuoForgeStageRecord -StepKey "r$('{0:D2}' -f $round)-$provider-$responseStage" -Provider $provider -Round $round -Stage $responseStage -DependsOn $reviews))
+                $steps.Add((New-DuoForgeStageRecord -StepKey "r$('{0:D2}' -f $round)-$provider-$responseStage" -Provider $provider -Round $round -Stage $responseStage -DependsOn $reviews -WorkflowVersion $WorkflowVersion -TargetDocumentId $targetDocumentId -SourceDocumentIds $sourceDocumentIds))
             }
 
             $synthesizer = if (($round % 2) -eq 1) { $first } elseif ($first -eq 'codex') { 'claude' } else { 'codex' }
             $synthesisKey = "r$('{0:D2}' -f $round)-$synthesizer-synthesis"
-            $steps.Add((New-DuoForgeStageRecord -StepKey $synthesisKey -Provider $synthesizer -Round $round -Stage 'synthesis' -DependsOn $responses))
+            $steps.Add((New-DuoForgeStageRecord -StepKey $synthesisKey -Provider $synthesizer -Round $round -Stage 'synthesis' -DependsOn $responses -WorkflowVersion $WorkflowVersion -TargetDocumentId $targetDocumentId -SourceDocumentIds $sourceDocumentIds))
             $previousBarrier = @($synthesisKey)
         }
 
         $lastSynthesizer = $steps[$steps.Count - 1].provider
         $validator = if ($lastSynthesizer -eq 'codex') { 'claude' } else { 'codex' }
-        $steps.Add((New-DuoForgeStageRecord -StepKey "r$('{0:D2}' -f $MaxRounds)-$validator-final-validation" -Provider $validator -Round $MaxRounds -Stage 'final-validation' -DependsOn $previousBarrier))
+        $steps.Add((New-DuoForgeStageRecord -StepKey "r$('{0:D2}' -f $MaxRounds)-$validator-final-validation" -Provider $validator -Round $MaxRounds -Stage 'final-validation' -DependsOn $previousBarrier -WorkflowVersion $WorkflowVersion -TargetDocumentId $targetDocumentId -SourceDocumentIds $sourceDocumentIds))
     }
-    else {
+    elseif ($WorkflowVersion -eq 'workflow-v1') {
         for ($round = 1; $round -le $MaxRounds; $round++) {
             $reviews = @('codex', 'claude') | ForEach-Object { "r$('{0:D2}' -f $round)-$_-cross-review" }
             foreach ($provider in @('codex', 'claude')) {
-                $steps.Add((New-DuoForgeStageRecord -StepKey "r$('{0:D2}' -f $round)-$provider-cross-review" -Provider $provider -Round $round -Stage 'cross-review' -DependsOn $previousBarrier))
+                $steps.Add((New-DuoForgeStageRecord -StepKey "r$('{0:D2}' -f $round)-$provider-cross-review" -Provider $provider -Round $round -Stage 'cross-review' -DependsOn $previousBarrier -WorkflowVersion 'workflow-v1'))
             }
             $responses = @('codex', 'claude') | ForEach-Object { "r$('{0:D2}' -f $round)-$_-owner-response" }
             foreach ($provider in @('codex', 'claude')) {
-                $steps.Add((New-DuoForgeStageRecord -StepKey "r$('{0:D2}' -f $round)-$provider-owner-response" -Provider $provider -Round $round -Stage 'owner-response' -DependsOn $reviews))
+                $steps.Add((New-DuoForgeStageRecord -StepKey "r$('{0:D2}' -f $round)-$provider-owner-response" -Provider $provider -Round $round -Stage 'owner-response' -DependsOn $reviews -WorkflowVersion 'workflow-v1'))
             }
             $revisions = @('codex', 'claude') | ForEach-Object { "r$('{0:D2}' -f $round)-$_-owned-document-revision" }
             foreach ($provider in @('codex', 'claude')) {
-                $steps.Add((New-DuoForgeStageRecord -StepKey "r$('{0:D2}' -f $round)-$provider-owned-document-revision" -Provider $provider -Round $round -Stage 'owned-document-revision' -DependsOn $responses))
+                $steps.Add((New-DuoForgeStageRecord -StepKey "r$('{0:D2}' -f $round)-$provider-owned-document-revision" -Provider $provider -Round $round -Stage 'owned-document-revision' -DependsOn $responses -WorkflowVersion 'workflow-v1'))
             }
             $previousBarrier = $revisions
         }
     }
+    else {
+        for ($round = 1; $round -le $MaxRounds; $round++) {
+            $roundPrefix = 'r{0:D2}' -f $round
+            $reviews = @('codex', 'claude') | ForEach-Object { "$roundPrefix-$_-document-review" }
+            foreach ($provider in @('codex', 'claude')) {
+                $steps.Add((New-DuoForgeStageRecord -StepKey "$roundPrefix-$provider-document-review" -Provider $provider -Round $round -Stage 'document-review' -DependsOn $previousBarrier -WorkflowVersion 'workflow-v2' -SourceDocumentIds @('A', 'B')))
+            }
+            $responses = @('codex', 'claude') | ForEach-Object { "$roundPrefix-$_-review-response" }
+            foreach ($provider in @('codex', 'claude')) {
+                $steps.Add((New-DuoForgeStageRecord -StepKey "$roundPrefix-$provider-review-response" -Provider $provider -Round $round -Stage 'review-response' -DependsOn $reviews -WorkflowVersion 'workflow-v2' -SourceDocumentIds @('A', 'B')))
+            }
+
+            $editorA = if (($round % 2) -eq 1) { 'codex' } else { 'claude' }
+            $editorB = if ($editorA -eq 'codex') { 'claude' } else { 'codex' }
+            $revisionA = "$roundPrefix-$editorA-document-a-revision"
+            $revisionB = "$roundPrefix-$editorB-document-b-revision"
+            $steps.Add((New-DuoForgeStageRecord -StepKey $revisionA -Provider $editorA -Round $round -Stage 'document-revision' -DependsOn $responses -WorkflowVersion 'workflow-v2' -TargetDocumentId A -SourceDocumentIds @('A', 'B')))
+            $steps.Add((New-DuoForgeStageRecord -StepKey $revisionB -Provider $editorB -Round $round -Stage 'document-revision' -DependsOn $responses -WorkflowVersion 'workflow-v2' -TargetDocumentId B -SourceDocumentIds @('A', 'B')))
+            $previousBarrier = @($revisionA, $revisionB)
+        }
+
+        foreach ($documentId in @('A', 'B')) {
+            $lastEditor = if ($documentId -eq 'A') {
+                if (($MaxRounds % 2) -eq 1) { 'codex' } else { 'claude' }
+            }
+            else {
+                if (($MaxRounds % 2) -eq 1) { 'claude' } else { 'codex' }
+            }
+            $validator = if ($lastEditor -eq 'codex') { 'claude' } else { 'codex' }
+            $documentToken = $documentId.ToLowerInvariant()
+            $steps.Add((New-DuoForgeStageRecord -StepKey "r$('{0:D2}' -f $MaxRounds)-$validator-document-$documentToken-validation" -Provider $validator -Round $MaxRounds -Stage 'document-validation' -DependsOn $previousBarrier -WorkflowVersion 'workflow-v2' -TargetDocumentId $documentId -SourceDocumentIds @($documentId)))
+        }
+    }
 
     return [ordered]@{
-        schemaVersion = 1
+        schemaVersion = if ($WorkflowVersion -eq 'workflow-v2') { 2 } else { 1 }
+        workflowVersion = $WorkflowVersion
         mode = $Mode
         maxRounds = $MaxRounds
         steps = @($steps)
@@ -122,10 +173,11 @@ function Initialize-DuoForgeStageGraph {
         return ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $path)
     }
     $manifest = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json')
+    $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
     $firstSynthesizer = if ([string]::IsNullOrWhiteSpace([string]$manifest.firstSynthesizer)) { 'alternate' } else { [string]$manifest.firstSynthesizer }
     $contextPlanPath = Join-Path $RunDirectory 'inputs\context-plan.json'
     $contextBatchCount = if (Test-Path -LiteralPath $contextPlanPath -PathType Leaf) { @((Read-DuoForgeJson -Path $contextPlanPath).batches).Count } else { 0 }
-    $graph = New-DuoForgeStageGraph -Mode ([string]$manifest.mode) -MaxRounds ([int]$manifest.maxRounds) -FirstSynthesizer $firstSynthesizer -ContextBatchCount $contextBatchCount
+    $graph = New-DuoForgeStageGraph -Mode ([string]$manifest.mode) -MaxRounds ([int]$manifest.maxRounds) -FirstSynthesizer $firstSynthesizer -ContextBatchCount $contextBatchCount -WorkflowVersion $workflowVersion
     Write-DuoForgeJsonAtomic -Path $path -Value $graph
     return $graph
 }
@@ -170,6 +222,7 @@ function Repair-DuoForgeCorruptedStageArtifactsInternal {
     )
 
     $invalidKeys = [System.Collections.Generic.List[string]]::new()
+    $workflowVersion = [string](Get-DuoForgeObjectValue -Object $Graph -Name 'workflowVersion' -Default 'workflow-v1')
     foreach ($step in @($Graph.steps | Where-Object { [string]$_.status -eq 'COMMITTED' })) {
         $valid = $true
         $path = [string]$step.artifactPath
@@ -182,7 +235,7 @@ function Repair-DuoForgeCorruptedStageArtifactsInternal {
         else {
             try {
                 $wrapper = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $path)
-                $null = Test-DuoForgeStageResultInternal -Result $wrapper.result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -ThrowOnError
+                $null = Test-DuoForgeStageResultInternal -Result $wrapper.result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -ThrowOnError
             }
             catch { $valid = $false }
         }
@@ -289,6 +342,7 @@ function Invoke-DuoForgeStageEngine {
 
     return Invoke-WithDuoForgeRunLock -RunDirectory $RunDirectory -ScriptBlock {
         $manifest = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json')
+        $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
         $null = Assert-DuoForgeStagePromptPolicyInternal -Manifest $manifest
         $state = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'state.json')
         $graph = Initialize-DuoForgeStageGraph -RunDirectory $RunDirectory
@@ -348,11 +402,21 @@ function Invoke-DuoForgeStageEngine {
                     $step.lastError = $null
                 }
                 Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph
-                Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'STAGE_STARTED' -Status 'RUNNING' -Data ([ordered]@{ stepKey = $step.stepKey; provider = $step.provider; attempt = $step.attemptCount })
+                Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'STAGE_STARTED' -Status 'RUNNING' -Data ([ordered]@{
+                    workflowVersion = $workflowVersion
+                    stepKey = $step.stepKey
+                    provider = $step.provider
+                    stage = $step.stage
+                    targetDocumentId = Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId'
+                    round = $step.round
+                    attempt = $step.attemptCount
+                })
                 Invoke-DuoForgeProgressObserverInternal -Observer $ProgressObserver -Type 'STAGE_STARTED' -RunDirectory $RunDirectory -Data ([ordered]@{
+                    workflowVersion = $workflowVersion
                     stepKey = [string]$step.stepKey
                     provider = [string]$step.provider
                     stage = [string]$step.stage
+                    targetDocumentId = Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId'
                     round = [int]$step.round
                     attempt = [int]$step.attemptCount
                     retryMode = [string](Get-DuoForgeObjectValue -Object $step -Name 'retryMode' -Default '')
@@ -380,13 +444,15 @@ function Invoke-DuoForgeStageEngine {
                         $null = Add-DuoForgeRuntimeSecondsInternal -RunDirectory $RunDirectory -Seconds $callStopwatch.Elapsed.TotalSeconds
                     }
                     Invoke-DuoForgeProgressObserverInternal -Observer $ProgressObserver -Type 'STAGE_RESULT_RECEIVED' -RunDirectory $RunDirectory -Data ([ordered]@{
+                        workflowVersion = $workflowVersion
                         stepKey = [string]$step.stepKey
                         provider = [string]$step.provider
                         stage = [string]$step.stage
+                        targetDocumentId = Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId'
                         round = [int]$step.round
                         attempt = [int]$step.attemptCount
                     })
-                    $null = Test-DuoForgeStageResultInternal -Result $result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -ThrowOnError
+                    $null = Test-DuoForgeStageResultInternal -Result $result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -ThrowOnError
                     $artifactDirectory = Join-Path $RunDirectory ("rounds\round-{0:D2}\raw-redacted" -f [int]$step.round)
                     [System.IO.Directory]::CreateDirectory($artifactDirectory) | Out-Null
                     $artifactPath = Join-Path $artifactDirectory ($step.stepKey + '.json')
@@ -408,9 +474,11 @@ function Invoke-DuoForgeStageEngine {
                     Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph
                     $state = Set-DuoForgeRunStateInternal -RunDirectory $RunDirectory -Status 'RUNNING' -LastCompletedStage $step.stepKey -Round ([int]$step.round)
                     $commitData = [ordered]@{
+                        workflowVersion = $workflowVersion
                         stepKey = [string]$step.stepKey
                         provider = [string]$step.provider
                         stage = [string]$step.stage
+                        targetDocumentId = Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId'
                         round = [int]$step.round
                         attempt = [int]$step.attemptCount
                         artifactHash = [string]$step.artifactHash
@@ -459,11 +527,13 @@ function Invoke-DuoForgeStageEngine {
                     if ($retryable -and [int]$step.attemptCount -lt 2) {
                         $step.retryMode = if ($formatRecovery) { 'FORMAT_REPAIR' } else { 'STANDARD_RETRY' }
                         Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph
-                        Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'STAGE_RETRY_SCHEDULED' -Status 'RUNNING' -Data ([ordered]@{ stepKey = $step.stepKey; provider = $step.provider; failedAttempt = $step.attemptCount; code = $errorCode; category = $failureCategory; retryMode = $step.retryMode })
+                        Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'STAGE_RETRY_SCHEDULED' -Status 'RUNNING' -Data ([ordered]@{ workflowVersion = $workflowVersion; stepKey = $step.stepKey; provider = $step.provider; stage = $step.stage; targetDocumentId = Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId'; round = $step.round; failedAttempt = $step.attemptCount; code = $errorCode; category = $failureCategory; retryMode = $step.retryMode })
                         Invoke-DuoForgeProgressObserverInternal -Observer $ProgressObserver -Type 'STAGE_RETRY_SCHEDULED' -RunDirectory $RunDirectory -Data ([ordered]@{
+                            workflowVersion = $workflowVersion
                             stepKey = [string]$step.stepKey
                             provider = [string]$step.provider
                             stage = [string]$step.stage
+                            targetDocumentId = Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId'
                             round = [int]$step.round
                             failedAttempt = [int]$step.attemptCount
                             code = $errorCode
@@ -472,11 +542,13 @@ function Invoke-DuoForgeStageEngine {
                         continue
                     }
                     $state = Set-DuoForgeRunStateInternal -RunDirectory $RunDirectory -Status $targetStatus -Round ([int]$step.round)
-                    Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'STAGE_FAILED' -Status $targetStatus -Data ([ordered]@{ stepKey = $step.stepKey; provider = $step.provider; attempt = $step.attemptCount; code = $errorCode; category = $failureCategory; retryable = $retryable })
+                    Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'STAGE_FAILED' -Status $targetStatus -Data ([ordered]@{ workflowVersion = $workflowVersion; stepKey = $step.stepKey; provider = $step.provider; stage = $step.stage; targetDocumentId = Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId'; round = $step.round; attempt = $step.attemptCount; code = $errorCode; category = $failureCategory; retryable = $retryable })
                     Invoke-DuoForgeProgressObserverInternal -Observer $ProgressObserver -Type 'STAGE_FAILED' -RunDirectory $RunDirectory -Data ([ordered]@{
+                        workflowVersion = $workflowVersion
                         stepKey = [string]$step.stepKey
                         provider = [string]$step.provider
                         stage = [string]$step.stage
+                        targetDocumentId = Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId'
                         round = [int]$step.round
                         attempt = [int]$step.attemptCount
                         code = $errorCode

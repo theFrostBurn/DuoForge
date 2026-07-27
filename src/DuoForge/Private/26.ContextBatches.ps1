@@ -6,12 +6,12 @@ function Get-DuoForgeValidationSourceRecordsInternal {
     if ([string]$ValidationResult.request.mode -eq 'shared-document') {
         $records.Add($ValidationResult.inputs.primary)
     }
-    elseif ([string]$ValidationResult.request.mode -eq 'dual-document') {
+    elseif ([string]$ValidationResult.request.mode -in @('document-merge', 'dual-document')) {
         $seen = @{}
-        foreach ($provider in @('codex', 'claude')) {
-            $primary = $ValidationResult.inputs[$provider].primary
+        foreach ($documentId in @('A', 'B')) {
+            $primary = $ValidationResult.inputs.documents[$documentId].primary
             if (-not $seen.ContainsKey([string]$primary.path)) { $records.Add($primary); $seen[[string]$primary.path] = $true }
-            foreach ($file in @($ValidationResult.inputs[$provider].context.files | Where-Object { [bool]$_.included })) {
+            foreach ($file in @($ValidationResult.inputs.documents[$documentId].context.files | Where-Object { [bool]$_.included })) {
                 if (-not $seen.ContainsKey([string]$file.path)) { $records.Add($file); $seen[[string]$file.path] = $true }
             }
         }

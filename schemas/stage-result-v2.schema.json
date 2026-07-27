@@ -1,0 +1,129 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://duoforge.local/schemas/stage-result-v2.schema.json",
+  "title": "DuoForge workflow-v2 stage result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "stage", "provider", "performedBy", "targetDocumentId", "sourceDocumentIds",
+    "summary", "document", "issues", "issueResponses", "adoptions", "openQuestions", "finalApproved"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "integer", "const": 2 },
+    "stage": {
+      "type": "string",
+      "enum": [
+        "independent-draft", "independent-merge-draft", "cross-review", "author-response",
+        "joint-document-review", "review-response", "synthesis", "final-validation",
+        "document-review", "document-revision", "document-validation", "context-batch-analysis"
+      ]
+    },
+    "provider": { "type": "string", "enum": ["codex", "claude"] },
+    "performedBy": { "type": "string", "enum": ["codex", "claude"] },
+    "targetDocumentId": { "type": ["string", "null"], "enum": ["A", "B", "merged", null] },
+    "sourceDocumentIds": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["brief", "A", "B", "merged"] },
+      "uniqueItems": true
+    },
+    "summary": { "type": "string" },
+    "document": { "type": ["string", "null"] },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["issueKey", "targetDocumentId", "category", "severity", "claim", "evidence", "proposal", "requiresUser", "blockingProposal"],
+        "properties": {
+          "issueKey": { "type": "string", "minLength": 1 },
+          "targetDocumentId": { "type": "string", "enum": ["A", "B", "merged"] },
+          "category": { "type": "string", "minLength": 1 },
+          "severity": { "type": "string", "enum": ["critical", "major", "minor"] },
+          "claim": { "type": "string", "minLength": 1 },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["sourceDocumentId", "proposedByProvider", "path", "location", "excerptHash"],
+              "properties": {
+                "sourceDocumentId": { "type": "string", "enum": ["brief", "A", "B", "merged"] },
+                "proposedByProvider": { "type": "string", "enum": ["codex", "claude"] },
+                "path": { "type": "string" },
+                "location": { "type": "string" },
+                "excerptHash": { "type": "string" }
+              }
+            }
+          },
+          "proposal": { "type": "string" },
+          "requiresUser": { "type": "boolean" },
+          "blockingProposal": { "type": "boolean" }
+        }
+      }
+    },
+    "issueResponses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["issueKey", "disposition", "rationale", "locations"],
+        "properties": {
+          "issueKey": { "type": "string", "minLength": 1 },
+          "disposition": {
+            "type": "string",
+            "enum": ["ACCEPTED", "PARTIALLY_ACCEPTED", "REJECTED", "DEFERRED", "NEEDS_EVIDENCE", "ASK_USER"]
+          },
+          "rationale": { "type": "string", "minLength": 1 },
+          "locations": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "adoptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["issueKey", "sourceDocumentId", "proposedByProvider", "targetDocumentId", "disposition", "rationale", "locations"],
+        "properties": {
+          "issueKey": { "type": "string", "minLength": 1 },
+          "sourceDocumentId": { "type": "string", "enum": ["brief", "A", "B", "merged"] },
+          "proposedByProvider": { "type": "string", "enum": ["codex", "claude"] },
+          "targetDocumentId": { "type": "string", "enum": ["A", "B", "merged"] },
+          "disposition": { "type": "string", "enum": ["ACCEPTED", "PARTIALLY_ACCEPTED", "REJECTED", "DEFERRED"] },
+          "rationale": { "type": "string", "minLength": 1 },
+          "locations": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "openQuestions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "issueKey", "title", "question", "options", "recommendedOption", "reasonNow", "plainExplanation",
+          "codexOpinion", "claudeOpinion", "impactIfDeferred", "estimatedCost", "reversibility", "confidence",
+          "safeDefault", "experimentPossible"
+        ],
+        "properties": {
+          "issueKey": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1 },
+          "question": { "type": "string", "minLength": 1 },
+          "options": { "type": "array", "items": { "type": "string" }, "minItems": 2 },
+          "recommendedOption": { "type": "string", "minLength": 1 },
+          "reasonNow": { "type": "string" },
+          "plainExplanation": { "type": "string" },
+          "codexOpinion": { "type": "string" },
+          "claudeOpinion": { "type": "string" },
+          "impactIfDeferred": { "type": "string" },
+          "estimatedCost": { "type": "string" },
+          "reversibility": { "type": "string", "enum": ["easy", "moderate", "hard", "unknown"] },
+          "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
+          "safeDefault": { "type": "string" },
+          "experimentPossible": { "type": "boolean" }
+        }
+      }
+    },
+    "finalApproved": { "type": ["boolean", "null"] }
+  }
+}

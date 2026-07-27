@@ -136,14 +136,18 @@ function Get-DuoForgeProgressStageLabelInternal {
     switch ($Stage) {
         'context-batch-analysis' { '문맥 배치 분석' }
         'independent-draft' { '독립 초안' }
+        'independent-merge-draft' { '독립 병합 후보' }
         'cross-review' { '교차 비평' }
         'author-response' { '작성자 응답' }
         'joint-document-review' { '공동 문서 검토' }
+        'document-review' { '문서 A/B 검토' }
         'review-response' { '검토 응답' }
         'synthesis' { '공동 문서 합성' }
         'final-validation' { '최종 검증' }
         'owner-response' { '소유자 응답' }
         'owned-document-revision' { '소유 문서 개정' }
+        'document-revision' { '대상 문서 개정' }
+        'document-validation' { '대상 문서 최종 검증' }
         default { $Stage }
     }
 }
@@ -153,8 +157,10 @@ function Get-DuoForgeProgressModeLabelInternal {
     param([Parameter(Mandatory)][string]$Mode)
 
     switch ($Mode) {
-        'shared-document' { '공동 합의 문서' }
-        'dual-document' { '독립 문서 상호개선' }
+        'shared-document' { '컨셉으로 공동 문서 만들기' }
+        'document-merge' { '두 문서를 하나로 합의하기' }
+        'dual-document' { '두 문서를 각각 개선하기' }
+        'dual-project-audit' { '두 프로젝트 비교하기(비활성)' }
         default { $Mode }
     }
 }
@@ -259,7 +265,8 @@ function Get-DuoForgeProgressArtifactRecordInternal {
         $artifact = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path ([string]$Step.artifactPath))
         $result = Get-DuoForgeObjectValue -Object $artifact -Name 'result'
         if ($null -eq $result) { return $null }
-        $null = Test-DuoForgeStageResultInternal -Result $result -ExpectedStage ([string]$Step.stage) -ExpectedProvider ([string]$Step.provider) -ThrowOnError
+        $workflowVersion = if ([int](Get-DuoForgeObjectValue -Object $result -Name 'schemaVersion' -Default 1) -eq 2) { 'workflow-v2' } else { 'workflow-v1' }
+        $null = Test-DuoForgeStageResultInternal -Result $result -ExpectedStage ([string]$Step.stage) -ExpectedProvider ([string]$Step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @()) -ThrowOnError
     }
     catch { return $null }
 

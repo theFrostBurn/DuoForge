@@ -79,11 +79,13 @@ function Test-DuoForgePauseAfterRoundBoundaryInternal {
     if (-not [bool](Get-DuoForgeObjectValue -Object $manifest -Name 'pauseAfterRound' -Default $false)) { return $false }
     $round = [int]$Step.round
     if ($round -in @(Get-DuoForgeAcknowledgedPauseRoundsInternal -RunDirectory $RunDirectory)) { return $false }
-    if ([string]$Graph.mode -eq 'shared-document') {
+    if ([string]$Graph.mode -in @('shared-document', 'document-merge')) {
         return [string]$Step.stage -eq 'synthesis'
     }
-    if ([string]$Step.stage -ne 'owned-document-revision') { return $false }
-    $roundRevisions = @($Graph.steps | Where-Object { [int]$_.round -eq $round -and [string]$_.stage -eq 'owned-document-revision' })
+    $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
+    $revisionStage = if ($workflowVersion -eq 'workflow-v2') { 'document-revision' } else { 'owned-document-revision' }
+    if ([string]$Step.stage -ne $revisionStage) { return $false }
+    $roundRevisions = @($Graph.steps | Where-Object { [int]$_.round -eq $round -and [string]$_.stage -eq $revisionStage })
     return $roundRevisions.Count -gt 0 -and @($roundRevisions | Where-Object { [string]$_.status -ne 'COMMITTED' }).Count -eq 0
 }
 

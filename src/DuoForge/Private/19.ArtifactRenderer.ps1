@@ -12,6 +12,9 @@ function Get-DuoForgeCommittedStageResults {
         $records.Add([ordered]@{
             stepKey = [string]$step.stepKey
             provider = [string]$step.provider
+            performedBy = [string](Get-DuoForgeObjectValue -Object $step -Name 'performedBy' -Default ([string]$step.provider))
+            targetDocumentId = Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId'
+            sourceDocumentIds = @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @())
             stage = [string]$step.stage
             round = [int]$step.round
             result = $wrapper.result
@@ -121,7 +124,8 @@ function Merge-DuoForgeStageIssues {
         [AllowEmptyCollection()][Parameter(Mandatory)][object[]]$StageResults,
         [AllowEmptyCollection()][object[]]$UserEvidenceRecords = @(),
         [AllowEmptyCollection()][object[]]$UserDecisionRecords = @(),
-        [AllowEmptyCollection()][object[]]$PreservedIssues = @()
+        [AllowEmptyCollection()][object[]]$PreservedIssues = @(),
+        [ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion = 'workflow-v1'
     )
 
     $issues = [System.Collections.Generic.List[object]]::new()
@@ -144,7 +148,12 @@ function Merge-DuoForgeStageIssues {
     foreach ($stageRecord in $StageResults) {
         $stageResult = $stageRecord.result
         foreach ($modelIssue in @($stageResult.issues)) {
-            $target = [string]$modelIssue.target
+            $target = if ($WorkflowVersion -eq 'workflow-v2') {
+                [string](Get-DuoForgeObjectValue -Object $modelIssue -Name 'targetDocumentId' -Default '')
+            }
+            else {
+                [string](Get-DuoForgeObjectValue -Object $modelIssue -Name 'target' -Default '')
+            }
             $category = [string]$modelIssue.category
             $claim = [string]$modelIssue.claim
             $fingerprint = Get-DuoForgeIssueFingerprint -Target $target -Category $category -Claim $claim
@@ -175,6 +184,13 @@ function Merge-DuoForgeStageIssues {
                 $issue.externalKeys = @($externalKey)
                 $issue.sourceSteps = @([string]$stageRecord.stepKey)
                 $issue.evidence = @($modelIssue.evidence)
+                if ($WorkflowVersion -eq 'workflow-v2') {
+                    $issue.targetDocumentId = $target
+                    $issue.Remove('target')
+                    $issue.editorialDecisions = @()
+                    $issue.reviewerVerdicts = @()
+                    $issue.Remove('ownerDecisions')
+                }
                 if ([string]$issue.severity -eq 'critical') { $issue.resolutionStatus = 'AWAITING_USER' }
                 $issues.Add($issue)
                 $byFingerprint[$fingerprint] = $issue
@@ -183,16 +199,36 @@ function Merge-DuoForgeStageIssues {
             $byExternalKey[([string]$stageRecord.provider + ':' + $externalKey)] = $issue
         }
 
-        if ([string]$stageRecord.stage -eq 'final-validation' -and -not [bool]$stageResult.finalApproved -and @($stageResult.issues).Count -eq 0) {
-            $fingerprint = Get-DuoForgeIssueFingerprint -Target 'shared-final-document' -Category 'final-validation' -Claim '최종 검증 공급자가 문서를 승인하지 않았습니다.'
+        if ([string]$stageRecord.stage -in @('final-validation', 'document-validation') -and -not [bool]$stageResult.finalApproved -and @($stageResult.issues).Count -eq 0) {
+            $validationTarget = if ($WorkflowVersion -eq 'workflow-v2') {
+                [string](Get-DuoForgeObjectValue -Object $stageRecord -Name 'targetDocumentId' -Default 'merged')
+            }
+            else {
+                'shared-final-document'
+            }
+            $validationClaim = if ([string]$stageRecord.stage -eq 'document-validation') {
+                "최종 검증 공급자가 문서 $validationTarget 개정본을 승인하지 않았습니다."
+            }
+            else {
+                '최종 검증 공급자가 공동 문서를 승인하지 않았습니다.'
+            }
+            $fingerprint = Get-DuoForgeIssueFingerprint -Target $validationTarget -Category 'final-validation' -Claim $validationClaim
             if (-not $byFingerprint.ContainsKey($fingerprint)) {
-                $issue = New-DuoForgeIssueInternal -ExistingIssues @($issues) -Round ([int]$stageRecord.round) -RaisedBy orchestrator -Target 'shared-final-document' -Category 'final-validation' -Severity critical -Claim '최종 검증 공급자가 문서를 승인하지 않았습니다.' -Proposal '최종 검증 쟁점을 해결한 뒤 다시 검증하세요.' -RequiresUser $true -BlockingProposal $true
+                $issue = New-DuoForgeIssueInternal -ExistingIssues @($issues) -Round ([int]$stageRecord.round) -RaisedBy orchestrator -Target $validationTarget -Category 'final-validation' -Severity critical -Claim $validationClaim -Proposal '최종 검증 쟁점을 해결한 뒤 다시 검증하세요.' -RequiresUser $true -BlockingProposal $true
+                if ($WorkflowVersion -eq 'workflow-v2') {
+                    $issue.targetDocumentId = $validationTarget
+                    $issue.Remove('target')
+                    $issue.editorialDecisions = @()
+                    $issue.reviewerVerdicts = @()
+                    $issue.Remove('ownerDecisions')
+                }
                 $issue.fingerprint = $fingerprint
-                $issue.externalKeys = @('ORCHESTRATOR-FINAL-VALIDATION')
+                $externalKey = 'ORCHESTRATOR-FINAL-VALIDATION-' + $validationTarget
+                $issue.externalKeys = @($externalKey)
                 $issue.sourceSteps = @([string]$stageRecord.stepKey)
                 $issues.Add($issue)
                 $byFingerprint[$fingerprint] = $issue
-                $byExternalKey['ORCHESTRATOR-FINAL-VALIDATION'] = $issue
+                $byExternalKey[$externalKey] = $issue
             }
         }
     }
@@ -210,7 +246,12 @@ function Merge-DuoForgeStageIssues {
                 rationale = [string]$response.rationale
                 locations = @($response.locations)
             }
-            $issue.ownerDecisions = @($issue.ownerDecisions) + @($decision)
+            if ($WorkflowVersion -eq 'workflow-v2') {
+                $issue.editorialDecisions = @($issue.editorialDecisions) + @($decision)
+            }
+            else {
+                $issue.ownerDecisions = @($issue.ownerDecisions) + @($decision)
+            }
             if ([string]$issue.severity -eq 'critical') {
                 $issue.resolutionStatus = if ([string]$response.disposition -eq 'NEEDS_EVIDENCE') { 'AWAITING_EVIDENCE' } else { 'AWAITING_USER' }
             }
@@ -230,16 +271,36 @@ function Merge-DuoForgeStageIssues {
             $key = [string]$adoption.issueKey
             if ($byExternalKey.ContainsKey($key)) {
                 $issue = $byExternalKey[$key]
-                $issue.adoptions = @($issue.adoptions) + @([ordered]@{
+                $adoptionRecord = [ordered]@{
                     at = Get-DuoForgeUtcNow
                     actor = [string]$stageRecord.provider
                     sourceStep = [string]$stageRecord.stepKey
-                    sourceProvider = [string]$adoption.sourceProvider
-                    target = [string]$adoption.target
+                    round = [int]$stageRecord.round
                     disposition = [string]$adoption.disposition
                     rationale = [string]$adoption.rationale
                     locations = @($adoption.locations)
-                })
+                }
+                if ($WorkflowVersion -eq 'workflow-v2') {
+                    $adoptionRecord.sourceDocumentId = [string](Get-DuoForgeObjectValue -Object $adoption -Name 'sourceDocumentId' -Default '')
+                    $adoptionRecord.proposedByProvider = [string](Get-DuoForgeObjectValue -Object $adoption -Name 'proposedByProvider' -Default ([string]$stageRecord.provider))
+                    $adoptionRecord.targetDocumentId = [string](Get-DuoForgeObjectValue -Object $adoption -Name 'targetDocumentId' -Default '')
+                }
+                else {
+                    $adoptionRecord.sourceProvider = [string]$adoption.sourceProvider
+                    $adoptionRecord.target = [string]$adoption.target
+                }
+                $issue.adoptions = @($issue.adoptions) + @($adoptionRecord)
+                if ([string]$issue.severity -eq 'critical') {
+                    $issue.resolutionStatus = 'AWAITING_USER'
+                }
+                else {
+                    switch ([string]$adoption.disposition) {
+                        'ACCEPTED' { $issue.resolutionStatus = if (@($adoption.locations).Count -gt 0) { 'RESOLVED' } else { 'OPEN' } }
+                        'PARTIALLY_ACCEPTED' { $issue.resolutionStatus = if (@($adoption.locations).Count -gt 0) { 'RESOLVED' } else { 'OPEN' } }
+                        'REJECTED' { $issue.resolutionStatus = 'RESOLVED' }
+                        'DEFERRED' { $issue.resolutionStatus = 'AWAITING_USER' }
+                    }
+                }
             }
         }
 
@@ -391,7 +452,8 @@ function New-DuoForgeDecisionsMarkdown {
         $lines.Add('')
         $lines.Add("- 심각도: $($issue.severity)")
         $lines.Add("- 상태: $($issue.resolutionStatus)")
-        foreach ($decision in @($issue.ownerDecisions)) {
+        $decisionItems = if ($issue.Contains('editorialDecisions')) { @($issue.editorialDecisions) } else { @($issue.ownerDecisions) }
+        foreach ($decision in $decisionItems) {
             $decisionActor = [string](Get-DuoForgeObjectValue -Object $decision -Name 'actor' -Default 'unknown')
             $decisionDisposition = [string](Get-DuoForgeObjectValue -Object $decision -Name 'disposition' -Default 'UNKNOWN')
             $decisionRationale = [string](Get-DuoForgeObjectValue -Object $decision -Name 'rationale' -Default '')
@@ -451,6 +513,7 @@ function Render-DuoForgeFinalArtifacts {
     )
 
     $manifest = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json')
+    $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
     $stageResults = @(Get-DuoForgeCommittedStageResults -RunDirectory $RunDirectory -Graph $Graph)
     $userEvidencePath = Join-Path $RunDirectory 'decisions\user-evidence.jsonl'
     $userEvidence = @(Read-DuoForgeJsonLines -Path $userEvidencePath -AllowMissing)
@@ -460,7 +523,7 @@ function Render-DuoForgeFinalArtifacts {
     $evidenceIssueIds = @($userEvidence | ForEach-Object { [string]$_.issueId })
     $decisionIssueIds = @($userDecisionRecords | Where-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'action' -Default '') -eq 'ANSWER' } | ForEach-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'issueId' -Default '') })
     $preservedIssues = @($existingLedger.issues | Where-Object { [string]$_.issueId -in $evidenceIssueIds -or [string]$_.issueId -in $decisionIssueIds })
-    $merged = Merge-DuoForgeStageIssues -StageResults $stageResults -UserEvidenceRecords $userEvidence -UserDecisionRecords $userDecisionRecords -PreservedIssues $preservedIssues
+    $merged = Merge-DuoForgeStageIssues -StageResults $stageResults -UserEvidenceRecords $userEvidence -UserDecisionRecords $userDecisionRecords -PreservedIssues $preservedIssues -WorkflowVersion $workflowVersion
     Write-DuoForgeJsonAtomic -Path (Join-Path $RunDirectory 'issues.json') -Value ([ordered]@{ schemaVersion = 1; issues = @($merged.issues) })
     Write-DuoForgeJsonAtomic -Path (Join-Path $RunDirectory 'decisions\pending.json') -Value ([ordered]@{ schemaVersion = 1; questions = @($merged.questions) })
 
@@ -483,6 +546,95 @@ function Render-DuoForgeFinalArtifacts {
             Write-DuoForgeTextAtomic -Path $path -Text ([string]$artifact.text)
             $files.Add($path)
         }
+    }
+    elseif ([string]$manifest.mode -eq 'document-merge') {
+        $latest = @($stageResults | Where-Object { $_.stage -eq 'synthesis' } | Sort-Object round -Descending | Select-Object -First 1)
+        if ($latest.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$latest[0].result.document)) {
+            throw (New-DuoForgeException -Code 'DF-FINAL-DOCUMENT' -Message '완료된 병합 문서 산출물을 찾을 수 없습니다.')
+        }
+        $documentPath = Join-Path $finalDirectory (Get-DuoForgeFinalDocumentName -DocumentType ([string]$manifest.documentType))
+        Write-DuoForgeTextAtomic -Path $documentPath -Text ([string]$latest[0].result.document)
+        $files.Add($documentPath)
+        $traceLines = @(
+            '# 문서 A/B 출처 추적', '',
+            '| 쟁점 | 원천 문서 | 제안 작업자 | 대상 문서 | 채택 상태 | 이유 | 반영 위치 | 라운드 |',
+            '|---|---|---|---|---|---|---|---:|'
+        )
+        foreach ($issue in @($merged.issues)) {
+            $adoptions = @($issue.adoptions)
+            if ($adoptions.Count -eq 0) {
+                $traceLines += "| $($issue.issueId) | - | - | $(ConvertTo-DuoForgeMarkdownCell -Text (Get-DuoForgeIssueTargetInternal -Issue $issue)) | $($issue.resolutionStatus) | - | - | - |"
+                continue
+            }
+            foreach ($adoption in $adoptions) {
+                $rationale = ConvertTo-DuoForgeMarkdownCell -Text ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'rationale' -Default ''))
+                $locations = ConvertTo-DuoForgeMarkdownCell -Text (@($adoption.locations) -join ', ')
+                $traceLines += '| {0} | {1} | {2} | {3} | {4} | {5} | {6} | {7} |' -f `
+                    $issue.issueId,
+                    (Get-DuoForgeObjectValue -Object $adoption -Name 'sourceDocumentId' -Default '-'),
+                    (Get-DuoForgeObjectValue -Object $adoption -Name 'proposedByProvider' -Default '-'),
+                    (Get-DuoForgeObjectValue -Object $adoption -Name 'targetDocumentId' -Default (Get-DuoForgeIssueTargetInternal -Issue $issue)),
+                    (Get-DuoForgeObjectValue -Object $adoption -Name 'disposition' -Default 'UNKNOWN'),
+                    $rationale,
+                    $locations,
+                    (Get-DuoForgeObjectValue -Object $adoption -Name 'round' -Default '-')
+            }
+        }
+        if ($merged.issues.Count -eq 0) { $traceLines += '| - | A/B | - | merged | 기록된 쟁점 없음 | - | - | - |' }
+        foreach ($artifact in @(
+            @{ name = 'source-trace.md'; text = (($traceLines -join [Environment]::NewLine) + [Environment]::NewLine) },
+            @{ name = 'DEBATE_SUMMARY.md'; text = New-DuoForgeDebateSummaryMarkdown -StageResults $stageResults },
+            @{ name = 'DECISIONS.md'; text = New-DuoForgeDecisionsMarkdown -Issues @($merged.issues) },
+            @{ name = 'OPEN_QUESTIONS.md'; text = New-DuoForgeOpenQuestionsMarkdown -Questions @($merged.questions) -Issues @($merged.issues) }
+        )) {
+            $path = Join-Path $finalDirectory $artifact.name
+            Write-DuoForgeTextAtomic -Path $path -Text ([string]$artifact.text)
+            $files.Add($path)
+        }
+    }
+    elseif ($workflowVersion -eq 'workflow-v2') {
+        foreach ($documentId in @('A', 'B')) {
+            $latest = @($stageResults | Where-Object { [string]$_.targetDocumentId -eq $documentId -and $_.stage -eq 'document-revision' } | Sort-Object round -Descending | Select-Object -First 1)
+            if ($latest.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$latest[0].result.document)) {
+                throw (New-DuoForgeException -Code 'DF-FINAL-DOCUMENT' -Message "문서 $documentId 최종 개정 산출물을 찾을 수 없습니다.")
+            }
+            $path = Join-Path $finalDirectory "document-$documentId-final.md"
+            Write-DuoForgeTextAtomic -Path $path -Text ([string]$latest[0].result.document)
+            $files.Add($path)
+        }
+        $comparisonPath = Join-Path $finalDirectory 'comparison.md'
+        Write-DuoForgeTextAtomic -Path $comparisonPath -Text (New-DuoForgeDebateSummaryMarkdown -StageResults $stageResults)
+        $files.Add($comparisonPath)
+        $adoptionLines = @(
+            '# 문서별 채택 기록', '',
+            '| 쟁점 | 원천 문서 | 제안 작업자 | 편집 작업자 | 대상 문서 | 채택 상태 | 이유 | 반영 위치 | 라운드 |',
+            '|---|---|---|---|---|---|---|---|---:|'
+        )
+        $adoptionCount = 0
+        foreach ($issue in @($merged.issues)) {
+            foreach ($adoption in @($issue.adoptions)) {
+                $adoptionCount++
+                $rationale = ConvertTo-DuoForgeMarkdownCell -Text ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'rationale' -Default ''))
+                $locations = ConvertTo-DuoForgeMarkdownCell -Text (@($adoption.locations) -join ', ')
+                $adoptionLines += '| {0} | {1} | {2} | {3} | {4} | {5} | {6} | {7} | {8} |' -f `
+                    $issue.issueId,
+                    (Get-DuoForgeObjectValue -Object $adoption -Name 'sourceDocumentId' -Default '-'),
+                    (Get-DuoForgeObjectValue -Object $adoption -Name 'proposedByProvider' -Default '-'),
+                    (Get-DuoForgeObjectValue -Object $adoption -Name 'actor' -Default '-'),
+                    (Get-DuoForgeObjectValue -Object $adoption -Name 'targetDocumentId' -Default (Get-DuoForgeIssueTargetInternal -Issue $issue)),
+                    (Get-DuoForgeObjectValue -Object $adoption -Name 'disposition' -Default 'UNKNOWN'),
+                    $rationale,
+                    $locations,
+                    (Get-DuoForgeObjectValue -Object $adoption -Name 'round' -Default '-')
+            }
+        }
+        if ($adoptionCount -eq 0) { $adoptionLines += '| - | - | - | - | A/B | 기록된 채택 항목 없음 | - | - | - |' }
+        $adoptionPath = Join-Path $finalDirectory 'adoption-log.md'
+        Write-DuoForgeTextAtomic -Path $adoptionPath -Text (($adoptionLines -join [Environment]::NewLine) + [Environment]::NewLine)
+        $files.Add($adoptionPath)
+        $questionsPath = Join-Path $finalDirectory 'OPEN_QUESTIONS.md'
+        Write-DuoForgeTextAtomic -Path $questionsPath -Text (New-DuoForgeOpenQuestionsMarkdown -Questions @($merged.questions) -Issues @($merged.issues))
+        $files.Add($questionsPath)
     }
     else {
         foreach ($provider in @('codex', 'claude')) {

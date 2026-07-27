@@ -140,14 +140,17 @@ function Get-DuoForgeProviderCommandSpecInternal {
         [Parameter(Mandatory)][System.Collections.IDictionary]$Prompt
     )
 
-    $schema = Read-DuoForgeJson -Path (Get-DuoForgeStageSchemaPath)
+    $manifest = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json')
+    $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
+    $schemaPath = Get-DuoForgeStageSchemaPath -WorkflowVersion $workflowVersion
+    $schema = Read-DuoForgeJson -Path $schemaPath
     return Get-DuoForgeStructuredProviderCommandSpecInternal `
         -Provider $Provider `
         -RunDirectory $RunDirectory `
         -OperationKey ([string]$Step.stepKey) `
         -Prompt $Prompt `
         -Schema $schema `
-        -SchemaFileName 'stage-result.schema.json'
+        -SchemaFileName ([System.IO.Path]::GetFileName($schemaPath))
 }
 
 function Assert-DuoForgeCodexEventStreamSafe {
@@ -170,7 +173,10 @@ function ConvertFrom-DuoForgeClaudeEnvelope {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$Json,
-        [Parameter(Mandatory)][string]$ExpectedStage
+        [Parameter(Mandatory)][string]$ExpectedStage,
+        [ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion = 'workflow-v1',
+        [AllowNull()][string]$ExpectedTargetDocumentId,
+        [AllowEmptyCollection()][string[]]$ExpectedSourceDocumentIds = @()
     )
 
     try { $envelope = ConvertTo-DuoForgeHashtable -InputObject ($Json | ConvertFrom-Json -Depth 100) }
@@ -186,7 +192,7 @@ function ConvertFrom-DuoForgeClaudeEnvelope {
         throw (New-DuoForgeException -Code 'DF-CLAUDE-STRUCTURED-OUTPUT' -Message 'Claude 결과에 검증된 structured_output이 없습니다.')
     }
     $raw = $structured | ConvertTo-Json -Depth 100 -Compress
-    return ConvertFrom-DuoForgeProviderResult -RawJson $raw -ExpectedStage $ExpectedStage -ExpectedProvider 'claude'
+    return ConvertFrom-DuoForgeProviderResult -RawJson $raw -ExpectedStage $ExpectedStage -ExpectedProvider 'claude' -WorkflowVersion $WorkflowVersion -ExpectedTargetDocumentId $ExpectedTargetDocumentId -ExpectedSourceDocumentIds $ExpectedSourceDocumentIds
 }
 
 function Get-DuoForgeProviderFailureClassificationInternal {
@@ -258,10 +264,17 @@ function Invoke-DuoForgeLiveProviderStage {
     if ($null -eq $Prompt) {
         $Prompt = New-DuoForgeStagePrompt -RunDirectory $RunDirectory -Graph $Graph -Step $Step
     }
+    $manifest = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json')
+    $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
+    $expectedTargetDocumentId = Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId'
+    $expectedSourceDocumentIds = @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @())
     $spec = Get-DuoForgeProviderCommandSpecInternal -Provider ([string]$Step.provider) -RunDirectory $RunDirectory -Step $Step -Prompt $Prompt
     Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'PROVIDER_CALL_STARTED' -Status 'RUNNING' -Data ([ordered]@{
+        workflowVersion = $workflowVersion
         stepKey = [string]$Step.stepKey
         provider = [string]$Step.provider
+        stage = [string]$Step.stage
+        targetDocumentId = $expectedTargetDocumentId
         promptHash = [string]$Prompt.sha256
         promptBytes = [int]$Prompt.bytes
         visibleArtifactStepKeys = @($Prompt.artifactStepKeys)
@@ -273,9 +286,11 @@ function Invoke-DuoForgeLiveProviderStage {
             {
                 param($elapsed)
                 Invoke-DuoForgeProgressObserverInternal -Observer $ProgressObserver -Type 'PROVIDER_TICK' -RunDirectory $RunDirectory -Data ([ordered]@{
+                    workflowVersion = $workflowVersion
                     stepKey = [string]$Step.stepKey
                     provider = [string]$Step.provider
                     stage = [string]$Step.stage
+                    targetDocumentId = $expectedTargetDocumentId
                     round = [int]$Step.round
                     elapsedSeconds = [int][Math]::Floor($elapsed.TotalSeconds)
                 })
@@ -304,15 +319,18 @@ function Invoke-DuoForgeLiveProviderStage {
                 throw (New-DuoForgeException -Code 'DF-CODEX-LAST-MESSAGE' -Message 'Codex 최종 구조화 출력 파일이 없습니다.')
             }
             $rawJson = [System.IO.File]::ReadAllText([string]$spec.outputPath, [System.Text.UTF8Encoding]::new($false, $true))
-            $converted = ConvertFrom-DuoForgeProviderResult -RawJson $rawJson -ExpectedStage ([string]$Step.stage) -ExpectedProvider 'codex'
+            $converted = ConvertFrom-DuoForgeProviderResult -RawJson $rawJson -ExpectedStage ([string]$Step.stage) -ExpectedProvider 'codex' -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId $expectedTargetDocumentId -ExpectedSourceDocumentIds $expectedSourceDocumentIds
         }
         else {
-            $converted = ConvertFrom-DuoForgeClaudeEnvelope -Json ([string]$processResult.stdout) -ExpectedStage ([string]$Step.stage)
+            $converted = ConvertFrom-DuoForgeClaudeEnvelope -Json ([string]$processResult.stdout) -ExpectedStage ([string]$Step.stage) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId $expectedTargetDocumentId -ExpectedSourceDocumentIds $expectedSourceDocumentIds
         }
 
         Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'PROVIDER_CALL_COMPLETED' -Status 'RUNNING' -Data ([ordered]@{
+            workflowVersion = $workflowVersion
             stepKey = [string]$Step.stepKey
             provider = [string]$Step.provider
+            stage = [string]$Step.stage
+            targetDocumentId = $expectedTargetDocumentId
             promptHash = [string]$Prompt.sha256
             rawHash = [string]$converted.rawHash
             redactionCount = [int]$converted.redactionCount
@@ -329,11 +347,12 @@ function New-DuoForgeFakeStageResult {
     param([Parameter(Mandatory)][System.Collections.IDictionary]$Step)
 
     $document = $null
-    if ([string]$Step.stage -in @('independent-draft', 'synthesis', 'owned-document-revision')) {
+    if ([string]$Step.stage -in @('independent-draft', 'independent-merge-draft', 'synthesis', 'owned-document-revision', 'document-revision')) {
         $document = "# 가짜 $($Step.provider) 문서`n`n단계: $($Step.stage), 라운드: $($Step.round)"
     }
-    return [ordered]@{
-        schemaVersion = 1
+    $workflowVersion = if ($Step.Contains('performedBy')) { 'workflow-v2' } else { 'workflow-v1' }
+    $result = [ordered]@{
+        schemaVersion = if ($workflowVersion -eq 'workflow-v2') { 2 } else { 1 }
         stage = [string]$Step.stage
         provider = [string]$Step.provider
         summary = "가짜 공급자 결과: $($Step.stepKey)"
@@ -342,6 +361,12 @@ function New-DuoForgeFakeStageResult {
         issueResponses = @()
         adoptions = @()
         openQuestions = @()
-        finalApproved = if ([string]$Step.stage -eq 'final-validation') { $true } else { $null }
+        finalApproved = if ([string]$Step.stage -in @('final-validation', 'document-validation')) { $true } else { $null }
     }
+    if ($workflowVersion -eq 'workflow-v2') {
+        $result.performedBy = [string]$Step.performedBy
+        $result.targetDocumentId = Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId'
+        $result.sourceDocumentIds = @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @())
+    }
+    return $result
 }
