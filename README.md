@@ -2,7 +2,7 @@
 
 DuoForge는 Codex와 Claude가 같은 입력 스냅샷을 독립적으로 검토하고 서로의 결과를 비평하도록 조율하는 Windows 로컬 우선 CLI다.
 
-현재 저장소는 PRD v1.3의 문서 모드 Core Beta 구현이다. 공통 안전 기반, 진단, 실행 계획, 불변 스냅샷, 구조화 토론 단계, 재개 가능한 상태 저장과 최종 산출물 렌더링을 제공한다. 프로젝트 읽기 전용 비교(3A)는 안전 격리 검증 전까지 의도적으로 비활성화되어 있다.
+현재 저장소는 PRD v1.4의 문서 모드 Core Beta 구현이다. 공통 안전 기반, 진단, 필수 모델·추론 정도 선택, 실행 계획, 불변 스냅샷, 구조화 토론 단계, 재개 가능한 상태 저장과 최종 산출물 렌더링을 제공한다. 프로젝트 읽기 전용 비교(3A)는 안전 격리 검증 전까지 의도적으로 비활성화되어 있다.
 
 ## 요구 환경
 
@@ -30,12 +30,16 @@ DuoForge는 Codex와 Claude가 같은 입력 스냅샷을 독립적으로 검토
 ```powershell
 .\duoforge.cmd start shared-document `
   --brief ".\require\PRD.md" `
+  --codex-model "gpt-5.6" `
+  --codex-effort "high" `
+  --claude-model "sonnet" `
+  --claude-effort "high" `
   --type "prd" `
   --max-rounds 2 `
   --plan-only
 ```
 
-`--plan-only`는 모델을 호출하거나 확정 실행을 만들지 않고 검증·전송 범위·최악 호출 수만 보여준다.
+`--plan-only`는 모델을 호출하거나 확정 실행을 만들지 않고 선택한 모델·추론 정도, 검증·전송 범위와 최악 호출 수만 보여준다. 네 선택 옵션은 생략할 수 없으며, 인수 없이 여는 대화형 메뉴에서는 각 항목을 번호로 반드시 선택한다. 제안 목록에 없는 CLI 모델은 `모델명 직접 입력` 또는 `--codex-model`·`--claude-model`로 지정할 수 있다. Codex 추론 정도는 `low|medium|high|xhigh|max|ultra`, Claude는 `low|medium|high|xhigh|max` 중에서 고른다.
 
 확정 실행은 `start`에서 스냅샷까지만 만든다. 출력된 실행 ID를 사용해 상태와 남은 호출 수를 먼저 확인한다.
 
@@ -54,7 +58,7 @@ DuoForge는 Codex와 Claude가 같은 입력 스냅샷을 독립적으로 검토
 
 Critical 쟁점은 보류할 수 없다. Major 쟁점의 부분 완료 보류는 대화형 확인 또는 명시적인 `--confirm-partial`이 필요하다.
 
-실제 Codex·Claude 구독 CLI 호출은 대화형 PowerShell에서만 다음처럼 시작할 수 있다. 전송 경고와 공급자별 최악 추가 호출 수를 다시 표시한 뒤 정확히 `LIVE`를 입력해야 한다.
+실제 Codex·Claude 구독 CLI 호출은 대화형 PowerShell에서만 다음처럼 시작할 수 있다. 저장된 공급자별 모델·추론 정도, 전송 경고와 최악 추가 호출 수를 다시 표시한 뒤 정확히 `LIVE`를 입력해야 한다. 선택 정보가 없는 이전 형식의 실행 기록은 라이브 재개할 수 없다.
 
 ```powershell
 .\duoforge.cmd resume --run "run-20260727-..." --live

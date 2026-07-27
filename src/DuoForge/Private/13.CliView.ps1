@@ -7,8 +7,8 @@ DuoForge
 사용법:
   duoforge
   duoforge doctor [--json]
-  duoforge start shared-document --brief <파일> [--type prd] [--max-rounds 2] [--workspace <폴더>] [--plan-only]
-  duoforge start dual-document --codex <파일> --claude <파일> [--type prd] [--max-rounds 2] [--workspace <폴더>] [--plan-only]
+  duoforge start shared-document --brief <파일> --codex-model <모델> --codex-effort <단계> --claude-model <모델> --claude-effort <단계> [--plan-only]
+  duoforge start dual-document --codex <파일> --claude <파일> --codex-model <모델> --codex-effort <단계> --claude-model <모델> --claude-effort <단계> [--plan-only]
   duoforge status --run <실행 ID> [--workspace <폴더>] [--json]
   duoforge issues --run <실행 ID> [--workspace <폴더>] [--json]
   duoforge answer --run <실행 ID> --issue <쟁점 ID> --choice <A|B> [--workspace <폴더>]
@@ -16,8 +16,13 @@ DuoForge
   duoforge resume --run <실행 ID> [--workspace <폴더>] [--live]
   duoforge list [--workspace <폴더>] [--json]
 
+추론 정도:
+  - Codex: low, medium, high, xhigh, max, ultra
+  - Claude: low, medium, high, xhigh, max
+
 안전 원칙:
   - API 키 인증은 사용하지 않습니다.
+  - 새 실행마다 두 공급자의 모델과 추론 정도를 명시적으로 선택합니다.
   - 모델 호출 전 입력, 전송 범위와 최악 호출 수를 확인합니다.
   - 3A는 격리 검증 전까지 비활성화되어 있습니다.
 '@ | Write-Host
@@ -49,6 +54,18 @@ function Write-DuoForgeDoctorReport {
     }
 }
 
+function Write-DuoForgeProviderSelectionSummary {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$ProviderSelections)
+
+    $null = Assert-DuoForgeProviderSelectionsInternal -Selections $ProviderSelections
+    foreach ($provider in @('codex', 'claude')) {
+        $options = Get-DuoForgeProviderSelectionOptionsInternal -Provider $provider
+        $selection = Get-DuoForgeObjectValue -Object $ProviderSelections -Name $provider
+        Write-Host ('{0} 선택: 모델={1}, 추론 정도={2}' -f $options.displayName, $selection.model, $selection.reasoningEffort)
+    }
+}
+
 function Write-DuoForgeExecutionPlan {
     [CmdletBinding()]
     param([Parameter(Mandatory)][System.Collections.IDictionary]$Validation)
@@ -58,6 +75,7 @@ function Write-DuoForgeExecutionPlan {
     Write-Host ('모드: {0}' -f $Validation.request.mode)
     Write-Host ('라운드: {0}' -f $Validation.request.maxRounds)
     Write-Host ('결과 루트: {0}' -f $Validation.resultsRoot)
+    Write-DuoForgeProviderSelectionSummary -ProviderSelections $Validation.request.providerSelections
     if ($Validation.request.mode -eq 'shared-document') {
         Write-Host ('입력: {0} ({1})' -f $Validation.inputs.primary.path, (Format-DuoForgeByteSize -Bytes $Validation.inputs.primary.bytes))
     }

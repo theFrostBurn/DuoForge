@@ -158,6 +158,9 @@ function New-DuoForgeRunInternal {
         throw (New-DuoForgeException -Code 'DF-RUN-INVALID' -Message '검증에 실패한 요청으로 실행을 만들 수 없습니다.')
     }
 
+    $requestSelections = Get-DuoForgeObjectValue -Object $ValidationResult.request -Name 'providerSelections'
+    $null = Assert-DuoForgeProviderSelectionsInternal -Selections $requestSelections
+
     $resultsRoot = [string]$ValidationResult.resultsRoot
     [System.IO.Directory]::CreateDirectory($resultsRoot) | Out-Null
     $runId = New-DuoForgeRunId -ResultsRoot $resultsRoot
@@ -207,7 +210,7 @@ function New-DuoForgeRunInternal {
         Write-DuoForgeJsonAtomic -Path (Join-Path $runDirectory 'inputs\inventory.json') -Value $inventory
 
         $manifest = [ordered]@{
-            schemaVersion = 1
+            schemaVersion = 2
             runId = $runId
             name = if ([string]::IsNullOrWhiteSpace([string]$request.name)) { [System.IO.Path]::GetFileNameWithoutExtension([string]$sourceFiles[0].path) } else { $request.name }
             mode = $request.mode
@@ -224,6 +227,7 @@ function New-DuoForgeRunInternal {
                 codex = [ordered]@{ version = $ValidationResult.doctor.providers.codex.version; authType = $ValidationResult.doctor.providers.codex.authType }
                 claude = [ordered]@{ version = $ValidationResult.doctor.providers.claude.version; authType = $ValidationResult.doctor.providers.claude.authType }
             }
+            providerSelections = ConvertTo-DuoForgeHashtable -InputObject $requestSelections
             executionPlan = $ValidationResult.executionPlan
             inputSnapshotHashes = @($snapshotRecords | ForEach-Object { $_.snapshotHash })
         }

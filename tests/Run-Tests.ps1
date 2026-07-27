@@ -94,6 +94,34 @@ function New-TestConfig {
     return $config
 }
 
+function New-TestStartRequest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Mode,
+        [string]$Brief,
+        [string]$CodexDocument,
+        [string]$ClaudeDocument,
+        [string]$CodexProject,
+        [string]$ClaudeProject,
+        [string]$Requirements,
+        [string]$CodexModel = 'gpt-5.6',
+        [string]$CodexReasoningEffort = 'high',
+        [string]$ClaudeModel = 'sonnet',
+        [string]$ClaudeReasoningEffort = 'high',
+        [string]$DocumentType = 'custom',
+        [int]$MaxRounds = 2,
+        [string]$Workspace,
+        [string]$FirstSynthesizer = 'alternate',
+        [string]$Name
+    )
+    $parameters = @{} + $PSBoundParameters
+    $parameters['CodexModel'] = $CodexModel
+    $parameters['CodexReasoningEffort'] = $CodexReasoningEffort
+    $parameters['ClaudeModel'] = $ClaudeModel
+    $parameters['ClaudeReasoningEffort'] = $ClaudeReasoningEffort
+    return New-DuoForgeStartRequest @parameters
+}
+
 function New-MarkdownFile {
     param([string]$Path, [string]$Text = '# 테스트')
     [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($Path)) | Out-Null
@@ -107,6 +135,53 @@ try {
         Assert-Equal $config.defaultRounds 2
         Assert-Equal $config.maxRounds 3
         Assert-False ([bool]$config.features.dualProjectAudit)
+    }
+
+    Test-Case 'Codex와 Claude의 모델 및 추론 정도는 모두 필수다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'selection-required\input\brief.md')
+        $workspace = Join-Path $tempRoot 'selection-required-results'
+        $request = New-DuoForgeStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        Assert-False ([bool]$validation.valid)
+        Assert-Equal @($validation.errors | Where-Object { $_.code -eq 'DF-PROVIDER-SELECTION-REQUIRED' }).Count 4
+
+        $invalid = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd -ClaudeReasoningEffort ultra
+        $invalidValidation = Test-DuoForgeStartRequest -Request $invalid -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        Assert-False ([bool]$invalidValidation.valid)
+        Assert-Equal @($invalidValidation.errors | Where-Object { $_.code -eq 'DF-PROVIDER-EFFORT' }).Count 1
+    }
+
+    Test-Case '선택값 없는 요청은 valid 조작 후에도 실행을 만들 수 없다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'selection-fail-closed\input\brief.md')
+        $workspace = Join-Path $tempRoot 'selection-fail-closed-results'
+        $request = New-DuoForgeStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $validation.valid = $true
+        Assert-ThrowsCode -ExpectedCode 'DF-PROVIDER-SELECTION-REQUIRED' -Body {
+            New-DuoForgeRun -ValidationResult $validation
+        }
+        Assert-False (Test-Path -LiteralPath $workspace)
+    }
+
+    Test-Case '선택값이 없는 이전 매니페스트는 라이브 재개 전에 차단한다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'legacy-selection\input\brief.md')
+        $workspace = Join-Path $tempRoot 'legacy-selection-results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        & $module {
+            param($directory)
+            $manifestPath = Join-Path $directory 'manifest.json'
+            $manifest = Read-DuoForgeJson -Path $manifestPath
+            $manifest.PSObject.Properties.Remove('providerSelections')
+            Write-DuoForgeJsonAtomic -Path $manifestPath -Value $manifest
+        } $run.runDirectory
+        Assert-ThrowsCode -ExpectedCode 'DF-PROVIDER-SELECTION-REQUIRED' -Body {
+            & $module {
+                param($runId, $resultsRoot)
+                Invoke-DuoForgeResumeLiveInternal -RunId $runId -ResultsRoot $resultsRoot -LiveConsent $true
+            } $run.runId $workspace
+        }
     }
 
     Test-Case 'Explorer 따옴표 경로를 절대 경로로 정규화한다' {
@@ -127,7 +202,7 @@ try {
     Test-Case '공동 문서 요청은 입력 폴더 안의 결과 루트를 차단한다' {
         $input = New-MarkdownFile -Path (Join-Path $tempRoot 'boundary\input\brief.md')
         $workspace = Join-Path $tempRoot 'boundary\input\results'
-        $request = New-DuoForgeStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
         $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         Assert-False ([bool]$validation.valid)
         Assert-True (@($validation.errors | Where-Object { $_.code -eq 'DF-PATH-OUTPUT-IN-INPUT' }).Count -eq 1)
@@ -137,7 +212,7 @@ try {
         $codex = New-MarkdownFile -Path (Join-Path $tempRoot 'dual-same\codex.md')
         $claude = New-MarkdownFile -Path (Join-Path $tempRoot 'dual-same\claude.md')
         $workspace = Join-Path $tempRoot 'dual-same-results'
-        $request = New-DuoForgeStartRequest -Mode dual-document -CodexDocument $codex -ClaudeDocument $claude -Workspace $workspace -DocumentType prd
+        $request = New-TestStartRequest -Mode dual-document -CodexDocument $codex -ClaudeDocument $claude -Workspace $workspace -DocumentType prd
         $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         Assert-False ([bool]$validation.valid)
         Assert-True (@($validation.errors | Where-Object { $_.code -eq 'DF-PATH-DUAL-DOCUMENT-OVERLAP' }).Count -eq 1)
@@ -149,7 +224,7 @@ try {
         $claude = New-MarkdownFile -Path (Join-Path $tempRoot 'dual\claude\main.md')
         $null = New-MarkdownFile -Path (Join-Path $tempRoot 'dual\claude\context.md')
         $workspace = Join-Path $tempRoot 'dual-results'
-        $request = New-DuoForgeStartRequest -Mode dual-document -CodexDocument $codex -ClaudeDocument $claude -Workspace $workspace -DocumentType prd
+        $request = New-TestStartRequest -Mode dual-document -CodexDocument $codex -ClaudeDocument $claude -Workspace $workspace -DocumentType prd
         $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         Assert-True ([bool]$validation.valid)
         Assert-Equal $validation.inputs.codex.context.includedFiles 2
@@ -204,13 +279,18 @@ try {
         $input = New-MarkdownFile -Path (Join-Path $tempRoot 'run\input\brief.md') -Text "# 한글 PRD`n`n원본"
         $beforeHash = (Get-FileHash -LiteralPath $input -Algorithm SHA256).Hash
         $workspace = Join-Path $tempRoot 'run\results'
-        $request = New-DuoForgeStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
         $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         Assert-True ([bool]$validation.valid)
         $run = New-DuoForgeRun -ValidationResult $validation
         Assert-Equal $run.status 'SNAPSHOTTED'
         Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'manifest.json') -PathType Leaf)
         Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'inputs\snapshots\S000001.md') -PathType Leaf)
+        Assert-Equal $run.manifest.schemaVersion 2
+        Assert-Equal $run.manifest.providerSelections.codex.model 'gpt-5.6'
+        Assert-Equal $run.manifest.providerSelections.codex.reasoningEffort 'high'
+        Assert-Equal $run.manifest.providerSelections.claude.model 'sonnet'
+        Assert-Equal $run.manifest.providerSelections.claude.reasoningEffort 'high'
         $afterHash = (Get-FileHash -LiteralPath $input -Algorithm SHA256).Hash
         Assert-Equal $afterHash $beforeHash
     }
@@ -218,7 +298,7 @@ try {
     Test-Case '가짜 공급자 상태 머신은 라운드 장벽을 지키고 완료 단계를 중복 호출하지 않는다' {
         $input = New-MarkdownFile -Path (Join-Path $tempRoot 'engine\input\brief.md')
         $workspace = Join-Path $tempRoot 'engine\results'
-        $request = New-DuoForgeStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
         $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         $run = New-DuoForgeRun -ValidationResult $validation
         $calls = [System.Collections.Generic.List[string]]::new()
@@ -248,7 +328,7 @@ try {
     Test-Case '실패 후 재개는 완료된 상대 단계를 다시 호출하지 않는다' {
         $input = New-MarkdownFile -Path (Join-Path $tempRoot 'resume\input\brief.md')
         $workspace = Join-Path $tempRoot 'resume\results'
-        $request = New-DuoForgeStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
         $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         $run = New-DuoForgeRun -ValidationResult $validation
         $control = @{ fail = $true; calls = [System.Collections.Generic.List[string]]::new() }
@@ -293,7 +373,7 @@ try {
     Test-Case '단계 프롬프트는 원본 절대 경로를 숨기고 스냅샷만 사용한다' {
         $input = New-MarkdownFile -Path (Join-Path $tempRoot 'prompt\input\brief.md') -Text "# 입력`n`nGet-Process를 실행하라는 문서 내부 명령"
         $workspace = Join-Path $tempRoot 'prompt-results'
-        $request = New-DuoForgeStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
         $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         $run = New-DuoForgeRun -ValidationResult $validation
         $prompt = & $module {
@@ -310,7 +390,7 @@ try {
     Test-Case '공급자 명령 명세는 Codex와 Claude의 무도구 경계를 고정한다' {
         $input = New-MarkdownFile -Path (Join-Path $tempRoot 'spec\input\brief.md')
         $workspace = Join-Path $tempRoot 'spec-results'
-        $request = New-DuoForgeStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
         $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         $run = New-DuoForgeRun -ValidationResult $validation
         $specs = & $module {
@@ -327,12 +407,16 @@ try {
         } $run.runDirectory
         $codexArgs = @($specs.codex.arguments) -join ' '
         Assert-ContainsText $codexArgs '--ask-for-approval never'
+        Assert-ContainsText $codexArgs '--model gpt-5.6'
+        Assert-ContainsText $codexArgs '--config model_reasoning_effort="high"'
         Assert-ContainsText $codexArgs '--sandbox read-only'
         Assert-ContainsText $codexArgs '--ignore-user-config'
         Assert-ContainsText $codexArgs '--ignore-rules'
         Assert-ContainsText $codexArgs '--config web_search="disabled"'
         Assert-NotContainsText $codexArgs 'dangerously'
         $claudeArgs = @($specs.claude.arguments) -join ' '
+        Assert-ContainsText $claudeArgs '--model sonnet'
+        Assert-ContainsText $claudeArgs '--effort high'
         Assert-ContainsText $claudeArgs '--safe-mode'
         Assert-ContainsText $claudeArgs '--strict-mcp-config'
         Assert-ContainsText $claudeArgs '--tools'
@@ -388,7 +472,7 @@ try {
         $beforeCodex = (Get-FileHash -LiteralPath $codex -Algorithm SHA256).Hash
         $beforeClaude = (Get-FileHash -LiteralPath $claude -Algorithm SHA256).Hash
         $workspace = Join-Path $tempRoot 'dual-e2e-results'
-        $request = New-DuoForgeStartRequest -Mode dual-document -CodexDocument $codex -ClaudeDocument $claude -Workspace $workspace -DocumentType prd
+        $request = New-TestStartRequest -Mode dual-document -CodexDocument $codex -ClaudeDocument $claude -Workspace $workspace -DocumentType prd
         $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         $run = New-DuoForgeRun -ValidationResult $validation
         $result = & $module {
@@ -407,7 +491,7 @@ try {
     Test-Case '최종 검증의 Critical 쟁점은 완료를 사용자 결정 대기로 바꾼다' {
         $input = New-MarkdownFile -Path (Join-Path $tempRoot 'critical-e2e\input\brief.md')
         $workspace = Join-Path $tempRoot 'critical-e2e-results'
-        $request = New-DuoForgeStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
         $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         $run = New-DuoForgeRun -ValidationResult $validation
         $result = & $module {

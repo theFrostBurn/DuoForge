@@ -11,6 +11,10 @@ function New-DuoForgeStartRequestInternal {
         [string]$CodexProject,
         [string]$ClaudeProject,
         [string]$Requirements,
+        [string]$CodexModel,
+        [string]$CodexReasoningEffort,
+        [string]$ClaudeModel,
+        [string]$ClaudeReasoningEffort,
         [ValidateSet('prd', 'architecture', 'implementation-plan', 'adr', 'custom')]
         [string]$DocumentType = 'custom',
         [ValidateRange(2, 3)]
@@ -28,6 +32,16 @@ function New-DuoForgeStartRequestInternal {
         maxRounds = $MaxRounds
         firstSynthesizer = $FirstSynthesizer
         workspace = $Workspace
+        providerSelections = [ordered]@{
+            codex = [ordered]@{
+                model = ([string]$CodexModel).Trim()
+                reasoningEffort = ([string]$CodexReasoningEffort).Trim()
+            }
+            claude = [ordered]@{
+                model = ([string]$ClaudeModel).Trim()
+                reasoningEffort = ([string]$ClaudeReasoningEffort).Trim()
+            }
+        }
         inputs = [ordered]@{
             brief = $Brief
             codexDocument = $CodexDocument
@@ -83,6 +97,11 @@ function Test-DuoForgeStartRequestInternal {
 
     if ([int]$Request.maxRounds -notin @(2, 3)) {
         $errors.Add([ordered]@{ code = 'DF-ROUNDS'; message = '라운드는 2 또는 3이어야 합니다.' })
+    }
+
+    $selectionValidation = Test-DuoForgeProviderSelectionsInternal -Selections (Get-DuoForgeObjectValue -Object $Request -Name 'providerSelections')
+    foreach ($selectionError in @($selectionValidation.errors)) {
+        $errors.Add($selectionError)
     }
 
     if ($mode -eq 'shared-document') {

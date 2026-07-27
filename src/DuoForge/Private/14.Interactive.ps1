@@ -33,14 +33,22 @@ function Invoke-DuoForgeInteractiveNew {
     if ($choice -eq '1') {
         $brief = Read-DuoForgePathChoice -Prompt '입력 Markdown 문서를 선택해 주세요.' -Role 'shared-brief' -Type File
         if ($null -eq $brief) { return }
-        $request = New-DuoForgeStartRequestInternal -Mode 'shared-document' -Brief $brief -DocumentType 'custom' -MaxRounds 2
+        $selections = Complete-DuoForgeInteractiveProviderSelectionsInternal
+        if ($null -eq $selections) { Write-Host '모델 선택을 취소했습니다.'; return }
+        $request = New-DuoForgeStartRequestInternal -Mode 'shared-document' -Brief $brief -DocumentType 'custom' -MaxRounds 2 `
+            -CodexModel ([string]$selections.codex.model) -CodexReasoningEffort ([string]$selections.codex.reasoningEffort) `
+            -ClaudeModel ([string]$selections.claude.model) -ClaudeReasoningEffort ([string]$selections.claude.reasoningEffort)
     }
     elseif ($choice -eq '2') {
         $codexDocument = Read-DuoForgePathChoice -Prompt 'Codex 측 Markdown 문서를 선택해 주세요.' -Role 'codex-document' -Type File
         if ($null -eq $codexDocument) { return }
         $claudeDocument = Read-DuoForgePathChoice -Prompt 'Claude 측 Markdown 문서를 선택해 주세요.' -Role 'claude-document' -Type File
         if ($null -eq $claudeDocument) { return }
-        $request = New-DuoForgeStartRequestInternal -Mode 'dual-document' -CodexDocument $codexDocument -ClaudeDocument $claudeDocument -DocumentType 'custom' -MaxRounds 2
+        $selections = Complete-DuoForgeInteractiveProviderSelectionsInternal
+        if ($null -eq $selections) { Write-Host '모델 선택을 취소했습니다.'; return }
+        $request = New-DuoForgeStartRequestInternal -Mode 'dual-document' -CodexDocument $codexDocument -ClaudeDocument $claudeDocument -DocumentType 'custom' -MaxRounds 2 `
+            -CodexModel ([string]$selections.codex.model) -CodexReasoningEffort ([string]$selections.codex.reasoningEffort) `
+            -ClaudeModel ([string]$selections.claude.model) -ClaudeReasoningEffort ([string]$selections.claude.reasoningEffort)
     }
     else {
         Write-Host '올바른 항목을 선택해 주세요.' -ForegroundColor Yellow
@@ -92,7 +100,9 @@ function Invoke-DuoForgeInteractiveLiveResume {
     param([Parameter(Mandatory)][System.Collections.IDictionary]$Run)
 
     $budget = Get-DuoForgeRemainingCallBudget -RunDirectory ([string]$Run.runDirectory)
+    $selections = Get-DuoForgeRunProviderSelectionsInternal -RunDirectory ([string]$Run.runDirectory)
     Write-Host '선택한 스냅샷 내용이 Codex와 Claude에 전송됩니다.' -ForegroundColor Yellow
+    Write-DuoForgeProviderSelectionSummary -ProviderSelections $selections
     Write-Host ("Codex 추가 호출 최악: {0}, Claude 추가 호출 최악: {1}" -f $budget.providers.codex.maximumAdditionalCalls, $budget.providers.claude.maximumAdditionalCalls) -ForegroundColor Yellow
     $confirmation = (Read-Host '실제 공급자 호출을 시작하려면 LIVE를 입력하세요').Trim()
     if ($confirmation -cne 'LIVE') { Write-Host '라이브 실행을 취소했습니다.'; return }

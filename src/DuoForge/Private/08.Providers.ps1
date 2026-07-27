@@ -100,7 +100,7 @@ function Get-DuoForgeProviderDiagnostic {
         $helpResult = Invoke-DuoForgeProcess -CommandName 'codex' -Arguments @('exec', '--help')
         $globalHelpResult = Invoke-DuoForgeProcess -CommandName 'codex' -Arguments @('--help')
         $helpText = $helpResult.stdout + [Environment]::NewLine + $helpResult.stderr + [Environment]::NewLine + $globalHelpResult.stdout + [Environment]::NewLine + $globalHelpResult.stderr
-        $required = @('--ask-for-approval', '--config', '--sandbox', '--skip-git-repo-check', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--output-schema', '--json', '--output-last-message')
+        $required = @('--ask-for-approval', '--config', '--model', '--sandbox', '--skip-git-repo-check', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--output-schema', '--json', '--output-last-message')
         $flagStatus = Test-DuoForgeHelpFlags -HelpText $helpText -RequiredFlags $required
         $authResult = Invoke-DuoForgeProcess -CommandName 'codex' -Arguments @('login', 'status')
         $auth = ConvertFrom-DuoForgeCodexAuthStatusInternal -Text ($authResult.stdout + [Environment]::NewLine + $authResult.stderr) -ExitCode $(if ($null -eq $authResult.exitCode) { 1 } else { $authResult.exitCode })
@@ -124,7 +124,7 @@ function Get-DuoForgeProviderDiagnostic {
 
     $helpResult = Invoke-DuoForgeProcess -CommandName 'claude' -Arguments @('--help')
     $helpText = $helpResult.stdout + [Environment]::NewLine + $helpResult.stderr
-    $required = @('--safe-mode', '--strict-mcp-config', '--tools', '--disallowedTools', '--no-chrome', '--no-session-persistence', '--permission-mode', '--output-format', '--json-schema')
+    $required = @('--model', '--effort', '--safe-mode', '--strict-mcp-config', '--tools', '--disallowedTools', '--no-chrome', '--no-session-persistence', '--permission-mode', '--output-format', '--json-schema')
     $flagStatus = Test-DuoForgeHelpFlags -HelpText $helpText -RequiredFlags $required
     $authResult = Invoke-DuoForgeProcess -CommandName 'claude' -Arguments @('auth', 'status')
     $auth = ConvertFrom-DuoForgeClaudeAuthStatusInternal -Text $authResult.stdout -ExitCode $(if ($null -eq $authResult.exitCode) { 1 } else { $authResult.exitCode })

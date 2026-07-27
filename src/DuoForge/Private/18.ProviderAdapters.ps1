@@ -57,6 +57,10 @@ function Get-DuoForgeProviderCommandSpecInternal {
         [Parameter(Mandatory)][System.Collections.IDictionary]$Prompt
     )
 
+    $selections = Get-DuoForgeRunProviderSelectionsInternal -RunDirectory $RunDirectory
+    $selection = Get-DuoForgeObjectValue -Object $selections -Name $Provider
+    $model = [string](Get-DuoForgeObjectValue -Object $selection -Name 'model')
+    $reasoningEffort = [string](Get-DuoForgeObjectValue -Object $selection -Name 'reasoningEffort')
     $workDirectory = New-DuoForgeProviderWorkDirectory -RunDirectory $RunDirectory -StepKey ([string]$Step.stepKey)
     $schema = Read-DuoForgeJson -Path (Get-DuoForgeStageSchemaPath)
     $schemaPath = Join-Path $workDirectory 'stage-result.schema.json'
@@ -66,6 +70,8 @@ function Get-DuoForgeProviderCommandSpecInternal {
         $lastMessagePath = Join-Path $workDirectory 'last-message.json'
         $arguments = @(
             '--ask-for-approval', 'never',
+            '--model', $model,
+            '--config', ('model_reasoning_effort="{0}"' -f $reasoningEffort),
             'exec',
             '--sandbox', 'read-only',
             '--skip-git-repo-check',
@@ -95,6 +101,8 @@ function Get-DuoForgeProviderCommandSpecInternal {
         commandName = 'claude'
         arguments = @(
             '-p',
+            '--model', $model,
+            '--effort', $reasoningEffort,
             '--safe-mode',
             '--strict-mcp-config',
             '--tools', '',

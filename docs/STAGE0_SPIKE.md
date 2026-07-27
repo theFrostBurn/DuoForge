@@ -11,7 +11,7 @@
 
 - 확인 버전: `codex-cli 0.145.0`
 - 구독 인증: `codex login status` 종료 코드와 `Logged in using ChatGPT`만 정규화
-- 확인 기능: `--ask-for-approval`, `--config`, `--sandbox`, `--skip-git-repo-check`, `--ephemeral`, `--ignore-user-config`, `--ignore-rules`, `--output-schema`, `--json`, `--output-last-message`
+- 확인 기능: `--model`, `--ask-for-approval`, `--config`, `--sandbox`, `--skip-git-repo-check`, `--ephemeral`, `--ignore-user-config`, `--ignore-rules`, `--output-schema`, `--json`, `--output-last-message`
 - 판단: 문서 모드용 격리 작업 폴더·읽기 전용·구조화 출력의 구현 기준선은 충족
 - 차단 사항: `read-only`는 모델의 명령 도구 표면 자체를 없애지 않으므로 3A의 선제적 무도구 조건은 충족하지 못함
 
@@ -19,7 +19,7 @@
 
 - 확인 버전: `2.1.220 (Claude Code)`
 - 구독 인증: `claude auth status`의 원문을 보존하지 않고 `loggedIn`, `authMethod`, `apiProvider`, `subscriptionType`만 정규화
-- 확인 기능: `--safe-mode`, `--strict-mcp-config`, 빈 `--tools`, `--disallowedTools`, `--no-chrome`, `--no-session-persistence`, `--permission-mode`, `--output-format`, `--json-schema`
+- 확인 기능: `--model`, `--effort`, `--safe-mode`, `--strict-mcp-config`, 빈 `--tools`, `--disallowedTools`, `--no-chrome`, `--no-session-persistence`, `--permission-mode`, `--output-format`, `--json-schema`
 - 설치된 2.1.220 도움말에는 온라인 CLI 문서의 `--max-turns`가 노출되지 않아 해당 플래그에 의존하지 않고 `-p` 단일 출력 호출을 사용한다.
 - 판단: 문서 모드와 무도구 호출 프로필의 구현 기준선은 충족
 

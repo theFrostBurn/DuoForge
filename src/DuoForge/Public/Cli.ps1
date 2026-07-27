@@ -99,7 +99,9 @@ function Invoke-DuoForgeCli {
             if (-not (Test-DuoForgeInteractiveHost)) {
                 throw (New-DuoForgeException -Code 'DF-LIVE-NONINTERACTIVE' -Message '라이브 실행은 대화형 PowerShell에서만 확인할 수 있습니다.')
             }
+            $selections = Get-DuoForgeRunProviderSelectionsInternal -RunDirectory ([string]$run.runDirectory)
             Write-Host '선택한 스냅샷 내용이 Codex와 Claude에 전송됩니다.' -ForegroundColor Yellow
+            Write-DuoForgeProviderSelectionSummary -ProviderSelections $selections
             Write-Host ("Codex 추가 호출 최악: {0}, Claude 추가 호출 최악: {1}" -f $budget.providers.codex.maximumAdditionalCalls, $budget.providers.claude.maximumAdditionalCalls) -ForegroundColor Yellow
             $confirmation = (Read-Host '실제 공급자 호출을 시작하려면 LIVE를 입력하세요').Trim()
             if ($confirmation -cne 'LIVE') { Write-Host '라이브 실행을 취소했습니다.'; return }
@@ -111,6 +113,21 @@ function Invoke-DuoForgeCli {
             if ($parsed.positionals.Count -lt 2) { throw (New-DuoForgeException -Code 'DF-CLI-MODE' -Message 'start에는 모드가 필요합니다.') }
             $mode = [string]$parsed.positionals[1]
             $rounds = ConvertTo-DuoForgeIntOption -Value (Get-DuoForgeCliOption -Parsed $parsed -Name 'max-rounds' -Default 2) -Name 'max-rounds' -Default 2
+            $providerSelections = [ordered]@{
+                codex = [ordered]@{
+                    model = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'codex-model' -Default '')
+                    reasoningEffort = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'codex-effort' -Default '')
+                }
+                claude = [ordered]@{
+                    model = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'claude-model' -Default '')
+                    reasoningEffort = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'claude-effort' -Default '')
+                }
+            }
+            $selectionValidation = Test-DuoForgeProviderSelectionsInternal -Selections $providerSelections
+            if (-not $selectionValidation.valid -and (Test-DuoForgeInteractiveHost)) {
+                $providerSelections = Complete-DuoForgeInteractiveProviderSelectionsInternal -InitialSelections $providerSelections
+                if ($null -eq $providerSelections) { Write-Host '모델 선택을 취소했습니다.'; return }
+            }
             $request = New-DuoForgeStartRequestInternal `
                 -Mode $mode `
                 -Brief ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'brief' -Default '')) `
@@ -119,6 +136,10 @@ function Invoke-DuoForgeCli {
                 -CodexProject ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'codex-project' -Default '')) `
                 -ClaudeProject ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'claude-project' -Default '')) `
                 -Requirements ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'requirements' -Default '')) `
+                -CodexModel ([string]$providerSelections.codex.model) `
+                -CodexReasoningEffort ([string]$providerSelections.codex.reasoningEffort) `
+                -ClaudeModel ([string]$providerSelections.claude.model) `
+                -ClaudeReasoningEffort ([string]$providerSelections.claude.reasoningEffort) `
                 -DocumentType ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'type' -Default 'custom')) `
                 -MaxRounds $rounds `
                 -Workspace ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')) `

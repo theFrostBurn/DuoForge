@@ -62,6 +62,7 @@ function Invoke-DuoForgeResumeLiveInternal {
     if ([string]$run.manifest.mode -eq 'dual-project-audit') {
         throw (New-DuoForgeException -Code 'DF-MODE-3A-DISABLED' -Message '3A는 격리 계약이 증명될 때까지 비활성화되어 있습니다.')
     }
+    $null = Assert-DuoForgeProviderSelectionsInternal -Selections (Get-DuoForgeObjectValue -Object $run.manifest -Name 'providerSelections')
     if ([string]$run.state.status -in @('COMPLETED', 'COMPLETED_PARTIAL')) {
         return [ordered]@{ status = [string]$run.state.status; invoked = 0 }
     }
