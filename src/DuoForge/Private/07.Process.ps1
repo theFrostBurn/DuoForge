@@ -54,7 +54,9 @@ function Invoke-DuoForgeProcess {
 
         [string]$StandardInput,
 
-        [string[]]$EnvironmentAllowList
+        [string[]]$EnvironmentAllowList,
+
+        [scriptblock]$OnTick
     )
 
     $invocation = Resolve-DuoForgeCommandInvocation -CommandName $CommandName
@@ -109,7 +111,22 @@ function Invoke-DuoForgeProcess {
             $process.StandardInput.Close()
         }
 
-        $completed = $process.WaitForExit($TimeoutSeconds * 1000)
+        $waitStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $completed = $false
+        $lastTickSecond = -1
+        while (-not $completed -and $waitStopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+            $remainingMilliseconds = [Math]::Max(1, [int](($TimeoutSeconds - $waitStopwatch.Elapsed.TotalSeconds) * 1000))
+            $completed = $process.WaitForExit([Math]::Min(250, $remainingMilliseconds))
+            if (-not $completed -and $null -ne $OnTick) {
+                $tickSecond = [int][Math]::Floor($waitStopwatch.Elapsed.TotalSeconds)
+                if ($tickSecond -ne $lastTickSecond) {
+                    $lastTickSecond = $tickSecond
+                    try { $null = & $OnTick $waitStopwatch.Elapsed }
+                    catch { Write-Verbose ("DuoForge 프로세스 진행 콜백 오류를 무시했습니다: {0}" -f $_.Exception.Message) }
+                }
+            }
+        }
+        $waitStopwatch.Stop()
         if (-not $completed) {
             try { $process.Kill($true) } catch { }
             $process.WaitForExit()

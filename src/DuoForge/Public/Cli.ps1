@@ -194,7 +194,7 @@ function Invoke-DuoForgeCli {
             Write-Host ("Codex 추가 호출 최악: {0}, Claude 추가 호출 최악: {1}" -f $budget.providers.codex.maximumAdditionalCalls, $budget.providers.claude.maximumAdditionalCalls) -ForegroundColor Yellow
             $confirmation = (Read-Host '실제 공급자 호출을 시작하려면 LIVE를 입력하세요').Trim()
             if ($confirmation -cne 'LIVE') { Write-Host '라이브 실행을 취소했습니다.'; return }
-            $result = Invoke-DuoForgeResumeLiveInternal -RunId $runId -ResultsRoot $workspace -LiveConsent $true
+            $result = Invoke-DuoForgeResumeWithProgressInternal -RunId $runId -ResultsRoot $workspace -WaitForAcknowledgement
             $result | ConvertTo-Json -Depth 30
             return
         }

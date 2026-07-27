@@ -52,7 +52,8 @@ function Invoke-DuoForgeResumeLiveInternal {
     param(
         [Parameter(Mandatory)][string]$RunId,
         [string]$ResultsRoot,
-        [Parameter(Mandatory)][bool]$LiveConsent
+        [Parameter(Mandatory)][bool]$LiveConsent,
+        [scriptblock]$ProgressObserver
     )
 
     if (-not $LiveConsent) {
@@ -81,7 +82,7 @@ function Invoke-DuoForgeResumeLiveInternal {
     $directory = [string]$run.runDirectory
     $callback = {
         param($step, $prompt, $graph)
-        Invoke-DuoForgeLiveProviderStage -RunDirectory $directory -Graph $graph -Step $step -Prompt $prompt -LiveConsent $true
-    }
-    return Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        Invoke-DuoForgeLiveProviderStage -RunDirectory $directory -Graph $graph -Step $step -Prompt $prompt -LiveConsent $true -ProgressObserver $ProgressObserver
+    }.GetNewClosure()
+    return Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback -ProgressObserver $ProgressObserver
 }

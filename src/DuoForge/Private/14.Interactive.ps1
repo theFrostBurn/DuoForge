@@ -175,8 +175,7 @@ function Invoke-DuoForgeInteractiveLiveResume {
     $confirmation = (Read-Host '실제 공급자 호출을 시작하려면 LIVE를 입력하세요').Trim()
     if ($confirmation -cne 'LIVE') { Write-Host '라이브 실행을 취소했습니다.'; return }
     $resultsRoot = [System.IO.Path]::GetDirectoryName([string]$Run.runDirectory)
-    $result = Invoke-DuoForgeResumeLiveInternal -RunId ([string]$Run.state.runId) -ResultsRoot $resultsRoot -LiveConsent $true
-    Write-Host ("실행 상태: {0}, 이번 호출 단계: {1}" -f $result.status, $result.invoked)
+    $null = Invoke-DuoForgeResumeWithProgressInternal -RunId ([string]$Run.state.runId) -ResultsRoot $resultsRoot -WaitForAcknowledgement
 }
 
 function Read-DuoForgeInteractiveExplanationRequest {

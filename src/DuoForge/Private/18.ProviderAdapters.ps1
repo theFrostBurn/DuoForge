@@ -247,7 +247,8 @@ function Invoke-DuoForgeLiveProviderStage {
         [Parameter(Mandatory)][System.Collections.IDictionary]$Step,
         [Parameter(Mandatory)][bool]$LiveConsent,
         [System.Collections.IDictionary]$Prompt,
-        [int]$TimeoutSeconds = 900
+        [int]$TimeoutSeconds = 900,
+        [scriptblock]$ProgressObserver
     )
 
     if (-not $LiveConsent) {
@@ -268,13 +269,29 @@ function Invoke-DuoForgeLiveProviderStage {
     })
 
     try {
-        $processResult = Invoke-DuoForgeProcess `
-            -CommandName ([string]$spec.commandName) `
-            -Arguments @($spec.arguments) `
-            -WorkingDirectory ([string]$spec.workingDirectory) `
-            -TimeoutSeconds $TimeoutSeconds `
-            -StandardInput ([string]$spec.prompt) `
-            -EnvironmentAllowList (Get-DuoForgeProviderEnvironmentAllowList)
+        $onTick = if ($null -ne $ProgressObserver) {
+            {
+                param($elapsed)
+                Invoke-DuoForgeProgressObserverInternal -Observer $ProgressObserver -Type 'PROVIDER_TICK' -RunDirectory $RunDirectory -Data ([ordered]@{
+                    stepKey = [string]$Step.stepKey
+                    provider = [string]$Step.provider
+                    stage = [string]$Step.stage
+                    round = [int]$Step.round
+                    elapsedSeconds = [int][Math]::Floor($elapsed.TotalSeconds)
+                })
+            }.GetNewClosure()
+        }
+        else { $null }
+        $processArguments = [ordered]@{
+            CommandName = [string]$spec.commandName
+            Arguments = @($spec.arguments)
+            WorkingDirectory = [string]$spec.workingDirectory
+            TimeoutSeconds = $TimeoutSeconds
+            StandardInput = [string]$spec.prompt
+            EnvironmentAllowList = Get-DuoForgeProviderEnvironmentAllowList
+        }
+        if ($null -ne $onTick) { $processArguments['OnTick'] = $onTick }
+        $processResult = Invoke-DuoForgeProcess @processArguments
 
         if (-not $processResult.started -or $processResult.timedOut -or [int]$processResult.exitCode -ne 0) {
             $classification = Get-DuoForgeProviderFailureClassificationInternal -Provider ([string]$Step.provider) -ProcessResult $processResult

@@ -492,6 +492,196 @@ try {
         Assert-Equal @($firstReview.dependsOn).Count 2
     }
 
+    Test-Case '고정형 진행판은 단계 장벽과 검증된 최근 요약을 터미널 크기 안에 렌더링한다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'progress-frame\input\brief.md')
+        $workspace = Join-Path $tempRoot 'progress-frame\results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $engineResult = & $module {
+            param($directory)
+            $callback = { param($step) New-DuoForgeFakeStageResult -Step $step }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory
+        Assert-Equal $engineResult.status 'COMPLETED'
+
+        $rendered = & $module {
+            param($directory)
+            $snapshot = Get-DuoForgeProgressSnapshotInternal -RunDirectory $directory
+            $wide = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 100 -Height 30 -Now ([datetimeoffset]'2026-07-28T12:00:00+09:00'))
+            $finalView = [ordered]@{ finalMessage = '실행 종료 · 완료'; waitForInput = $true }
+            $narrow = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 72 -Height 20 -Now ([datetimeoffset]'2026-07-28T12:00:00+09:00') -ViewState $finalView)
+            $partial = ConvertTo-DuoForgeHashtable -InputObject $snapshot
+            $partial.status = 'RUNNING'
+            $partial.statusLabel = '실행 중'
+            $partial.steps[0].status = 'COMMITTED'
+            $partial.steps[1].status = 'STARTED'
+            $partial.activeSteps = @($partial.steps[1])
+            $partial.barriers = @(Get-DuoForgeProgressBarriersInternal -Steps @($partial.steps))
+            $partial.lastEvent = [ordered]@{ type = 'STAGE_RESULT_RECEIVED'; data = [ordered]@{ stepKey = $partial.steps[1].stepKey } }
+            $active = @(New-DuoForgeProgressFrameInternal -Snapshot $partial -Width 72 -Height 20 -ViewState ([ordered]@{ providerElapsedSeconds = 4 }))
+            $emojiSafe = ConvertTo-DuoForgeProgressTextInternal -Text (('a' * 1199) + '😀후속')
+            [ordered]@{
+                wide = $wide
+                narrow = $narrow
+                active = $active
+                narrowWidths = @($narrow | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) })
+                koreanWidth = Get-DuoForgeProgressTextWidthInternal -Text '한글A'
+                safe = ConvertTo-DuoForgeProgressTextInternal -Text ("`e[31m위험`e[0m`n다음")
+                emojiSafe = $emojiSafe
+                emojiWidth = Get-DuoForgeProgressTextWidthInternal -Text $emojiSafe
+            }
+        } $run.runDirectory
+        Assert-ContainsText ($rendered.wide -join "`n") '장벽 레일'
+        Assert-ContainsText ($rendered.wide -join "`n") '최근 확정'
+        Assert-ContainsText ($rendered.wide -join "`n") '최종 검증'
+        Assert-True ($rendered.narrow.Count -le 19)
+        Assert-True (@($rendered.narrowWidths | Where-Object { [int]$_ -gt 71 }).Count -eq 0)
+        Assert-ContainsText ($rendered.narrow -join "`n") '실행 종료 · 완료'
+        Assert-ContainsText ($rendered.narrow -join "`n") '쟁점 전체'
+        Assert-ContainsText ($rendered.narrow -join "`n") 'Enter 키를 누르면'
+        Assert-ContainsText ($rendered.active -join "`n") '응답 수신 · 구조 검증 중'
+        Assert-ContainsText ($rendered.active -join "`n") '쟁점 원장  전체 단계 확정 후 집계'
+        Assert-Equal $rendered.koreanWidth 5
+        Assert-Equal $rendered.safe '위험 다음'
+        Assert-False ([string]$rendered.safe -like "*`e*")
+        Assert-Equal $rendered.emojiSafe.Length 1199
+        Assert-Equal $rendered.emojiWidth 1199
+
+        $tampered = & $module {
+            param($directory)
+            $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $directory 'steps.json'))
+            $finalStep = @($graph.steps | Where-Object { [string]$_.stage -eq 'final-validation' } | Select-Object -Last 1)[0]
+            $artifact = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path ([string]$finalStep.artifactPath))
+            $artifact.result.summary = '변조된 확정 요약'
+            Write-DuoForgeJsonAtomic -Path ([string]$finalStep.artifactPath) -Value $artifact
+            $snapshot = Get-DuoForgeProgressSnapshotInternal -RunDirectory $directory
+            [ordered]@{ latestSummary = [string]$snapshot.latest.summary; latestStepKey = [string]$snapshot.latest.stepKey; finalStepKey = [string]$finalStep.stepKey }
+        } $run.runDirectory
+        Assert-NotContainsText $tampered.latestSummary '변조된 확정 요약'
+        Assert-True ($tampered.latestStepKey -ne $tampered.finalStepKey)
+    }
+
+    Test-Case '진행 이벤트는 검증과 저장 뒤에만 단계 확정을 공개하고 원문을 싣지 않는다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'progress-events\input\brief.md')
+        $workspace = Join-Path $tempRoot 'progress-events\results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $events = [System.Collections.Generic.List[object]]::new()
+        $result = & $module {
+            param($directory, $eventList)
+            $callback = { param($step) New-DuoForgeFakeStageResult -Step $step }
+            $observer = { param($event) $eventList.Add($event) }.GetNewClosure()
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback -ProgressObserver $observer
+        } $run.runDirectory $events
+        Assert-Equal $result.status 'COMPLETED'
+        $firstStepEvents = @($events | Where-Object { [string]$_.data.stepKey -eq 'r01-codex-independent-draft' } | ForEach-Object { [string]$_.type })
+        Assert-Equal (($firstStepEvents -join ',')) 'STAGE_STARTED,STAGE_RESULT_RECEIVED,STAGE_COMMITTED'
+        $committed = @($events | Where-Object { [string]$_.type -eq 'STAGE_COMMITTED' })
+        Assert-Equal $committed.Count 13
+        Assert-False $committed[0].data.Contains('summary')
+        Assert-False $committed[0].data.Contains('document')
+        $durableEvents = @(Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ConvertFrom-Json | Where-Object type -eq 'STAGE_COMMITTED')
+        Assert-Equal $durableEvents.Count 13
+    }
+
+    Test-Case '형식 복구 재시도는 실패 응답을 확정 요약으로 표시하지 않는다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'progress-retry\input\brief.md')
+        $workspace = Join-Path $tempRoot 'progress-retry\results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $events = [System.Collections.Generic.List[object]]::new()
+        $control = @{ failed = $false }
+        $result = & $module {
+            param($directory, $eventList, $controlState)
+            $callback = {
+                param($step)
+                $key = [string]$step.stepKey
+                $fake = New-DuoForgeFakeStageResult -Step $step
+                if ($key -eq 'r01-codex-independent-draft' -and -not [bool]$controlState.failed) {
+                    $controlState.failed = $true
+                    $fake.provider = 'claude'
+                }
+                return $fake
+            }
+            $observer = { param($event) $eventList.Add($event) }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback -ProgressObserver $observer
+        } $run.runDirectory $events $control
+        Assert-Equal $result.status 'COMPLETED'
+        $types = @($events | Where-Object { [string]$_.data.stepKey -eq 'r01-codex-independent-draft' } | ForEach-Object { [string]$_.type })
+        Assert-Equal (($types -join ',')) 'STAGE_STARTED,STAGE_RESULT_RECEIVED,STAGE_RETRY_SCHEDULED,STAGE_STARTED,STAGE_RESULT_RECEIVED,STAGE_COMMITTED'
+        Assert-Equal @($types | Where-Object { $_ -eq 'STAGE_COMMITTED' }).Count 1
+    }
+
+    Test-Case '중단된 STARTED 단계는 재개 대상으로 복구되고 진행 관찰자 오류는 실행을 깨뜨리지 않는다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'progress-recovery\input\brief.md')
+        $workspace = Join-Path $tempRoot 'progress-recovery\results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        & $module {
+            param($directory)
+            $graph = Initialize-DuoForgeStageGraph -RunDirectory $directory
+            $graph.steps[0].status = 'STARTED'
+            $graph.steps[0].attemptCount = 1
+            Write-DuoForgeJsonAtomic -Path (Join-Path $directory 'steps.json') -Value $graph
+        } $run.runDirectory
+        $result = & $module {
+            param($directory)
+            $callback = { param($step) New-DuoForgeFakeStageResult -Step $step }
+            $brokenObserver = { param($event) throw '진행판 렌더러 실패' }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback -ProgressObserver $brokenObserver
+        } $run.runDirectory
+        Assert-Equal $result.status 'COMPLETED'
+        $graph = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'steps.json') | ConvertFrom-Json -Depth 100
+        Assert-Equal $graph.steps[0].attemptCount 2
+        $recoveryEvents = @(Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ConvertFrom-Json | Where-Object type -eq 'STAGE_INTERRUPTED_RECOVERED')
+        Assert-Equal $recoveryEvents.Count 1
+    }
+
+    Test-Case '두 번째 호출 중 중단된 단계는 재시도 상한을 넘겨 공급자를 호출하지 않는다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'progress-recovery-exhausted\input\brief.md')
+        $workspace = Join-Path $tempRoot 'progress-recovery-exhausted\results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        & $module {
+            param($directory)
+            $graph = Initialize-DuoForgeStageGraph -RunDirectory $directory
+            $graph.steps[0].status = 'STARTED'
+            $graph.steps[0].attemptCount = 2
+            Write-DuoForgeJsonAtomic -Path (Join-Path $directory 'steps.json') -Value $graph
+        } $run.runDirectory
+        $calls = @{ count = 0 }
+        $result = & $module {
+            param($directory, $control)
+            $callback = { param($step) $control.count++; New-DuoForgeFakeStageResult -Step $step }.GetNewClosure()
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory $calls
+        Assert-Equal $result.status 'RESUMABLE_ERROR'
+        Assert-Equal $result.code 'DF-STAGE-RETRY-EXHAUSTED'
+        Assert-Equal $result.invoked 0
+        Assert-Equal $calls.count 0
+        $graph = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'steps.json') | ConvertFrom-Json -Depth 100
+        Assert-Equal $graph.steps[0].attemptCount 2
+        Assert-Equal $graph.steps[0].retryMode 'RETRY_EXHAUSTED'
+    }
+
+    Test-Case '공급자 프로세스 대기는 진행판 heartbeat를 초 단위로 전달한다' {
+        $ticks = [System.Collections.Generic.List[int]]::new()
+        $processResult = & $module {
+            param($tickList)
+            $onTick = { param($elapsed) $tickList.Add([int][Math]::Floor($elapsed.TotalSeconds)) }.GetNewClosure()
+            Invoke-DuoForgeProcess -CommandName 'pwsh.exe' -Arguments @('-NoLogo', '-NoProfile', '-Command', 'Start-Sleep -Milliseconds 1200') -TimeoutSeconds 5 -OnTick $onTick
+        } $ticks
+        Assert-Equal $processResult.exitCode 0
+        Assert-True ($ticks.Count -ge 2)
+        Assert-Equal $ticks[0] 0
+        Assert-True (1 -in @($ticks))
+    }
+
     Test-Case '같은 장벽의 양쪽 단계는 동일한 선행 산출물만 보고 순차 실행된다' {
         $sharedInput = New-MarkdownFile -Path (Join-Path $tempRoot 'fairness\shared\input\brief.md')
         $sharedWorkspace = Join-Path $tempRoot 'fairness\shared-results'
