@@ -27,7 +27,7 @@ DuoForge
   - API 키 인증은 사용하지 않습니다.
   - 새 실행마다 두 공급자의 모델과 추론 정도를 명시적으로 선택합니다.
   - 모델 호출 전 입력, 전송 범위와 최악 호출 수를 확인합니다.
-  - 3A는 격리 검증 전까지 비활성화되어 있습니다.
+  - 3A는 현재 Windows 격리 후보가 필수 차단 계약을 충족하지 못해 비활성화되어 있습니다.
 '@ | Write-Host
 }
 
@@ -51,7 +51,7 @@ function Write-DuoForgeDoctorReport {
         Write-Host '✓ API 인증 우선 조건 없음'
     }
     Write-Host ('문서 모드 준비: {0}' -f $(if ($Report.readyForDocumentModes) { '예' } else { '아니요' }))
-    Write-Host '프로젝트 비교 3A: 비활성화 (OS 격리 또는 Codex 무도구 표면 미검증)'
+    Write-Host '프로젝트 비교 3A: 비활성화 (범위 밖 읽기·자식 프로세스 차단 실패)'
     foreach ($recommendation in $Report.recommendations) {
         Write-Host ("- $recommendation")
     }

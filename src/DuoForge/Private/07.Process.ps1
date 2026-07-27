@@ -5,7 +5,13 @@ function Resolve-DuoForgeCommandInvocation {
         [string]$CommandName
     )
 
-    $command = Get-Command $CommandName -ErrorAction SilentlyContinue | Select-Object -First 1
+    $commands = @(Get-Command $CommandName -All -ErrorAction SilentlyContinue)
+    $command = @($commands | Where-Object { $_.CommandType -eq [System.Management.Automation.CommandTypes]::Application } | Select-Object -First 1)
+    if ($command.Count -eq 0) {
+        $command = @($commands | Select-Object -First 1)
+    }
+    if ($command.Count -gt 0) { $command = $command[0] }
+    else { $command = $null }
     if ($null -eq $command) {
         return $null
     }
@@ -75,11 +81,11 @@ function Invoke-DuoForgeProcess {
     $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
 
     if ($PSBoundParameters.ContainsKey('EnvironmentAllowList')) {
-        $environmentSnapshot = [Environment]::GetEnvironmentVariables([EnvironmentVariableTarget]::Process)
         $startInfo.Environment.Clear()
         foreach ($name in @($EnvironmentAllowList | Select-Object -Unique)) {
-            if ($environmentSnapshot.Contains($name)) {
-                $startInfo.Environment[[string]$name] = [string]$environmentSnapshot[$name]
+            $value = [Environment]::GetEnvironmentVariable([string]$name, [EnvironmentVariableTarget]::Process)
+            if ($null -ne $value) {
+                $startInfo.Environment[[string]$name] = [string]$value
             }
         }
     }

@@ -1,33 +1,484 @@
+function ConvertTo-DuoForgeCatalogTextInternal {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][AllowEmptyString()][string]$Text,
+        [int]$MaximumLength = 200
+    )
+
+    $value = [regex]::Replace(([string]$Text).Trim(), '[\p{C}]', ' ')
+    if ($value.Length -gt $MaximumLength) { $value = $value.Substring(0, $MaximumLength) }
+    return $value
+}
+
+function Test-DuoForgeReasoningEffortIdentifierInternal {
+    [CmdletBinding()]
+    param([AllowNull()][AllowEmptyString()][string]$Effort)
+
+    return -not [string]::IsNullOrWhiteSpace($Effort) -and $Effort -cmatch '^[a-z][a-z0-9_-]{0,31}$'
+}
+
+function Get-DuoForgePreferredReasoningEffortInternal {
+    [CmdletBinding()]
+    param(
+        [string[]]$Efforts,
+        [AllowNull()][AllowEmptyString()][string]$DefaultEffort
+    )
+
+    $supported = @($Efforts | Where-Object { Test-DuoForgeReasoningEffortIdentifierInternal -Effort $_ } | Select-Object -Unique)
+    if ('high' -cin $supported) { return 'high' }
+    if (-not [string]::IsNullOrWhiteSpace($DefaultEffort) -and $DefaultEffort -cin $supported) { return $DefaultEffort }
+    if ('medium' -cin $supported) { return 'medium' }
+    if ($supported.Count -gt 0) { return [string]$supported[0] }
+    return $null
+}
+
+function Get-DuoForgeCodexModelFallbackInternal {
+    [CmdletBinding()]
+    param()
+
+    return @(
+        [ordered]@{
+            value = 'gpt-5.6-sol'
+            displayName = 'GPT-5.6-Sol'
+            description = 'Latest frontier agentic coding model.'
+            recommended = $true
+            defaultReasoningEffort = 'low'
+            recommendedReasoningEffort = 'high'
+            reasoningEfforts = @('low', 'medium', 'high', 'xhigh', 'max', 'ultra')
+        }
+        [ordered]@{
+            value = 'gpt-5.6-terra'
+            displayName = 'GPT-5.6-Terra'
+            description = 'Balanced agentic coding model for everyday work.'
+            recommended = $false
+            defaultReasoningEffort = 'medium'
+            recommendedReasoningEffort = 'high'
+            reasoningEfforts = @('low', 'medium', 'high', 'xhigh', 'max', 'ultra')
+        }
+        [ordered]@{
+            value = 'gpt-5.6-luna'
+            displayName = 'GPT-5.6-Luna'
+            description = 'Fast and affordable agentic coding model.'
+            recommended = $false
+            defaultReasoningEffort = 'medium'
+            recommendedReasoningEffort = 'high'
+            reasoningEfforts = @('low', 'medium', 'high', 'xhigh', 'max')
+        }
+    )
+}
+
+function Get-DuoForgeCodexModelCachePathInternal {
+    [CmdletBinding()]
+    param()
+
+    $userProfile = [Environment]::GetEnvironmentVariable('USERPROFILE', [EnvironmentVariableTarget]::Process)
+    if ([string]::IsNullOrWhiteSpace($userProfile)) {
+        $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    }
+    if ([string]::IsNullOrWhiteSpace($userProfile)) { return $null }
+    return Join-Path $userProfile '.codex\models_cache.json'
+}
+
+function Get-DuoForgeCodexModelsFromCacheInternal {
+    [CmdletBinding()]
+    param([AllowNull()][AllowEmptyString()][string]$CachePath)
+
+    if ([string]::IsNullOrWhiteSpace($CachePath) -or -not (Test-Path -LiteralPath $CachePath -PathType Leaf)) {
+        return @()
+    }
+
+    try {
+        $cache = Get-Content -LiteralPath $CachePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $visible = @(
+            @($cache.models) |
+                Where-Object { [string]$_.visibility -eq 'list' } |
+                Sort-Object { [int]$_.priority }
+        )
+        if ($visible.Count -eq 0) { return @() }
+
+        $result = [System.Collections.Generic.List[object]]::new()
+        for ($index = 0; $index -lt $visible.Count; $index++) {
+            $model = $visible[$index]
+            $value = [string]$model.slug
+            if (-not (Test-DuoForgeModelIdentifierInternal -Model $value)) { return @() }
+
+            $description = ConvertTo-DuoForgeCatalogTextInternal -Text ([string]$model.description) -MaximumLength 200
+            $displayName = ConvertTo-DuoForgeCatalogTextInternal -Text ([string]$model.display_name) -MaximumLength 80
+            if ([string]::IsNullOrWhiteSpace($displayName)) { $displayName = $value }
+
+            $efforts = @(
+                @($model.supported_reasoning_levels) |
+                    ForEach-Object { [string]$_.effort } |
+                    Where-Object { Test-DuoForgeReasoningEffortIdentifierInternal -Effort $_ } |
+                    Select-Object -Unique
+            )
+            if ($efforts.Count -eq 0) { return @() }
+            $defaultEffort = [string](Get-DuoForgeObjectValue -Object $model -Name 'default_reasoning_level')
+            $recommendedEffort = Get-DuoForgePreferredReasoningEffortInternal -Efforts $efforts -DefaultEffort $defaultEffort
+
+            $result.Add([ordered]@{
+                value = $value
+                displayName = $displayName
+                description = $description
+                recommended = $index -eq 0
+                defaultReasoningEffort = $defaultEffort
+                recommendedReasoningEffort = $recommendedEffort
+                reasoningEfforts = $efforts
+            })
+        }
+
+        return @($result)
+    }
+    catch {
+        return @()
+    }
+}
+
+function ConvertFrom-DuoForgeCodexModelListResponseInternal {
+    [CmdletBinding()]
+    param($Response)
+
+    $data = Get-DuoForgeObjectValue -Object $Response -Name 'data'
+    if ($null -eq $data) {
+        $resultObject = Get-DuoForgeObjectValue -Object $Response -Name 'result'
+        $data = Get-DuoForgeObjectValue -Object $resultObject -Name 'data'
+    }
+    if ($null -eq $data) { return @() }
+
+    $models = [System.Collections.Generic.List[object]]::new()
+    foreach ($model in @($data)) {
+        if ([bool](Get-DuoForgeObjectValue -Object $model -Name 'hidden')) { continue }
+        $value = [string](Get-DuoForgeObjectValue -Object $model -Name 'model')
+        if (-not (Test-DuoForgeModelIdentifierInternal -Model $value)) { continue }
+
+        $efforts = @(
+            @(Get-DuoForgeObjectValue -Object $model -Name 'supportedReasoningEfforts') |
+                ForEach-Object {
+                    $valueObject = Get-DuoForgeObjectValue -Object $_ -Name 'reasoningEffort'
+                    if ($null -ne $valueObject) { [string]$valueObject } else { [string]$_ }
+                } |
+                Where-Object { Test-DuoForgeReasoningEffortIdentifierInternal -Effort $_ } |
+                Select-Object -Unique
+        )
+        if ($efforts.Count -eq 0) { continue }
+
+        $displayName = ConvertTo-DuoForgeCatalogTextInternal -Text ([string](Get-DuoForgeObjectValue -Object $model -Name 'displayName')) -MaximumLength 80
+        if ([string]::IsNullOrWhiteSpace($displayName)) { $displayName = $value }
+        $defaultEffort = [string](Get-DuoForgeObjectValue -Object $model -Name 'defaultReasoningEffort')
+        $models.Add([ordered]@{
+            value = $value
+            displayName = $displayName
+            description = ConvertTo-DuoForgeCatalogTextInternal -Text ([string](Get-DuoForgeObjectValue -Object $model -Name 'description')) -MaximumLength 200
+            recommended = [bool](Get-DuoForgeObjectValue -Object $model -Name 'isDefault')
+            defaultReasoningEffort = $defaultEffort
+            recommendedReasoningEffort = Get-DuoForgePreferredReasoningEffortInternal -Efforts $efforts -DefaultEffort $defaultEffort
+            reasoningEfforts = $efforts
+        })
+    }
+
+    if ($models.Count -gt 0 -and @($models | Where-Object { [bool]$_.recommended }).Count -eq 0) {
+        $models[0].recommended = $true
+    }
+    return @($models)
+}
+
+function Resolve-DuoForgeCodexAppServerInvocationInternal {
+    [CmdletBinding()]
+    param()
+
+    $invocation = Resolve-DuoForgeCommandInvocation -CommandName 'codex'
+    if ($null -eq $invocation) { return $null }
+    if ([System.IO.Path]::GetExtension([string]$invocation.source) -in @('.cmd', '.bat')) {
+        $npmRoot = [System.IO.Path]::GetDirectoryName([string]$invocation.source)
+        $codexJavaScript = Join-Path $npmRoot 'node_modules\@openai\codex\bin\codex.js'
+        $node = @(Get-Command node.exe -All -ErrorAction SilentlyContinue | Where-Object { $_.CommandType -eq [System.Management.Automation.CommandTypes]::Application } | Select-Object -First 1)
+        if ($node.Count -eq 1 -and (Test-Path -LiteralPath $codexJavaScript -PathType Leaf)) {
+            return [ordered]@{
+                fileName = [string]$node[0].Source
+                prefixArguments = @($codexJavaScript)
+                source = [string]$invocation.source
+            }
+        }
+    }
+    return $invocation
+}
+
+function Invoke-DuoForgeCodexModelListInternal {
+    [CmdletBinding()]
+    param([int]$TimeoutSeconds = 15)
+
+    $invocation = Resolve-DuoForgeCodexAppServerInvocationInternal
+    if ($null -eq $invocation) { return $null }
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = [string]$invocation.fileName
+    $startInfo.WorkingDirectory = $script:ProjectRoot
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.StandardInputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+    foreach ($argument in @($invocation.prefixArguments) + @('app-server', '--listen', 'stdio://')) {
+        $startInfo.ArgumentList.Add([string]$argument)
+    }
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) { return $null }
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $requests = @(
+            ([ordered]@{ method = 'initialize'; id = 1; params = [ordered]@{ clientInfo = [ordered]@{ name = 'duoforge'; title = 'DuoForge'; version = $script:ModuleVersion } } } | ConvertTo-Json -Depth 10 -Compress),
+            ([ordered]@{ method = 'initialized'; params = [ordered]@{} } | ConvertTo-Json -Depth 10 -Compress),
+            ([ordered]@{ method = 'model/list'; id = 2; params = [ordered]@{ includeHidden = $false; limit = 100 } } | ConvertTo-Json -Depth 10 -Compress)
+        )
+        foreach ($request in $requests) { $process.StandardInput.WriteLine($request) }
+        $process.StandardInput.Flush()
+
+        $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+        while ([DateTime]::UtcNow -lt $deadline) {
+            $remaining = [Math]::Max(1, [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+            $readTask = $process.StandardOutput.ReadLineAsync()
+            if (-not $readTask.Wait($remaining)) { return $null }
+            $line = $readTask.Result
+            if ($null -eq $line) { return $null }
+            try {
+                $message = $line | ConvertFrom-Json -Depth 50 -ErrorAction Stop
+                if ([string]$message.id -eq '2') {
+                    if ($null -ne (Get-DuoForgeObjectValue -Object $message -Name 'error')) { return $null }
+                    return Get-DuoForgeObjectValue -Object $message -Name 'result'
+                }
+            }
+            catch { }
+        }
+        return $null
+    }
+    catch {
+        return $null
+    }
+    finally {
+        try { $process.StandardInput.Close() } catch { }
+        try {
+            if (-not $process.HasExited -and -not $process.WaitForExit(1500)) { $process.Kill($true) }
+        }
+        catch { }
+        $process.Dispose()
+    }
+}
+
+function Get-DuoForgeCodexModelsFromCliInternal {
+    [CmdletBinding()]
+    param()
+
+    if (-not (Get-Variable -Name DuoForgeCliCatalogCache -Scope Script -ErrorAction SilentlyContinue)) {
+        $script:DuoForgeCliCatalogCache = @{}
+    }
+    if ($script:DuoForgeCliCatalogCache.ContainsKey('codex')) {
+        return @($script:DuoForgeCliCatalogCache['codex'])
+    }
+
+    $response = Invoke-DuoForgeCodexModelListInternal
+    $models = @(ConvertFrom-DuoForgeCodexModelListResponseInternal -Response $response)
+    $script:DuoForgeCliCatalogCache['codex'] = @($models)
+    return @($models)
+}
+
+function Get-DuoForgeClaudeModelFallbackInternal {
+    [CmdletBinding()]
+    param()
+
+    $efforts = @('low', 'medium', 'high', 'xhigh', 'max')
+    return [ordered]@{
+        models = @(
+            [ordered]@{ value = 'opus'; displayName = 'Opus'; description = 'Claude CLI의 최신 Opus 계열 별칭'; recommended = $true; defaultReasoningEffort = 'high'; recommendedReasoningEffort = 'high'; reasoningEfforts = $efforts }
+            [ordered]@{ value = 'sonnet'; displayName = 'Sonnet'; description = 'Claude CLI의 최신 Sonnet 계열 별칭'; recommended = $false; defaultReasoningEffort = 'high'; recommendedReasoningEffort = 'high'; reasoningEfforts = $efforts }
+            [ordered]@{ value = 'fable'; displayName = 'Fable'; description = 'Claude CLI의 최신 Fable 계열 별칭'; recommended = $false; defaultReasoningEffort = 'high'; recommendedReasoningEffort = 'high'; reasoningEfforts = $efforts }
+            [ordered]@{ value = 'default'; displayName = '계정 기본 모델'; description = 'Claude CLI가 계정 또는 조직 권장 모델로 해석'; recommended = $false; defaultReasoningEffort = 'high'; recommendedReasoningEffort = 'high'; reasoningEfforts = $efforts }
+        )
+        efforts = $efforts
+        recommendedModel = 'opus'
+        recommendedReasoningEffort = 'high'
+    }
+}
+
+function ConvertFrom-DuoForgeClaudeHelpInternal {
+    [CmdletBinding()]
+    param([AllowNull()][AllowEmptyString()][string]$HelpText)
+
+    if ([string]::IsNullOrWhiteSpace($HelpText)) { return $null }
+    $modelBlock = [regex]::Match($HelpText, '(?ms)^\s*--model <model>\s+(?<body>.*?)(?=^\s{2}(?:-[A-Za-z]|--[A-Za-z]))')
+    $effortBlock = [regex]::Match($HelpText, '(?ms)^\s*--effort <level>\s+(?<body>.*?)(?=^\s{2}(?:-[A-Za-z]|--[A-Za-z]))')
+    if (-not $modelBlock.Success -or -not $effortBlock.Success) { return $null }
+
+    $advertisedAliases = @(
+        [regex]::Matches($modelBlock.Groups['body'].Value, "'(?<value>[a-z][a-z0-9-]*)'") |
+            ForEach-Object { [string]$_.Groups['value'].Value } |
+            Where-Object { $_ -cnotlike 'claude-*' -and (Test-DuoForgeModelIdentifierInternal -Model $_) } |
+            Select-Object -Unique
+    )
+    $effortMatch = [regex]::Match($effortBlock.Groups['body'].Value, '\((?<levels>[a-z0-9_, -]+)\)')
+    $efforts = if ($effortMatch.Success) {
+        @($effortMatch.Groups['levels'].Value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { Test-DuoForgeReasoningEffortIdentifierInternal -Effort $_ } | Select-Object -Unique)
+    }
+    else { @() }
+    if ($advertisedAliases.Count -eq 0 -or $efforts.Count -eq 0) { return $null }
+
+    $orderedAliases = [System.Collections.Generic.List[string]]::new()
+    foreach ($preferred in @('opus', 'sonnet', 'fable', 'best', 'haiku', 'opusplan')) {
+        if ($preferred -cin $advertisedAliases -and $preferred -cnotin $orderedAliases) { $orderedAliases.Add($preferred) }
+    }
+    foreach ($alias in $advertisedAliases) {
+        if ($alias -cnotin $orderedAliases) { $orderedAliases.Add($alias) }
+    }
+    if ('default' -cnotin $orderedAliases) { $orderedAliases.Add('default') }
+
+    $recommendedModel = if ('opus' -cin $orderedAliases) { 'opus' } elseif ('default' -cin $orderedAliases) { 'default' } else { [string]$orderedAliases[0] }
+    $recommendedEffort = Get-DuoForgePreferredReasoningEffortInternal -Efforts $efforts -DefaultEffort 'high'
+    $models = [System.Collections.Generic.List[object]]::new()
+    foreach ($alias in $orderedAliases) {
+        $displayName = switch ($alias) {
+            'default' { '계정 기본 모델' }
+            default { (Get-Culture).TextInfo.ToTitleCase($alias) }
+        }
+        $description = if ($alias -eq 'default') { 'Claude CLI가 계정 또는 조직 권장 모델로 해석' } else { "Claude CLI가 최신 $displayName 계열로 해석하는 별칭" }
+        $models.Add([ordered]@{
+            value = $alias
+            displayName = $displayName
+            description = $description
+            recommended = $alias -ceq $recommendedModel
+            defaultReasoningEffort = $recommendedEffort
+            recommendedReasoningEffort = $recommendedEffort
+            reasoningEfforts = $efforts
+        })
+    }
+
+    return [ordered]@{
+        models = @($models)
+        efforts = $efforts
+        recommendedModel = $recommendedModel
+        recommendedReasoningEffort = $recommendedEffort
+    }
+}
+
+function Get-DuoForgeClaudeCatalogFromCliInternal {
+    [CmdletBinding()]
+    param()
+
+    if (-not (Get-Variable -Name DuoForgeCliCatalogCache -Scope Script -ErrorAction SilentlyContinue)) {
+        $script:DuoForgeCliCatalogCache = @{}
+    }
+    if ($script:DuoForgeCliCatalogCache.ContainsKey('claude')) {
+        return $script:DuoForgeCliCatalogCache['claude']
+    }
+
+    $process = Invoke-DuoForgeProcess -CommandName 'claude' -Arguments @('--help') -TimeoutSeconds 10
+    $catalog = if ($process.started -and -not $process.timedOut -and $process.exitCode -eq 0) {
+        ConvertFrom-DuoForgeClaudeHelpInternal -HelpText ([string]$process.stdout)
+    }
+    else { $null }
+    $script:DuoForgeCliCatalogCache['claude'] = $catalog
+    return $catalog
+}
+
 function Get-DuoForgeProviderSelectionOptionsInternal {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [ValidateSet('codex', 'claude')]
-        [string]$Provider
+        [string]$Provider,
+        [AllowNull()][AllowEmptyString()][string]$CodexModelCachePath = (Get-DuoForgeCodexModelCachePathInternal),
+        $CodexModelListResponse,
+        [AllowNull()][AllowEmptyString()][string]$ClaudeHelpText
     )
 
     if ($Provider -eq 'codex') {
+        $models = @()
+        $catalogSource = 'codex-app-server'
+        if ($PSBoundParameters.ContainsKey('CodexModelListResponse')) {
+            $models = @(ConvertFrom-DuoForgeCodexModelListResponseInternal -Response $CodexModelListResponse)
+            $catalogSource = 'codex-app-server-fixture'
+        }
+        elseif ($PSBoundParameters.ContainsKey('CodexModelCachePath')) {
+            $models = @(Get-DuoForgeCodexModelsFromCacheInternal -CachePath $CodexModelCachePath)
+            $catalogSource = 'codex-model-cache'
+        }
+        else {
+            $models = @(Get-DuoForgeCodexModelsFromCliInternal)
+        }
+        if ($models.Count -eq 0 -and -not $PSBoundParameters.ContainsKey('CodexModelCachePath')) {
+            $models = @(Get-DuoForgeCodexModelsFromCacheInternal -CachePath $CodexModelCachePath)
+            $catalogSource = 'codex-model-cache-fallback'
+        }
+        if ($models.Count -eq 0) {
+            $models = @(Get-DuoForgeCodexModelFallbackInternal)
+            $catalogSource = 'built-in-fallback'
+        }
+        $recommendedModelObject = @($models | Where-Object { [bool]$_.recommended } | Select-Object -First 1)
+        if ($recommendedModelObject.Count -eq 0) { $recommendedModelObject = @($models[0]) }
+        $recommendedModel = [string]$recommendedModelObject[0].value
+        $reasoningEfforts = @($models.reasoningEfforts | Select-Object -Unique)
         return [ordered]@{
             provider = 'codex'
             displayName = 'Codex'
-            suggestedModels = @(
-                [ordered]@{ value = 'gpt-5.6'; description = '범용 최신 계열 별칭' }
-                [ordered]@{ value = 'gpt-5.6-terra'; description = '빠른 반복과 읽기 중심 작업' }
-            )
-            reasoningEfforts = @('low', 'medium', 'high', 'xhigh', 'max', 'ultra')
+            catalogSource = $catalogSource
+            suggestedModels = $models
+            recommendedModel = $recommendedModel
+            recommendedReasoningEffort = [string]$recommendedModelObject[0].recommendedReasoningEffort
+            reasoningEfforts = $reasoningEfforts
         }
     }
 
+    $catalog = if ($PSBoundParameters.ContainsKey('ClaudeHelpText')) {
+        ConvertFrom-DuoForgeClaudeHelpInternal -HelpText $ClaudeHelpText
+    }
+    else {
+        Get-DuoForgeClaudeCatalogFromCliInternal
+    }
+    $catalogSource = 'claude-cli-help'
+    if ($null -eq $catalog) {
+        $catalog = Get-DuoForgeClaudeModelFallbackInternal
+        $catalogSource = 'built-in-alias-fallback'
+    }
     return [ordered]@{
         provider = 'claude'
         displayName = 'Claude'
-        suggestedModels = @(
-            [ordered]@{ value = 'sonnet'; description = 'CLI 모델 별칭' }
-            [ordered]@{ value = 'opus'; description = 'CLI 모델 별칭' }
-            [ordered]@{ value = 'fable'; description = 'CLI 모델 별칭' }
-        )
-        reasoningEfforts = @('low', 'medium', 'high', 'xhigh', 'max')
+        catalogSource = $catalogSource
+        suggestedModels = @($catalog.models)
+        recommendedModel = [string]$catalog.recommendedModel
+        recommendedReasoningEffort = [string]$catalog.recommendedReasoningEffort
+        reasoningEfforts = @($catalog.efforts)
     }
+}
+
+function Get-DuoForgeReasoningEffortsForModelInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Options,
+        [AllowNull()][AllowEmptyString()][string]$Model
+    )
+
+    $known = @($Options.suggestedModels | Where-Object { [string]$_.value -ceq $Model } | Select-Object -First 1)
+    if ($known.Count -eq 1 -and @($known[0].reasoningEfforts).Count -gt 0) {
+        return @($known[0].reasoningEfforts)
+    }
+    return @($Options.reasoningEfforts)
+}
+
+function Get-DuoForgeRecommendedReasoningEffortForModelInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Options,
+        [AllowNull()][AllowEmptyString()][string]$Model
+    )
+
+    $known = @($Options.suggestedModels | Where-Object { [string]$_.value -ceq $Model } | Select-Object -First 1)
+    if ($known.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace([string]$known[0].recommendedReasoningEffort)) {
+        return [string]$known[0].recommendedReasoningEffort
+    }
+    return [string]$Options.recommendedReasoningEffort
 }
 
 function Test-DuoForgeModelIdentifierInternal {
@@ -35,7 +486,7 @@ function Test-DuoForgeModelIdentifierInternal {
     param([AllowEmptyString()][string]$Model)
 
     if ([string]::IsNullOrWhiteSpace($Model)) { return $false }
-    return $Model.Trim() -cmatch '^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$'
+    return $Model.Trim() -cmatch '^[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,127}$'
 }
 
 function Test-DuoForgeProviderSelectionsInternal {
@@ -68,10 +519,11 @@ function Test-DuoForgeProviderSelectionsInternal {
                 message = "$($options.displayName) 추론 정도를 반드시 선택해야 합니다."
             })
         }
-        elseif ($effort -cnotin @($options.reasoningEfforts)) {
+        $supportedEfforts = @(Get-DuoForgeReasoningEffortsForModelInternal -Options $options -Model $model)
+        if (-not [string]::IsNullOrWhiteSpace($effort) -and $effort -cnotin $supportedEfforts) {
             $errors.Add([ordered]@{
                 code = 'DF-PROVIDER-EFFORT'
-                message = "$($options.displayName) 추론 정도 '$effort'는 지원 목록에 없습니다: $($options.reasoningEfforts -join ', ')"
+                message = "$($options.displayName) 모델 '$model'의 추론 정도 '$effort'는 지원 목록에 없습니다: $($supportedEfforts -join ', ')"
             })
         }
     }
@@ -115,9 +567,15 @@ function Read-DuoForgeModelChoiceInternal {
     while ($true) {
         Write-Host ''
         Write-Host ("{0} 모델을 선택해 주세요." -f $options.displayName)
+        Write-Host ("목록 출처: {0}" -f $options.catalogSource) -ForegroundColor DarkGray
+        if ([string]$options.catalogSource -like '*fallback*') {
+            Write-Host 'CLI의 현재 목록을 읽지 못해 제한된 대체 목록을 표시합니다.' -ForegroundColor Yellow
+        }
         for ($index = 0; $index -lt @($options.suggestedModels).Count; $index++) {
             $item = $options.suggestedModels[$index]
-            Write-Host ("[{0}] {1} - {2}" -f ($index + 1), $item.value, $item.description)
+            $recommended = if ([bool]$item.recommended) { ' (권장)' } else { '' }
+            $label = if ($Provider -eq 'claude') { '{0} ({1})' -f $item.displayName, $item.value } else { [string]$item.value }
+            Write-Host ("[{0}] {1}{2} - {3}" -f ($index + 1), $label, $recommended, $item.description)
         }
         $customNumber = @($options.suggestedModels).Count + 1
         Write-Host ("[{0}] 모델명 직접 입력" -f $customNumber)
@@ -136,7 +594,7 @@ function Read-DuoForgeModelChoiceInternal {
         if ($number -eq $customNumber) {
             $model = (Read-Host 'CLI에 전달할 정확한 모델명').Trim()
             if (Test-DuoForgeModelIdentifierInternal -Model $model) { return $model }
-            Write-Host '모델명은 영문자나 숫자로 시작하고 영문자, 숫자, 점, 밑줄, 콜론, 슬래시, 하이픈만 사용할 수 있습니다.' -ForegroundColor Yellow
+            Write-Host '모델명은 영문자나 숫자로 시작하고 영문자, 숫자, 점, 밑줄, 콜론, 슬래시, 대괄호, 하이픈만 사용할 수 있습니다.' -ForegroundColor Yellow
             continue
         }
         Write-Host '올바른 모델 항목을 선택해 주세요.' -ForegroundColor Yellow
@@ -148,23 +606,27 @@ function Read-DuoForgeReasoningEffortChoiceInternal {
     param(
         [Parameter(Mandatory)]
         [ValidateSet('codex', 'claude')]
-        [string]$Provider
+        [string]$Provider,
+        [AllowNull()][AllowEmptyString()][string]$Model
     )
 
     $options = Get-DuoForgeProviderSelectionOptionsInternal -Provider $Provider
+    $reasoningEfforts = @(Get-DuoForgeReasoningEffortsForModelInternal -Options $options -Model $Model)
+    $recommendedReasoningEffort = Get-DuoForgeRecommendedReasoningEffortForModelInternal -Options $options -Model $Model
     while ($true) {
         Write-Host ''
-        Write-Host ("{0} 추론 정도를 선택해 주세요." -f $options.displayName)
-        for ($index = 0; $index -lt @($options.reasoningEfforts).Count; $index++) {
-            Write-Host ("[{0}] {1}" -f ($index + 1), $options.reasoningEfforts[$index])
+        Write-Host ("{0} 추론 정도를 선택해 주세요. (모델: {1})" -f $options.displayName, $Model)
+        for ($index = 0; $index -lt $reasoningEfforts.Count; $index++) {
+            $recommended = if ([string]$reasoningEfforts[$index] -ceq [string]$recommendedReasoningEffort) { ' (권장)' } else { '' }
+            Write-Host ("[{0}] {1}{2}" -f ($index + 1), $reasoningEfforts[$index], $recommended)
         }
         Write-Host '[B] 이전으로'
         $choice = (Read-Host '선택').Trim()
         if ($choice -ieq 'B') { return $null }
 
         $number = 0
-        if ([int]::TryParse($choice, [ref]$number) -and $number -ge 1 -and $number -le @($options.reasoningEfforts).Count) {
-            return [string]$options.reasoningEfforts[$number - 1]
+        if ([int]::TryParse($choice, [ref]$number) -and $number -ge 1 -and $number -le $reasoningEfforts.Count) {
+            return [string]$reasoningEfforts[$number - 1]
         }
         Write-Host '올바른 추론 정도를 선택해 주세요.' -ForegroundColor Yellow
     }
@@ -189,8 +651,9 @@ function Complete-DuoForgeInteractiveProviderSelectionsInternal {
             Write-Host ("{0} 모델: {1}" -f $options.displayName, $model)
         }
 
-        if ($effort -cnotin @($options.reasoningEfforts)) {
-            $effort = Read-DuoForgeReasoningEffortChoiceInternal -Provider $provider
+        $supportedEfforts = @(Get-DuoForgeReasoningEffortsForModelInternal -Options $options -Model $model)
+        if ($effort -cnotin $supportedEfforts) {
+            $effort = Read-DuoForgeReasoningEffortChoiceInternal -Provider $provider -Model $model
             if ($null -eq $effort) { return $null }
         }
         else {

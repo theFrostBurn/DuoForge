@@ -60,7 +60,7 @@ function Invoke-DuoForgeResumeLiveInternal {
     }
     $run = Get-DuoForgeRunInternal -RunId $RunId -ResultsRoot $ResultsRoot
     if ([string]$run.manifest.mode -eq 'dual-project-audit') {
-        throw (New-DuoForgeException -Code 'DF-MODE-3A-DISABLED' -Message '3A는 격리 계약이 증명될 때까지 비활성화되어 있습니다.')
+        throw (New-DuoForgeException -Code 'DF-MODE-3A-DISABLED' -Message '3A는 현재 Windows 격리 후보가 범위 밖 읽기와 자식 프로세스 차단에 실패하여 비활성화되어 있습니다.')
     }
     $null = Assert-DuoForgeProviderSelectionsInternal -Selections (Get-DuoForgeObjectValue -Object $run.manifest -Name 'providerSelections')
     if ([string]$run.state.status -in @('COMPLETED', 'COMPLETED_PARTIAL')) {

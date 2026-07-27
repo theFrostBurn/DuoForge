@@ -219,6 +219,7 @@ function Invoke-DuoForgeStageEngine {
                         retryable = $retryable
                         attempt = [int]$step.attemptCount
                         at = Get-DuoForgeUtcNow
+                        validationErrors = if ($_.Exception.Data.Contains('DuoForgeValidationErrors')) { @($_.Exception.Data['DuoForgeValidationErrors']) } else { @() }
                     }
                     Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph
                     if ($retryable -and [int]$step.attemptCount -lt 2) {

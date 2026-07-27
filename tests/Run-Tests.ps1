@@ -104,9 +104,9 @@ function New-TestStartRequest {
         [string]$CodexProject,
         [string]$ClaudeProject,
         [string]$Requirements,
-        [string]$CodexModel = 'gpt-5.6',
+        [string]$CodexModel = 'gpt-5.6-sol',
         [string]$CodexReasoningEffort = 'high',
-        [string]$ClaudeModel = 'sonnet',
+        [string]$ClaudeModel = 'opus',
         [string]$ClaudeReasoningEffort = 'high',
         [string]$DocumentType = 'custom',
         [int]$MaxRounds = 2,
@@ -138,6 +138,19 @@ try {
         Assert-False ([bool]$config.features.dualProjectAudit)
     }
 
+    Test-Case '3A는 격리 게이트가 닫힌 동안 요청 단계에서 실패 폐쇄한다' {
+        $codexProject = Join-Path $tempRoot '3a-gate\codex-project'
+        $claudeProject = Join-Path $tempRoot '3a-gate\claude-project'
+        [System.IO.Directory]::CreateDirectory($codexProject) | Out-Null
+        [System.IO.Directory]::CreateDirectory($claudeProject) | Out-Null
+        $workspace = Join-Path $tempRoot '3a-gate-results'
+        $request = New-TestStartRequest -Mode dual-project-audit -CodexProject $codexProject -ClaudeProject $claudeProject -Workspace $workspace
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        Assert-False ([bool]$validation.valid)
+        Assert-Equal @($validation.errors | Where-Object { $_.code -eq 'DF-PREFLIGHT-3A-ISOLATION' }).Count 1
+        Assert-False (Test-Path -LiteralPath $workspace)
+    }
+
     Test-Case 'Codex와 Claude의 모델 및 추론 정도는 모두 필수다' {
         $input = New-MarkdownFile -Path (Join-Path $tempRoot 'selection-required\input\brief.md')
         $workspace = Join-Path $tempRoot 'selection-required-results'
@@ -150,6 +163,102 @@ try {
         $invalidValidation = Test-DuoForgeStartRequest -Request $invalid -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         Assert-False ([bool]$invalidValidation.valid)
         Assert-Equal @($invalidValidation.errors | Where-Object { $_.code -eq 'DF-PROVIDER-EFFORT' }).Count 1
+    }
+
+    Test-Case '모델 메뉴 폴백은 CLI 계열과 현재 존재하는 권장 모델 및 추론 정도만 표시한다' {
+        $cachePath = Join-Path $tempRoot 'model-menu\models_cache.json'
+        [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($cachePath)) | Out-Null
+        $cache = [ordered]@{
+            models = @(
+                [ordered]@{ slug = 'gpt-5.6-luna'; display_name = 'GPT-5.6-Luna'; description = 'Fast and affordable agentic coding model.'; visibility = 'list'; priority = 3; supported_reasoning_levels = @(@{ effort = 'low' }, @{ effort = 'medium' }, @{ effort = 'high' }, @{ effort = 'xhigh' }, @{ effort = 'max' }) }
+                [ordered]@{ slug = 'gpt-5.6-sol'; display_name = 'GPT-5.6-Sol'; description = 'Latest frontier agentic coding model.'; visibility = 'list'; priority = 1; supported_reasoning_levels = @(@{ effort = 'low' }, @{ effort = 'medium' }, @{ effort = 'high' }, @{ effort = 'xhigh' }, @{ effort = 'max' }, @{ effort = 'ultra' }) }
+                [ordered]@{ slug = 'gpt-5.5'; display_name = 'GPT-5.5'; description = 'Legacy model.'; visibility = 'hide'; priority = 7; supported_reasoning_levels = @(@{ effort = 'medium' }, @{ effort = 'high' }) }
+                [ordered]@{ slug = 'gpt-5.6-terra'; display_name = 'GPT-5.6-Terra'; description = 'Balanced agentic coding model for everyday work.'; visibility = 'list'; priority = 2; supported_reasoning_levels = @(@{ effort = 'low' }, @{ effort = 'medium' }, @{ effort = 'high' }, @{ effort = 'xhigh' }, @{ effort = 'max' }, @{ effort = 'ultra' }) }
+            )
+        }
+        [System.IO.File]::WriteAllText($cachePath, ($cache | ConvertTo-Json -Depth 10), [System.Text.UTF8Encoding]::new($false))
+
+        $claudeHelp = @'
+  --effort <level>                      Effort level for the current session
+                                        (low, medium, high, xhigh, max)
+  --exclude-dynamic-system-prompt-sections
+  --model <model>                       Model for the current session. Provide
+                                        an alias for the latest model (e.g.
+                                        'fable', 'opus', or 'sonnet') or a
+                                        model's full name (e.g.
+                                        'claude-fable-5').
+  -n, --name <name>                     Set a display name
+'@
+        $menu = & $module {
+            param($path, $help)
+            $codex = Get-DuoForgeProviderSelectionOptionsInternal -Provider codex -CodexModelCachePath $path
+            $claude = Get-DuoForgeProviderSelectionOptionsInternal -Provider claude -ClaudeHelpText $help
+            [ordered]@{
+                codex = $codex
+                claude = $claude
+                lunaEfforts = @(Get-DuoForgeReasoningEffortsForModelInternal -Options $codex -Model 'gpt-5.6-luna')
+            }
+        } $cachePath $claudeHelp
+
+        Assert-Equal $menu.codex.catalogSource 'codex-model-cache'
+        Assert-Equal (@($menu.codex.suggestedModels.value) -join ',') 'gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna'
+        Assert-Equal $menu.codex.recommendedModel 'gpt-5.6-sol'
+        Assert-Equal $menu.codex.recommendedReasoningEffort 'high'
+        Assert-False ('ultra' -cin @($menu.lunaEfforts))
+        Assert-Equal $menu.claude.catalogSource 'claude-cli-help'
+        Assert-Equal (@($menu.claude.suggestedModels.value) -join ',') 'opus,sonnet,fable,default'
+        Assert-Equal $menu.claude.suggestedModels[0].displayName 'Opus'
+        Assert-Equal $menu.claude.recommendedModel 'opus'
+        Assert-Equal $menu.claude.recommendedReasoningEffort 'high'
+    }
+
+    Test-Case 'CLI 카탈로그 변경 시 사라진 모델과 추론 정도에는 권장을 붙이지 않는다' {
+        $codexResponse = [ordered]@{
+            data = @(
+                [ordered]@{
+                    model = 'gpt-next'
+                    displayName = 'GPT Next'
+                    description = 'Current default model.'
+                    hidden = $false
+                    isDefault = $true
+                    defaultReasoningEffort = 'xhigh'
+                    supportedReasoningEfforts = @(
+                        [ordered]@{ reasoningEffort = 'low'; description = 'Fast' }
+                        [ordered]@{ reasoningEffort = 'xhigh'; description = 'Deep' }
+                    )
+                }
+            )
+        }
+        $claudeHelp = @'
+  --effort <level>                      Effort level for the current session
+                                        (low, medium)
+  --exclude-dynamic-system-prompt-sections
+  --model <model>                       Model for the current session. Provide
+                                        an alias for the latest model (e.g.
+                                        'sonnet') or a model's full name (e.g.
+                                        'claude-sonnet-next').
+  -n, --name <name>                     Set a display name
+'@
+        $menu = & $module {
+            param($response, $help)
+            [ordered]@{
+                codex = Get-DuoForgeProviderSelectionOptionsInternal -Provider codex -CodexModelListResponse $response
+                claude = Get-DuoForgeProviderSelectionOptionsInternal -Provider claude -ClaudeHelpText $help
+                bracketModelValid = Test-DuoForgeModelIdentifierInternal -Model 'opus[1m]'
+            }
+        } $codexResponse $claudeHelp
+
+        Assert-Equal $menu.codex.catalogSource 'codex-app-server-fixture'
+        Assert-Equal (@($menu.codex.suggestedModels.value) -join ',') 'gpt-next'
+        Assert-Equal $menu.codex.recommendedModel 'gpt-next'
+        Assert-Equal $menu.codex.recommendedReasoningEffort 'xhigh'
+        Assert-False ('high' -cin @($menu.codex.reasoningEfforts))
+        Assert-Equal (@($menu.claude.suggestedModels.value) -join ',') 'sonnet,default'
+        Assert-Equal $menu.claude.recommendedModel 'default'
+        Assert-Equal $menu.claude.recommendedReasoningEffort 'medium'
+        Assert-False ('opus' -cin @($menu.claude.suggestedModels.value))
+        Assert-False ('high' -cin @($menu.claude.reasoningEfforts))
+        Assert-True ([bool]$menu.bracketModelValid)
     }
 
     Test-Case '선택값 없는 요청은 valid 조작 후에도 실행을 만들 수 없다' {
@@ -299,6 +408,21 @@ try {
         }
     }
 
+    Test-Case '공급자 프로세스는 PowerShell 래퍼보다 종료 코드를 보존하는 실행 파일을 우선한다' {
+        $resolution = & $module { Resolve-DuoForgeCommandInvocation -CommandName 'codex' }
+        Assert-True ($null -ne $resolution)
+        Assert-False ([string]$resolution.source -like '*.ps1')
+
+        $child = & $module {
+            Invoke-DuoForgeProcess -CommandName 'pwsh.exe' -Arguments @(
+                '-NoLogo', '-NoProfile', '-Command',
+                "if ([string]::IsNullOrWhiteSpace(`$env:PATH)) { exit 9 } else { 'PATH_OK' }"
+            ) -TimeoutSeconds 20 -EnvironmentAllowList @('PATH')
+        }
+        Assert-Equal $child.exitCode 0
+        Assert-ContainsText ([string]$child.stdout) 'PATH_OK'
+    }
+
     Test-Case '유효 요청은 원본을 바꾸지 않고 불변 스냅샷 실행을 만든다' {
         $input = New-MarkdownFile -Path (Join-Path $tempRoot 'run\input\brief.md') -Text "# 한글 PRD`n`n원본"
         $beforeHash = (Get-FileHash -LiteralPath $input -Algorithm SHA256).Hash
@@ -311,9 +435,9 @@ try {
         Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'manifest.json') -PathType Leaf)
         Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'inputs\snapshots\S000001.md') -PathType Leaf)
         Assert-Equal $run.manifest.schemaVersion 2
-        Assert-Equal $run.manifest.providerSelections.codex.model 'gpt-5.6'
+        Assert-Equal $run.manifest.providerSelections.codex.model 'gpt-5.6-sol'
         Assert-Equal $run.manifest.providerSelections.codex.reasoningEffort 'high'
-        Assert-Equal $run.manifest.providerSelections.claude.model 'sonnet'
+        Assert-Equal $run.manifest.providerSelections.claude.model 'opus'
         Assert-Equal $run.manifest.providerSelections.claude.reasoningEffort 'high'
         $afterHash = (Get-FileHash -LiteralPath $input -Algorithm SHA256).Hash
         Assert-Equal $afterHash $beforeHash
@@ -392,6 +516,50 @@ try {
         Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
             & $module { param($s) $result = New-DuoForgeFakeStageResult -Step $s; $result.provider = 'claude'; Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $s.stage -ExpectedProvider $s.provider -ThrowOnError } $step
         }
+
+        $diagnostic = & $module {
+            param($s)
+            try {
+                $result = New-DuoForgeFakeStageResult -Step $s
+                $result.document = $null
+                $null = Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $s.stage -ExpectedProvider $s.provider -ThrowOnError
+            }
+            catch { return @($_.Exception.Data['DuoForgeValidationErrors']) }
+        } $step
+        Assert-ContainsText ($diagnostic -join ' ') 'document'
+    }
+
+    Test-Case '비밀 제거 후 빈 구조화 배열은 두 번째 정규화에서도 배열로 유지된다' {
+        $shape = & $module {
+            $step = [ordered]@{ stepKey = 'r01-codex-independent-draft'; provider = 'codex'; stage = 'independent-draft'; round = 1 }
+            $source = New-DuoForgeFakeStageResult -Step $step
+            $source.issues = @(
+                [ordered]@{ issueKey = 'I-1'; target = 'document'; category = 'test'; severity = 'minor'; claim = '단일 항목'; evidence = @(); proposal = '유지'; requiresUser = $false; blockingProposal = $false }
+            )
+            $source.openQuestions = @(
+                [ordered]@{ issueKey = 'I-1'; title = '첫 질문'; question = '확인합니까?'; options = @('예', '아니요'); recommendedOption = '예' },
+                [ordered]@{ issueKey = 'I-2'; title = '둘째 질문'; question = '계속합니까?'; options = @('예', '아니요'); recommendedOption = '예' }
+            )
+            $redactions = 0
+            $protected = Protect-DuoForgeObjectInternal -Value $source -RedactionCount ([ref]$redactions)
+            $normalized = ConvertTo-DuoForgeHashtable -InputObject $protected
+            [ordered]@{
+                validation = Test-DuoForgeStageResultInternal -Result $normalized -ExpectedStage $step.stage -ExpectedProvider $step.provider
+                types = @('issues', 'issueResponses', 'adoptions', 'openQuestions') | ForEach-Object { $normalized[$_].GetType().FullName }
+                counts = [ordered]@{
+                    issues = @($normalized.issues).Count
+                    issueResponses = @($normalized.issueResponses).Count
+                    adoptions = @($normalized.adoptions).Count
+                    openQuestions = @($normalized.openQuestions).Count
+                }
+            }
+        }
+        Assert-True ([bool]$shape.validation.valid)
+        Assert-Equal (@($shape.types | Where-Object { $_ -eq 'System.Object[]' }).Count) 4
+        Assert-Equal $shape.counts.issues 1
+        Assert-Equal $shape.counts.issueResponses 0
+        Assert-Equal $shape.counts.adoptions 0
+        Assert-Equal $shape.counts.openQuestions 2
     }
 
     Test-Case '단계 프롬프트는 원본 절대 경로를 숨기고 스냅샷만 사용한다' {
@@ -431,7 +599,7 @@ try {
         } $run.runDirectory
         $codexArgs = @($specs.codex.arguments) -join ' '
         Assert-ContainsText $codexArgs '--ask-for-approval never'
-        Assert-ContainsText $codexArgs '--model gpt-5.6'
+        Assert-ContainsText $codexArgs '--model gpt-5.6-sol'
         Assert-ContainsText $codexArgs '--config model_reasoning_effort="high"'
         Assert-ContainsText $codexArgs '--sandbox read-only'
         Assert-ContainsText $codexArgs '--ignore-user-config'
@@ -439,7 +607,7 @@ try {
         Assert-ContainsText $codexArgs '--config web_search="disabled"'
         Assert-NotContainsText $codexArgs 'dangerously'
         $claudeArgs = @($specs.claude.arguments) -join ' '
-        Assert-ContainsText $claudeArgs '--model sonnet'
+        Assert-ContainsText $claudeArgs '--model opus'
         Assert-ContainsText $claudeArgs '--effort high'
         Assert-ContainsText $claudeArgs '--safe-mode'
         Assert-ContainsText $claudeArgs '--strict-mcp-config'
@@ -453,6 +621,15 @@ try {
         Assert-False ('ANTHROPIC_API_KEY' -in $environmentAllowList)
     }
 
+    Test-Case '구조화 출력 스키마의 상수 필드는 Codex 호환 타입을 명시한다' {
+        $stageSchema = Get-Content -LiteralPath (Join-Path $projectRoot 'schemas\stage-result.schema.json') -Raw | ConvertFrom-Json -Depth 100
+        $explanationSchema = Get-Content -LiteralPath (Join-Path $projectRoot 'schemas\explanation-result.schema.json') -Raw | ConvertFrom-Json -Depth 100
+        Assert-Equal $stageSchema.properties.schemaVersion.type 'integer'
+        Assert-Equal $stageSchema.properties.schemaVersion.const 1
+        Assert-Equal $explanationSchema.properties.schemaVersion.type 'integer'
+        Assert-Equal $explanationSchema.properties.schemaVersion.const 1
+    }
+
     Test-Case '공급자 오류 분류는 원문을 저장하지 않고 한도·인증·시간초과를 구분한다' {
         $classifications = & $module {
             [ordered]@{
@@ -460,6 +637,7 @@ try {
                 rate = Get-DuoForgeProviderFailureClassificationInternal -Provider codex -ProcessResult ([ordered]@{ started = $true; timedOut = $false; exitCode = 1; stdout = ''; stderr = 'too many requests'; errorCategory = $null })
                 auth = Get-DuoForgeProviderFailureClassificationInternal -Provider codex -ProcessResult ([ordered]@{ started = $true; timedOut = $false; exitCode = 1; stdout = ''; stderr = 'login required'; errorCategory = $null })
                 timeout = Get-DuoForgeProviderFailureClassificationInternal -Provider claude -ProcessResult ([ordered]@{ started = $true; timedOut = $true; exitCode = $null; stdout = ''; stderr = ''; errorCategory = 'timeout' })
+                schema = Get-DuoForgeProviderFailureClassificationInternal -Provider codex -ProcessResult ([ordered]@{ started = $true; timedOut = $false; exitCode = 1; stdout = '{"type":"error","error":{"code":"invalid_json_schema"}}'; stderr = ''; errorCategory = $null })
             }
         }
         Assert-Equal $classifications.quota.code 'DF-PROVIDER-QUOTA'
@@ -470,6 +648,9 @@ try {
         Assert-Equal $classifications.auth.targetStatus 'BLOCKED_PREFLIGHT'
         Assert-Equal $classifications.timeout.code 'DF-PROVIDER-TIMEOUT'
         Assert-True ([bool]$classifications.timeout.retryable)
+        Assert-Equal $classifications.schema.code 'DF-PROVIDER-SCHEMA-COMPAT'
+        Assert-Equal $classifications.schema.targetStatus 'BLOCKED_PREFLIGHT'
+        Assert-False ([bool]$classifications.schema.retryable)
         Assert-NotContainsText ($classifications | ConvertTo-Json -Depth 20) 'secret-value'
     }
 

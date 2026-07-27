@@ -164,7 +164,7 @@ function Invoke-DuoForgeDoctorInternal {
     if (-not $claude.installed) { $recommendations.Add('Claude Code CLI를 설치해 주세요.') }
     elseif (-not $claude.subscription) { $recommendations.Add('claude auth login으로 Claude 구독 로그인을 완료해 주세요.') }
     if ($apiConflicts.Count -gt 0) { $recommendations.Add('표시된 API 인증 우선 환경 변수를 사용자가 직접 정리한 뒤 다시 검사해 주세요. DuoForge는 값을 읽거나 자동 삭제하지 않습니다.') }
-    $recommendations.Add('3A는 Codex 무도구 표면 또는 OS 격리가 검증되지 않아 비활성화되어 있습니다.')
+    $recommendations.Add('3A는 현재 Windows 격리 후보가 범위 밖 읽기와 자식 프로세스 차단에 실패하여 비활성화되어 있습니다.')
 
     return [ordered]@{
         schemaVersion = 1

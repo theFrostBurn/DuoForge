@@ -150,7 +150,7 @@ function Test-DuoForgeStartRequestInternal {
     elseif ($mode -eq 'dual-project-audit') {
         $errors.Add([ordered]@{
             code = 'DF-PREFLIGHT-3A-ISOLATION'
-            message = '3A는 Codex 무도구 표면 또는 OS 격리가 검증되지 않아 현재 빌드에서 비활성화되어 있습니다.'
+            message = '3A는 현재 Windows 격리 후보가 범위 밖 읽기와 자식 프로세스 차단에 실패하여 이 빌드에서 비활성화되어 있습니다.'
         })
     }
     else {

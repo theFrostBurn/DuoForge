@@ -66,7 +66,7 @@ function Invoke-DuoForgeInteractiveNew {
     Write-Host '[1] 하나의 문서를 함께 검토하고 완성'
     Write-Host '[2] 두 문서를 서로 비교하여 각각 개선'
     Write-Host '[B] 이전으로'
-    Write-Host '프로젝트 비교(3A)는 안전 격리 검증 전까지 표시하지 않습니다.' -ForegroundColor DarkYellow
+    Write-Host '프로젝트 비교(3A)는 현재 Windows 격리 후보가 필수 차단 계약을 충족하지 못해 표시하지 않습니다.' -ForegroundColor DarkYellow
     $choice = (Read-Host '선택').Trim()
     if ($choice -ieq 'B') { return }
 

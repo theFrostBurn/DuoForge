@@ -205,6 +205,9 @@ function Get-DuoForgeProviderFailureClassificationInternal {
     if ($timedOut) {
         return [ordered]@{ category = 'timeout'; code = 'DF-PROVIDER-TIMEOUT'; targetStatus = 'RESUMABLE_ERROR'; retryable = $true; message = "$Provider CLI 호출 시간이 초과되었습니다."; exitCode = $null }
     }
+    if ($diagnosticText -match '(?i)(invalid_json_schema|invalid\s+schema\s+for\s+response_format)') {
+        return [ordered]@{ category = 'schema-compatibility'; code = 'DF-PROVIDER-SCHEMA-COMPAT'; targetStatus = 'BLOCKED_PREFLIGHT'; retryable = $false; message = "$Provider 구조화 출력 스키마가 현재 CLI 또는 공급자 API와 호환되지 않습니다."; exitCode = $exitCode }
+    }
     if ($diagnosticText -match "(?i)(usage\s+limit|quota|insufficient_quota|out\s+of\s+credits|plan\s+(?:usage\s+)?limit|limit\s+reached\s+for\s+your\s+plan|you(?:'|’)ve\s+hit\s+your\s+limit)") {
         return [ordered]@{ category = 'subscription-quota'; code = 'DF-PROVIDER-QUOTA'; targetStatus = 'PAUSED_QUOTA'; retryable = $false; message = "$Provider 구독 사용 한도에 도달했습니다. API 과금 방식으로 자동 전환하지 않습니다."; exitCode = $exitCode }
     }

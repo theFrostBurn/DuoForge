@@ -18,7 +18,7 @@
     "suggestedExperiment"
   ],
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "type": "integer", "const": 1 },
     "provider": { "type": "string", "enum": ["codex", "claude"] },
     "issueId": { "type": "string", "pattern": "^D-[0-9]{3,}$" },
     "level": { "type": "string", "enum": ["beginner", "general", "expert"] },

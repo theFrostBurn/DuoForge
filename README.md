@@ -2,7 +2,7 @@
 
 DuoForge는 Codex와 Claude가 같은 입력 스냅샷을 독립적으로 검토하고 서로의 결과를 비평하도록 조율하는 Windows 로컬 우선 CLI다.
 
-현재 저장소는 PRD v1.4의 문서 모드 Core Beta 구현이다. 공통 안전 기반, 진단, 필수 모델·추론 정도 선택, 실행 계획, 불변 스냅샷, 구조화 토론 단계, 재개 가능한 상태 저장, 쟁점 설명·근거 추가·사용자 결정과 최종 산출물 렌더링을 제공한다. 프로젝트 읽기 전용 비교(3A)는 안전 격리 검증 전까지 의도적으로 비활성화되어 있다.
+현재 저장소는 PRD v1.4의 문서 모드 Core Beta 구현이다. 공통 안전 기반, 진단, 필수 모델·추론 정도 선택, 실행 계획, 불변 스냅샷, 구조화 토론 단계, 재개 가능한 상태 저장, 쟁점 설명·근거 추가·사용자 결정과 최종 산출물 렌더링을 제공한다. 프로젝트 읽기 전용 비교(3A)는 현재 Windows 격리 후보가 범위 밖 읽기와 자식 프로세스 차단에 실패하여 의도적으로 비활성화되어 있다.
 
 ## 요구 환경
 
@@ -30,9 +30,9 @@ DuoForge는 Codex와 Claude가 같은 입력 스냅샷을 독립적으로 검토
 ```powershell
 .\duoforge.cmd start shared-document `
   --brief ".\require\PRD.md" `
-  --codex-model "gpt-5.6" `
+  --codex-model "gpt-5.6-sol" `
   --codex-effort "high" `
-  --claude-model "sonnet" `
+  --claude-model "opus" `
   --claude-effort "high" `
   --type "prd" `
   --max-rounds 2 `
@@ -40,7 +40,13 @@ DuoForge는 Codex와 Claude가 같은 입력 스냅샷을 독립적으로 검토
   --plan-only
 ```
 
-`--plan-only`는 모델을 호출하거나 확정 실행을 만들지 않고 선택한 모델·추론 정도, 검증·전송 범위와 최악 호출 수만 보여준다. 네 선택 옵션은 생략할 수 없으며, 인수 없이 여는 대화형 메뉴에서는 각 항목을 번호로 반드시 선택한다. 제안 목록에 없는 CLI 모델은 `모델명 직접 입력` 또는 `--codex-model`·`--claude-model`로 지정할 수 있다. Codex 추론 정도는 `low|medium|high|xhigh|max|ultra`, Claude는 `low|medium|high|xhigh|max` 중에서 고른다.
+`--plan-only`는 모델을 호출하거나 확정 실행을 만들지 않고 선택한 모델·추론 정도, 검증·전송 범위와 최악 호출 수만 보여준다. 네 선택 옵션은 생략할 수 없으며, 인수 없이 여는 대화형 메뉴에서는 각 항목을 번호로 반드시 선택한다.
+
+Codex 메뉴는 DuoForge 프로세스를 시작할 때 CLI의 `app-server model/list`를 호출해 현재 계정에 노출된 모델, 기본 모델과 모델별 기본·지원 추론 정도를 다시 받는다. 이 호출이 실패하면 CLI 로컬 캐시, 마지막으로 제한된 내장 목록 순서로 폴백하며 메뉴에 출처와 경고를 표시한다. CLI가 지정한 기본 모델을 권장하고, `high`가 해당 모델에 실제로 존재할 때만 `high`를 권장한다. `high`가 사라지면 CLI 기본 추론 정도, `medium`, 첫 지원값 순서로 이동한다.
+
+Claude CLI는 계정별 `/model` 전체 행을 기계 판독 목록으로 내보내지 않는다. 따라서 매 DuoForge 프로세스에서 설치된 `claude --help`가 광고하는 최신 계열 별칭과 effort를 다시 읽고, `opus|sonnet|fable` 같은 버전 비고정 별칭과 계정·조직 권장 모델을 런타임에 해석하는 `default`를 표시한다. `opus`와 `high`가 현재 CLI 목록에 있을 때만 권장하며, 사라지면 `default`와 현재 지원 effort로 이동한다. Claude Models API는 API 키가 필요하므로 구독 전용 정책을 지키기 위해 사용하지 않는다.
+
+제안 목록에 없는 CLI 모델은 `모델명 직접 입력` 또는 `--codex-model`·`--claude-model`로 지정할 수 있으며, `[1m]` 같은 CLI 모델 접미사도 허용한다.
 
 확정 실행은 `start`에서 스냅샷까지만 만든다. 출력된 실행 ID를 사용해 상태와 남은 호출 수를 먼저 확인한다.
 
@@ -85,7 +91,7 @@ Critical 쟁점은 보류할 수 없다. Major 쟁점의 부분 완료 보류는
 .\duoforge.cmd resume --run "run-20260727-..." --live
 ```
 
-라이브 E2E는 아직 실행하지 않았다. 현재 공급자 버전에서 최초 실제 실행을 승인하기 전에는 `doctor` 결과와 [docs/STAGE0_SPIKE.md](docs/STAGE0_SPIKE.md)의 잔여 경계를 확인해야 한다. 실제 구독 호출과 3A OS 격리 실험은 별도 승인 작업이다.
+공급자별 1회 라이브 스모크와 2라운드 전체 단계 E2E는 `gpt-5.6-sol/high`와 `Opus 5(opus)/high`로 통과했다. 전체 E2E에서 13/13 단계 커밋, 구조화 출력, 금지 도구 이벤트 0건, 원본 해시 동일, 임시 원문 정리와 호출 후 구독 인증 유지를 확인했으며 자세한 근거는 [docs/STAGE0_SPIKE.md](docs/STAGE0_SPIKE.md)에 기록했다. 3A Windows 격리 후보는 쓰기는 차단했지만 범위 밖 읽기와 자식 프로세스 실행을 허용하여 안전 게이트를 통과하지 못했으며, 상세 결과는 [docs/3A_ISOLATION_SPIKE.md](docs/3A_ISOLATION_SPIKE.md)에 기록했다.
 
 ## 테스트
 
@@ -93,4 +99,4 @@ Critical 쟁점은 보류할 수 없다. Major 쟁점의 부분 완료 보류는
 & "C:\Program Files\PowerShell\7\pwsh.exe" -NoLogo -NoProfile -File ".\tests\Run-Tests.ps1"
 ```
 
-구현 단계와 안전 판단은 [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md), 현재 CLI 검증 근거는 [docs/STAGE0_SPIKE.md](docs/STAGE0_SPIKE.md)를 참고한다.
+구현 단계와 안전 판단은 [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md), 현재 CLI 검증 근거는 [docs/STAGE0_SPIKE.md](docs/STAGE0_SPIKE.md), 3A 격리 판정은 [docs/3A_ISOLATION_SPIKE.md](docs/3A_ISOLATION_SPIKE.md)를 참고한다.

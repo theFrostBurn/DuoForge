@@ -836,7 +836,7 @@ DuoForge 최초 설정 완료
 - 독립 문서 상호개선은 Codex 측 문서와 Claude 측 문서를 순서대로 선택하고 선택 결과와 각 부모 폴더에서 자동 포함될 보조 Markdown을 나란히 확인한다. 두 주요 문서가 같은 폴더 또는 서로 중첩된 폴더에 있으면 진행하지 않고 별도 폴더 구성을 안내한다. 각 측의 추가 보조 문서 폴더는 고급 설정에서 선택할 수 있다.
 - 프로젝트 읽기 전용 비교는 첫 번째 프로젝트, 두 번째 프로젝트와 공통 요구사항 문서를 순서대로 선택한다.
 - 문서 유형은 파일명과 내용으로 추정하여 제안하되 사용자가 확인하거나 바꿀 수 있게 한다.
-- Codex와 Claude 각각에 대해 모델과 추론 정도를 반드시 선택한다. 추천 목록과 모델명 직접 입력을 제공하되 사용자의 선택 없이 기본값으로 진행하지 않는다.
+- Codex와 Claude 각각에 대해 모델과 추론 정도를 반드시 선택한다. Codex는 실행 시 CLI의 계정별 모델 카탈로그와 모델별 기본·지원 추론 정도를 다시 조회하고, Claude는 CLI가 현재 광고하는 버전 비고정 별칭·effort와 계정 기본(`default`)을 다시 읽는다. 현재 목록에 존재할 때만 `gpt-5.6-sol + high`, `opus + high`를 권장하고, 모델이나 단계가 사라지면 CLI 기본 모델·기본 추론 정도로 이동한다. 추천 목록과 모델명 직접 입력을 제공하되 사용자의 선택 없이 기본값으로 진행하지 않는다.
 - 선택한 네 값은 실행 전 확인과 매니페스트에 기록하고 모든 해당 공급자 호출에 동일하게 전달한다. 선택값이 없는 이전 실행은 라이브 재개하지 않는다.
 - 라운드는 기본 2, 결과 루트는 기본적으로 `D:\Coding\APP-windows\DuoForge\results`로 자동 설정한다. 최대 라운드, 일시정지, 추가 보조 문서 폴더와 사용자 지정 결과 루트는 `고급 설정`에서만 노출한다.
 - 마법사 도중 뒤로 가거나 취소하면 모델을 호출하거나 실행 디렉터리를 확정 생성하지 않는다.
@@ -973,9 +973,9 @@ duoforge doctor
 
 duoforge start shared-document `
   --brief ".\brief.md" `
-  --codex-model "gpt-5.6" `
+  --codex-model "gpt-5.6-sol" `
   --codex-effort "high" `
-  --claude-model "sonnet" `
+  --claude-model "opus" `
   --claude-effort "high" `
   --type "prd" `
   --max-rounds 2 `
@@ -984,9 +984,9 @@ duoforge start shared-document `
 duoforge start dual-document `
   --codex ".\codex-prd.md" `
   --claude ".\claude-prd.md" `
-  --codex-model "gpt-5.6" `
+  --codex-model "gpt-5.6-sol" `
   --codex-effort "high" `
-  --claude-model "sonnet" `
+  --claude-model "opus" `
   --claude-effort "high" `
   --codex-context ".\codex-docs" `
   --claude-context ".\claude-docs" `
@@ -996,9 +996,9 @@ duoforge start dual-project-audit `
   --codex-project "D:\Projects\CodexApp" `
   --claude-project "D:\Projects\ClaudeApp" `
   --requirements ".\requirements.md" `
-  --codex-model "gpt-5.6" `
+  --codex-model "gpt-5.6-sol" `
   --codex-effort "high" `
-  --claude-model "sonnet" `
+  --claude-model "opus" `
   --claude-effort "high" `
   --workspace "D:\DuoForgeRuns" `
   --max-rounds 2

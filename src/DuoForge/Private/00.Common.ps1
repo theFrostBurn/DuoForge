@@ -39,7 +39,17 @@ function ConvertTo-DuoForgeHashtable {
         if ($InputObject -is [System.Collections.IDictionary]) {
             $result = [ordered]@{}
             foreach ($key in $InputObject.Keys) {
-                $result[[string]$key] = ConvertTo-DuoForgeHashtable -InputObject $InputObject[$key]
+                $child = $InputObject[$key]
+                if ($child -is [System.Collections.IEnumerable] -and $child -isnot [string] -and $child -isnot [System.Collections.IDictionary]) {
+                    $items = [System.Collections.Generic.List[object]]::new()
+                    foreach ($item in $child) {
+                        $items.Add((ConvertTo-DuoForgeHashtable -InputObject $item))
+                    }
+                    $result[[string]$key] = [object[]]$items.ToArray()
+                }
+                else {
+                    $result[[string]$key] = ConvertTo-DuoForgeHashtable -InputObject ($child)
+                }
             }
             return $result
         }
@@ -47,14 +57,27 @@ function ConvertTo-DuoForgeHashtable {
         if ($InputObject -is [pscustomobject]) {
             $result = [ordered]@{}
             foreach ($property in $InputObject.PSObject.Properties) {
-                $result[$property.Name] = ConvertTo-DuoForgeHashtable -InputObject $property.Value
+                $child = $property.Value
+                if ($child -is [System.Collections.IEnumerable] -and $child -isnot [string] -and $child -isnot [System.Collections.IDictionary]) {
+                    $items = [System.Collections.Generic.List[object]]::new()
+                    foreach ($item in $child) {
+                        $items.Add((ConvertTo-DuoForgeHashtable -InputObject $item))
+                    }
+                    $result[$property.Name] = [object[]]$items.ToArray()
+                }
+                else {
+                    $result[$property.Name] = ConvertTo-DuoForgeHashtable -InputObject ($child)
+                }
             }
             return $result
         }
 
         if ($InputObject -is [System.Collections.IEnumerable] -and $InputObject -isnot [string]) {
-            $items = @($InputObject | ForEach-Object { ConvertTo-DuoForgeHashtable -InputObject $_ })
-            Write-Output -NoEnumerate $items
+            $items = [System.Collections.Generic.List[object]]::new()
+            foreach ($item in $InputObject) {
+                $items.Add((ConvertTo-DuoForgeHashtable -InputObject $item))
+            }
+            Write-Output -NoEnumerate ([object[]]$items.ToArray())
             return
         }
 

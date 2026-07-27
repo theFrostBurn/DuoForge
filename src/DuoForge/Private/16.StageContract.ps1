@@ -104,7 +104,9 @@ function Test-DuoForgeStageResultInternal {
 
     $validation = [ordered]@{ valid = $errors.Count -eq 0; errors = @($errors) }
     if ($ThrowOnError -and -not $validation.valid) {
-        throw (New-DuoForgeException -Code 'DF-STAGE-SCHEMA' -Message ($validation.errors -join ' '))
+        $exception = New-DuoForgeException -Code 'DF-STAGE-SCHEMA' -Message ($validation.errors -join ' ')
+        $exception.Data['DuoForgeValidationErrors'] = @($validation.errors)
+        throw $exception
     }
     return $validation
 }
