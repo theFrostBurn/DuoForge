@@ -6,9 +6,9 @@ DuoForge는 Codex와 Claude가 불변 입력 스냅샷을 검토하고 토론하
 
 | 화면 모드 | 내부 ID | 입력 | 결과 | 상태 |
 |---|---|---|---|---|
-| 1. 컨셉으로 공동 문서 만들기 | `shared-document` | brief 또는 컨셉 C | 공동 문서 C' | 활성 |
-| 2. 두 문서를 하나로 합의하기 | `document-merge` | 문서 A/B | 합의 문서 C와 출처 추적표 | 오프라인 검증 |
-| 3. 두 문서를 각각 개선하기 | `dual-document` | 문서 A/B | 개선 문서 A'/B'와 채택 기록 | 오프라인 검증 |
+| 1. 컨셉으로 공동 문서 만들기 | `shared-document` | brief 또는 컨셉 C | 공동 문서 C' | 실제 E2E 통과 (`AWAITING_USER`) |
+| 2. 두 문서를 하나로 합의하기 | `document-merge` | 문서 A/B | 합의 문서 C와 출처 추적표 | 실제 E2E 통과 (`AWAITING_USER`) |
+| 3. 두 문서를 각각 개선하기 | `dual-document` | 문서 A/B | 개선 문서 A'/B'와 채택 기록 | 실제 E2E 통과 (`AWAITING_USER`) |
 | 4. 두 프로젝트 비교하기 | `dual-project-audit` | 프로젝트 A/B | 비교 보고서 | 격리 실패로 비활성 |
 
 모드 4는 Windows 격리 후보가 범위 밖 읽기와 자식 프로세스 차단에 실패하여 `DF-PREFLIGHT-3A-ISOLATION`으로 입력 전송과 모델 호출 전에 차단된다. 사용자 확인으로 이 게이트를 열 수 없다.
@@ -158,9 +158,11 @@ DUOFORGE  토론 진행판
 
 Windows Terminal 또는 VS Code 통합 터미널에서 VT 지원, 입출력 비리디렉션, 최소 `72×20` 크기를 모두 만족할 때 대체 화면 버퍼를 사용한다. 조건을 만족하지 않거나 실행 중 화면 갱신이 실패하면 모델 실행을 중단하지 않고 ANSI 없는 누적 진행 로그로 자동 전환한다. 종료 화면에서 Enter를 누르면 기존 터미널 화면과 작업 메뉴로 돌아간다.
 
-기존 공급자별 라이브 스모크와 2라운드 전체 단계 E2E는 `workflow-v1 shared-document/dual-document`의 역사적 증거이며 신규 모드 완료로 재해석하지 않는다. 2026-07-28에는 별도 `workflow-v2` 실제 공급자 E2E를 실행해 모드 1 `13/13`, 모드 2 `13/13`, 모드 3 `14/14` 단계와 입력 해시 불변·A/B 계보·최종 파일·이벤트/로그 비노출을 확인했다. 세 모드 모두 `AWAITING_USER` 체크포인트로 강화 검증을 통과했다. 모드 3 최초 실행에서 발견한 Minor 근거 대기의 잘못된 차단 상태는 중앙 차단 규칙 재계산으로 수정한 뒤 신규 실제 공급자 실행으로 재검증했다. 실행 ID와 판정 근거는 [docs/STAGE0_SPIKE.md](docs/STAGE0_SPIKE.md)에 기록한다.
+기존 공급자별 라이브 스모크와 2라운드 전체 단계 E2E는 `workflow-v1 shared-document/dual-document`의 역사적 증거이며 신규 모드 완료로 재해석하지 않는다. 2026-07-28에는 별도 `workflow-v2` 실제 공급자 E2E를 실행해 모드 1 `13/13`, 모드 2 `13/13`, 모드 3 `14/14` 단계와 입력 해시 불변·A/B 계보·최종 파일·이벤트/로그 비노출을 확인했다. 세 모드 모두 `AWAITING_USER` 체크포인트로 강화 검증을 통과했다. 이는 질문 카드와 사용자 게이트가 정상 작동한 E2E 성공 상태이며, 테스트 픽스처의 결정을 임의로 답해 `COMPLETED`로 바꾸는 추가 공급자 호출은 완료 조건이 아니다. 모드 3 최초 실행에서 발견한 Minor 근거 대기의 잘못된 차단 상태는 중앙 차단 규칙 재계산으로 수정한 뒤 신규 실제 공급자 실행으로 재검증했다. 실행 ID와 판정 근거는 [docs/STAGE0_SPIKE.md](docs/STAGE0_SPIKE.md)에 기록한다.
 
 ## 테스트
+
+실제 공급자 E2E의 테스트 전용 Claude 선택은 `tests\workflow-v2-live-settings.json`에서 관리하며 현재 `sonnet/low`로 고정한다. 신규 workflow-v2와 레거시 라이브 E2E 실행기 모두 이 설정과 정확한 `LIVE` 동의를 요구한다. 일반 실행의 모델 선택 화면과 이미 저장된 실행의 선택값은 바꾸지 않으며, `opus/high`가 저장된 기존 E2E 실행은 재호출하지 않는다.
 
 ```powershell
 & 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -File '.\tests\Run-Tests.ps1'

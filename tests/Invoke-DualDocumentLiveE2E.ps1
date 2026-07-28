@@ -4,19 +4,23 @@
 param(
     [Parameter(Mandatory)][string]$CodexModel,
     [Parameter(Mandatory)][ValidateSet('low', 'medium', 'high', 'xhigh', 'max', 'ultra')][string]$CodexEffort,
-    [Parameter(Mandatory)][string]$ClaudeModel,
-    [Parameter(Mandatory)][ValidateSet('low', 'medium', 'high', 'xhigh', 'max')][string]$ClaudeEffort,
+    [Parameter(Mandatory)][string]$Consent,
     [string]$Workspace,
     [string]$ResumeRunId,
-    [switch]$ResolveRecommendedQuestions,
-    [Parameter(Mandatory)][switch]$ConfirmLive
+    [switch]$ResolveRecommendedQuestions
 )
 
 $ErrorActionPreference = 'Stop'
-if (-not $ConfirmLive) { throw '실제 구독 호출에는 -ConfirmLive가 필요합니다.' }
+if ($Consent -cne 'LIVE') { throw '정확한 LIVE 동의가 필요합니다.' }
 
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $module = Import-Module (Join-Path $projectRoot 'src\DuoForge\DuoForge.psd1') -Force -PassThru
+$liveSettings = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'workflow-v2-live-settings.json') -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 20
+$testClaudeModel = [string]$liveSettings.claude.model
+$testClaudeEffort = [string]$liveSettings.claude.reasoningEffort
+if ($testClaudeModel -cne 'sonnet' -or $testClaudeEffort -cne 'low') {
+    throw '라이브 E2E의 Claude 테스트 전용 설정은 sonnet/low여야 합니다.'
+}
 if ([string]::IsNullOrWhiteSpace($Workspace)) { $Workspace = Join-Path $projectRoot 'results\live-dual-e2e' }
 $codexSource = Join-Path $PSScriptRoot 'fixtures\dual-live\codex\source.md'
 $claudeSource = Join-Path $PSScriptRoot 'fixtures\dual-live\claude\source.md'
@@ -37,8 +41,8 @@ if ([string]::IsNullOrWhiteSpace($ResumeRunId)) {
         -ClaudeDocument $claudeSource `
         -CodexModel $CodexModel `
         -CodexReasoningEffort $CodexEffort `
-        -ClaudeModel $ClaudeModel `
-        -ClaudeReasoningEffort $ClaudeEffort `
+        -ClaudeModel $testClaudeModel `
+        -ClaudeReasoningEffort $testClaudeEffort `
         -DocumentType prd `
         -MaxRounds 2 `
         -Workspace $Workspace `
@@ -49,7 +53,7 @@ if ([string]::IsNullOrWhiteSpace($ResumeRunId)) {
 }
 else {
     $existing = Get-DuoForgeRun -RunId $ResumeRunId -ResultsRoot $Workspace
-    if ([string]$existing.manifest.providerSelections.codex.model -ne $CodexModel -or [string]$existing.manifest.providerSelections.codex.reasoningEffort -ne $CodexEffort -or [string]$existing.manifest.providerSelections.claude.model -ne $ClaudeModel -or [string]$existing.manifest.providerSelections.claude.reasoningEffort -ne $ClaudeEffort) {
+    if ([string]$existing.manifest.providerSelections.codex.model -ne $CodexModel -or [string]$existing.manifest.providerSelections.codex.reasoningEffort -ne $CodexEffort -or [string]$existing.manifest.providerSelections.claude.model -ne $testClaudeModel -or [string]$existing.manifest.providerSelections.claude.reasoningEffort -ne $testClaudeEffort) {
         throw '재개 요청의 모델·추론 선택이 저장된 매니페스트와 다릅니다.'
     }
     $run = [ordered]@{ runId = $ResumeRunId; runDirectory = [string]$existing.runDirectory; manifest = $existing.manifest }

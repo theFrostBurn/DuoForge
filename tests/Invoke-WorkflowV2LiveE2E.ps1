@@ -5,8 +5,6 @@ param(
     [Parameter(Mandatory)][ValidateSet('shared-document', 'document-merge', 'dual-document')][string]$Mode,
     [Parameter(Mandatory)][string]$CodexModel,
     [Parameter(Mandatory)][ValidateSet('low', 'medium', 'high', 'xhigh', 'max', 'ultra')][string]$CodexEffort,
-    [Parameter(Mandatory)][string]$ClaudeModel,
-    [Parameter(Mandatory)][ValidateSet('low', 'medium', 'high', 'xhigh', 'max')][string]$ClaudeEffort,
     [Parameter(Mandatory)][string]$Consent,
     [string]$ResultsRoot
 )
@@ -22,6 +20,13 @@ $fixtureRoot = Join-Path $PSScriptRoot 'fixtures\workflow-v2-live'
 $module = Import-Module (Join-Path $projectRoot 'src\DuoForge\DuoForge.psd1') -Force -PassThru
 
 try {
+    $liveSettings = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'workflow-v2-live-settings.json') -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 20
+    $testClaudeModel = [string]$liveSettings.claude.model
+    $testClaudeEffort = [string]$liveSettings.claude.reasoningEffort
+    if ($testClaudeModel -cne 'sonnet' -or $testClaudeEffort -cne 'low') {
+        throw '라이브 E2E의 Claude 테스트 전용 설정은 sonnet/low여야 합니다.'
+    }
+
     $doctor = Invoke-DuoForgeDoctor
     if (-not [bool]$doctor.readyForDocumentModes) {
         throw [System.InvalidOperationException]::new('DF-PREFLIGHT-PROVIDERS')
@@ -31,8 +36,8 @@ try {
         Mode = $Mode
         CodexModel = $CodexModel
         CodexReasoningEffort = $CodexEffort
-        ClaudeModel = $ClaudeModel
-        ClaudeReasoningEffort = $ClaudeEffort
+        ClaudeModel = $testClaudeModel
+        ClaudeReasoningEffort = $testClaudeEffort
         DocumentType = 'prd'
         MaxRounds = 2
         FirstSynthesizer = 'alternate'

@@ -186,6 +186,18 @@ try {
         $invalidValidation = Test-DuoForgeStartRequest -Request $invalid -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         Assert-False ([bool]$invalidValidation.valid)
         Assert-Equal @($invalidValidation.errors | Where-Object { $_.code -eq 'DF-PROVIDER-EFFORT' }).Count 1
+
+        $liveSettings = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'workflow-v2-live-settings.json') -Raw | ConvertFrom-Json -Depth 20
+        Assert-Equal $liveSettings.claude.model 'sonnet'
+        Assert-Equal $liveSettings.claude.reasoningEffort 'low'
+        foreach ($liveRunnerName in @('Invoke-WorkflowV2LiveE2E.ps1', 'Invoke-DualDocumentLiveE2E.ps1')) {
+            $liveRunnerText = Get-Content -LiteralPath (Join-Path $PSScriptRoot $liveRunnerName) -Raw
+            Assert-True ($liveRunnerText -match "workflow-v2-live-settings\.json")
+            Assert-True ($liveRunnerText -match 'ClaudeModel\s+\$testClaudeModel|ClaudeModel\s*=\s*\$testClaudeModel')
+            Assert-True ($liveRunnerText -match 'ClaudeReasoningEffort\s+\$testClaudeEffort|ClaudeReasoningEffort\s*=\s*\$testClaudeEffort')
+            Assert-False ($liveRunnerText -match '\[Parameter\(Mandatory\)\]\[string\]\$ClaudeModel')
+            Assert-True ($liveRunnerText -match "Consent\s+-cne\s+'LIVE'")
+        }
     }
 
     Test-Case '모델 메뉴 폴백은 CLI 계열과 현재 존재하는 권장 모델 및 추론 정도만 표시한다' {

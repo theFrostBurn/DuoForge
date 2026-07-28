@@ -337,7 +337,7 @@ rounds/
 
 ```text
 final/
-├─ merged-final.md
+├─ PRD.md 또는 선택한 문서 유형의 최종 파일
 ├─ source-trace.md
 ├─ DECISIONS.md
 ├─ OPEN_QUESTIONS.md

@@ -59,6 +59,8 @@
 - `run-20260728-040441-2cb68c`: `workflow-v2 document-merge`, 13/13 단계, Codex 7회·Claude 6회, `AWAITING_USER`, 강화 검증 통과
 - `run-20260728-043711-14a4b7`: `workflow-v2 dual-document`, 14/14 단계, Codex 7회·Claude 7회. 입력·스냅샷 해시, 단계 계약, A/B 최종 파일과 비노출 검사는 통과했지만 상태 의미 검증은 `WAITING_STATUS_WITHOUT_BLOCKING_ISSUE`로 실패
 - `run-20260728-095906-127f6d`: 수정 후 `workflow-v2 dual-document`, 14/14 단계, Codex 7회·Claude 7회, `AWAITING_USER`, Critical/Major 사용자 결정 차단 4건과 상태가 일치해 강화 검증 통과
+- 위 세 통과 실행의 `AWAITING_USER`는 전체 단계 커밋, 최종 산출물 생성과 질문 카드 사용자 게이트가 정상 동작한 실제 E2E 성공 체크포인트다. 테스트 픽스처의 질문을 임의로 답해 `COMPLETED`까지 재호출하는 작업은 이 검증의 완료 조건이 아니다.
+- 통과 실행의 저장된 `opus/high` 선택값은 감사 계보로 보존하고 재호출하지 않는다. 향후 코드 변경으로 신규 실제 E2E가 필요할 때만 테스트 전용 `sonnet/low`와 새 `LIVE` 동의를 사용한다.
 - 공통 안전 결과: 통과·감사 실행 합계 호출 시작 55회, 완료·단계 커밋 54회. 초기 스키마 호환성 결함 실행의 1회만 커밋되지 않았고 공급자 실패 이벤트는 0건이다. 원본 SHA-256 불변, 스냅샷 1/4/4/4개 검증, 금지 이벤트·데이터 키·문서 카나리·`provider-work` 잔여 각 0건을 확인했다.
 - 라이브 과정에서 수정한 결함: 모듈 클로저가 private 공급자 함수를 해석하지 못한 문제, Codex 구조화 출력과 호환되지 않는 `uniqueItems` 키워드
 - 모드 3 후속 분석에서 Minor `NEEDS_EVIDENCE` 쟁점이 이전 질문의 `blocking=true`를 유지하는 의미 결함을 확인했다. 모든 병합 뒤 중앙 심각도 규칙으로 차단 여부를 재계산하고 Minor 근거 대기가 완료 게이트를 막지 않는 회귀를 기존 68개 테스트에 추가했다.
