@@ -397,6 +397,21 @@ try {
                     Get-DuoForgeProgressStageLabelInternal -Stage document-revision
                     Get-DuoForgeProgressStageLabelInternal -Stage document-validation
                 )
+                targetLabels = @(
+                    Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId A -Mode dual-document
+                    Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId B -Mode dual-document
+                    Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId merged -Mode shared-document
+                    Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId merged -Mode document-merge
+                )
+                stateLabels = @(
+                    Get-DuoForgeProgressStateLabelInternal -Status RESUMABLE_ERROR
+                    Get-DuoForgeProgressStateLabelInternal -Status PAUSED_QUOTA
+                    Get-DuoForgeProgressStateLabelInternal -Status BLOCKED_PREFLIGHT
+                )
+                retryLabels = @(
+                    Get-DuoForgeProgressRetryLabelInternal -RetryMode FORMAT_REPAIR
+                    Get-DuoForgeProgressRetryLabelInternal -RetryMode STANDARD_RETRY
+                )
             }
         }
         Assert-Equal @($surface.options).Count 4
@@ -407,6 +422,9 @@ try {
         Assert-ContainsText ([string]$surface.options[3].disabledReason) 'DF-PREFLIGHT-3A-ISOLATION'
         Assert-Equal ((@($surface.modeLabels) -join ',')) '컨셉으로 공동 문서 만들기,두 문서를 하나로 합의하기,두 문서를 각각 개선하기,두 프로젝트 비교하기(비활성)'
         Assert-Equal ((@($surface.stageLabels) -join ',')) '독립 병합 후보,문서 A/B 검토,대상 문서 개정,대상 문서 최종 검증'
+        Assert-Equal ((@($surface.targetLabels) -join ',')) '문서 A,문서 B,공동 문서,합의 문서 C'
+        Assert-Equal ((@($surface.stateLabels) -join ',')) '재개 가능 오류,구독 한도 대기,사전 검사 차단'
+        Assert-Equal ((@($surface.retryLabels) -join ',')) '형식 복구 재시도 대기,공급자 호출 재시도 대기'
 
         $interactiveSource = Get-Content -LiteralPath (Join-Path $projectRoot 'src\DuoForge\Private\14.Interactive.ps1') -Raw
         Assert-NotContainsText $interactiveSource "Role 'codex-document'"
@@ -1716,15 +1734,57 @@ try {
             $partial.statusLabel = '실행 중'
             $partial.steps[0].status = 'COMMITTED'
             $partial.steps[1].status = 'STARTED'
+            $partial.steps[1].targetDocumentId = 'A'
             $partial.activeSteps = @($partial.steps[1])
             $partial.barriers = @(Get-DuoForgeProgressBarriersInternal -Steps @($partial.steps))
             $partial.lastEvent = [ordered]@{ type = 'STAGE_RESULT_RECEIVED'; data = [ordered]@{ stepKey = $partial.steps[1].stepKey } }
+            $partial.latest.targetDocumentId = 'B'
+            $partial.latest.summary = '검증된 대상 문서 요약'
+            $partial.latest.issueCounts = [ordered]@{ critical = 1; major = 2; minor = 3 }
+            $partial.latest.responseCounts = [ordered]@{ ACCEPTED = 4; PARTIALLY_ACCEPTED = 5; REJECTED = 6; DEFERRED = 0; NEEDS_EVIDENCE = 0; ASK_USER = 0 }
+            $partial.latest.adoptionCounts = [ordered]@{ ACCEPTED = 7; PARTIALLY_ACCEPTED = 8; REJECTED = 0; DEFERRED = 0 }
             $active = @(New-DuoForgeProgressFrameInternal -Snapshot $partial -Width 72 -Height 20 -ViewState ([ordered]@{ providerElapsedSeconds = 4 }))
+            $waiting = ConvertTo-DuoForgeHashtable -InputObject $partial
+            $waiting.lastEvent = [ordered]@{ type = 'STAGE_STARTED'; data = [ordered]@{ stepKey = $partial.steps[1].stepKey } }
+            $waitingFrame = @(New-DuoForgeProgressFrameInternal -Snapshot $waiting -Width 100 -Height 30 -ViewState ([ordered]@{ providerElapsedSeconds = 4 }))
+            $retry = ConvertTo-DuoForgeHashtable -InputObject $partial
+            $retry.activeSteps = @()
+            $retry.lastEvent = [ordered]@{ type = 'STAGE_RETRY_SCHEDULED'; data = [ordered]@{ provider = 'codex'; stage = 'document-revision'; targetDocumentId = 'A'; retryMode = 'FORMAT_REPAIR' } }
+            $retryFrame = @(New-DuoForgeProgressFrameInternal -Snapshot $retry -Width 100 -Height 30)
+            $standardRetry = ConvertTo-DuoForgeHashtable -InputObject $retry
+            $standardRetry.lastEvent.data.retryMode = 'STANDARD_RETRY'
+            $standardRetryFrame = @(New-DuoForgeProgressFrameInternal -Snapshot $standardRetry -Width 100 -Height 30)
+            $failed = ConvertTo-DuoForgeHashtable -InputObject $partial
+            $failed.activeSteps = @()
+            $failed.status = 'RESUMABLE_ERROR'
+            $failed.statusLabel = Get-DuoForgeProgressStateLabelInternal -Status $failed.status
+            $failed.lastEvent = [ordered]@{ type = 'STAGE_FAILED'; data = [ordered]@{ provider = 'claude'; stage = 'document-validation'; targetDocumentId = 'B' } }
+            $failedFrame = @(New-DuoForgeProgressFrameInternal -Snapshot $failed -Width 100 -Height 30)
+            $quota = ConvertTo-DuoForgeHashtable -InputObject $failed
+            $quota.status = 'PAUSED_QUOTA'
+            $quota.statusLabel = Get-DuoForgeProgressStateLabelInternal -Status $quota.status
+            $quotaFrame = @(New-DuoForgeProgressFrameInternal -Snapshot $quota -Width 100 -Height 30)
+            $blocked = ConvertTo-DuoForgeHashtable -InputObject $failed
+            $blocked.status = 'BLOCKED_PREFLIGHT'
+            $blocked.statusLabel = Get-DuoForgeProgressStateLabelInternal -Status $blocked.status
+            $blockedFrame = @(New-DuoForgeProgressFrameInternal -Snapshot $blocked -Width 100 -Height 30)
+            $logText = (& {
+                $view = [ordered]@{ runDirectory = $directory }
+                $event = [ordered]@{ type = 'STAGE_STARTED'; data = [ordered]@{ stepKey = $snapshot.steps[0].stepKey } }
+                Write-DuoForgeProgressLogEventInternal -View $view -Event $event
+            } 6>&1 | Out-String)
             $emojiSafe = ConvertTo-DuoForgeProgressTextInternal -Text (('a' * 1199) + '😀후속')
             [ordered]@{
                 wide = $wide
                 narrow = $narrow
                 active = $active
+                waiting = $waitingFrame
+                retry = $retryFrame
+                standardRetry = $standardRetryFrame
+                failed = $failedFrame
+                quota = $quotaFrame
+                blocked = $blockedFrame
+                logText = $logText
                 narrowWidths = @($narrow | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) })
                 koreanWidth = Get-DuoForgeProgressTextWidthInternal -Text '한글A'
                 safe = ConvertTo-DuoForgeProgressTextInternal -Text ("`e[31m위험`e[0m`n다음")
@@ -1741,7 +1801,20 @@ try {
         Assert-ContainsText ($rendered.narrow -join "`n") '쟁점 전체'
         Assert-ContainsText ($rendered.narrow -join "`n") 'Enter 키를 누르면'
         Assert-ContainsText ($rendered.active -join "`n") '응답 수신 · 구조 검증 중'
+        Assert-ContainsText ($rendered.active -join "`n") '현재  ● Claude · 독립 초안 · 문서 A'
+        Assert-ContainsText ($rendered.active -join "`n") '최근 확정  ✓ Codex · R2 최종 검증 · 문서 B'
+        Assert-ContainsText ($rendered.active -join "`n") '검증된 대상 문서 요약'
+        Assert-ContainsText ($rendered.active -join "`n") '쟁점 C 1 · M 2 · m 3 | 응답 수용 4 · 부분 5 · 거부 6 | 채택 15'
+        Assert-ContainsText ($rendered.waiting -join "`n") '현재  ● Claude · 독립 초안 · 문서 A · 응답 대기 00:04'
+        Assert-ContainsText ($rendered.waiting -join "`n") 'Codex ✓  Claude ●'
         Assert-ContainsText ($rendered.active -join "`n") '쟁점 원장  전체 단계 확정 후 집계'
+        Assert-ContainsText ($rendered.retry -join "`n") '현재  ↻ Codex · 대상 문서 개정 · 문서 A · 형식 복구 재시도 대기'
+        Assert-ContainsText ($rendered.standardRetry -join "`n") '현재  ↻ Codex · 대상 문서 개정 · 문서 A · 공급자 호출 재시도 대기'
+        Assert-ContainsText ($rendered.failed -join "`n") '현재  ! Claude · 대상 문서 최종 검증 · 문서 B · 재개 가능 오류'
+        Assert-ContainsText ($rendered.quota -join "`n") '현재  ! Claude · 대상 문서 최종 검증 · 문서 B · 구독 한도 대기'
+        Assert-ContainsText ($rendered.blocked -join "`n") '현재  ! Claude · 대상 문서 최종 검증 · 문서 B · 사전 검사 차단'
+        Assert-ContainsText $rendered.logText '공동 문서 시작'
+        Assert-False ([string]$rendered.logText -like "*`e*")
         Assert-Equal $rendered.koreanWidth 5
         Assert-Equal $rendered.safe '위험 다음'
         Assert-False ([string]$rendered.safe -like "*`e*")
@@ -1789,6 +1862,8 @@ try {
         Assert-Equal (($firstStepEvents -join ',')) 'STAGE_STARTED,STAGE_RESULT_RECEIVED,STAGE_COMMITTED'
         $committed = @($events | Where-Object { [string]$_.type -eq 'STAGE_COMMITTED' })
         Assert-Equal $committed.Count 13
+        Assert-Equal $committed[0].runId $run.runId
+        Assert-False $committed[0].Contains('runDirectory')
         Assert-Equal $committed[0].data.workflowVersion 'workflow-v2'
         Assert-Equal $committed[0].data.targetDocumentId 'merged'
         Assert-False $committed[0].data.Contains('summary')
@@ -1797,6 +1872,7 @@ try {
         Assert-NotContainsText $observerJson $documentMarker
         Assert-NotContainsText $observerJson $providerMarker
         Assert-NotContainsText $observerJson $secretMarker
+        Assert-NotContainsText $observerJson ([string]$run.runDirectory)
         $durableEventText = Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') -Raw
         Assert-NotContainsText $durableEventText $documentMarker
         Assert-NotContainsText $durableEventText $providerMarker

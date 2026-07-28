@@ -165,13 +165,40 @@ function Get-DuoForgeProgressModeLabelInternal {
     }
 }
 
+function Get-DuoForgeProgressTargetLabelInternal {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][AllowEmptyString()][string]$TargetDocumentId,
+        [AllowNull()][AllowEmptyString()][string]$Mode
+    )
+
+    switch ($TargetDocumentId) {
+        'A' { '문서 A' }
+        'B' { '문서 B' }
+        'merged' {
+            switch ($Mode) {
+                'shared-document' { '공동 문서' }
+                'document-merge' { '합의 문서 C' }
+                default { '통합 문서' }
+            }
+        }
+        default {
+            if ([string]::IsNullOrWhiteSpace($TargetDocumentId)) { return '' }
+            '대상 ' + (ConvertTo-DuoForgeProgressTextInternal -Text $TargetDocumentId -MaximumCharacters 80)
+        }
+    }
+}
+
 function Get-DuoForgeProgressStateLabelInternal {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Status)
 
     switch ($Status) {
+        'CREATED' { '실행 생성' }
+        'PREFLIGHT' { '사전 검사' }
         'SNAPSHOTTED' { '실행 준비' }
         'RUNNING' { '진행 중' }
+        'BLOCKED_PREFLIGHT' { '사전 검사 차단' }
         'PAUSED_USER' { '사용자 일시정지' }
         'PAUSED_QUOTA' { '구독 한도 대기' }
         'AWAITING_USER' { '사용자 결정 대기' }
@@ -181,6 +208,17 @@ function Get-DuoForgeProgressStateLabelInternal {
         'RESUMABLE_ERROR' { '재개 가능 오류' }
         'SOURCE_DRIFT' { '입력 변경 감지' }
         default { $Status }
+    }
+}
+
+function Get-DuoForgeProgressRetryLabelInternal {
+    [CmdletBinding()]
+    param([AllowNull()][AllowEmptyString()][string]$RetryMode)
+
+    switch ($RetryMode) {
+        'FORMAT_REPAIR' { '형식 복구 재시도 대기' }
+        'STANDARD_RETRY' { '공급자 호출 재시도 대기' }
+        default { '재시도 대기' }
     }
 }
 
@@ -292,6 +330,7 @@ function Get-DuoForgeProgressArtifactRecordInternal {
         provider = [string]$Step.provider
         round = [int]$Step.round
         stage = [string]$Step.stage
+        targetDocumentId = [string](Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId')
         label = Get-DuoForgeProgressStageLabelInternal -Stage ([string]$Step.stage)
         summary = if ([string]$Step.stage -eq 'context-batch-analysis') { '문맥 배치 분석 결과가 검증·저장되었습니다.' } else { ConvertTo-DuoForgeProgressTextInternal -Text ([string](Get-DuoForgeObjectValue -Object $result -Name 'summary')) }
         issueCounts = $issueCounts
@@ -427,19 +466,31 @@ function New-DuoForgeProgressFrameInternal {
     if ($active.Count -gt 0) {
         $providerLabel = if ([string]$active[0].provider -eq 'codex') { 'Codex' } else { 'Claude' }
         $stageLabel = Get-DuoForgeProgressStageLabelInternal -Stage ([string]$active[0].stage)
+        $targetLabel = Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId ([string](Get-DuoForgeObjectValue -Object $active[0] -Name 'targetDocumentId')) -Mode ([string]$Snapshot.mode)
         $elapsed = if ($null -ne $ViewState -and $ViewState.Contains('providerElapsedSeconds')) { [int]$ViewState.providerElapsedSeconds } else { 0 }
         $activity = if ($lastEventType -eq 'STAGE_RESULT_RECEIVED') { '응답 수신 · 구조 검증 중' } else { "응답 대기 $([timespan]::FromSeconds($elapsed).ToString('mm\:ss'))" }
-        & $addLine ("현재  ● {0} · {1} · {2}" -f $providerLabel, $stageLabel, $activity)
+        $currentParts = @($providerLabel, $stageLabel)
+        if (-not [string]::IsNullOrWhiteSpace($targetLabel)) { $currentParts += $targetLabel }
+        $currentParts += $activity
+        & $addLine ("현재  ● {0}" -f ($currentParts -join ' · '))
     }
     elseif ($lastEventType -eq 'STAGE_RETRY_SCHEDULED') {
         $retryData = $Snapshot.lastEvent.data
         $retryProvider = if ([string]$retryData.provider -eq 'codex') { 'Codex' } else { 'Claude' }
-        & $addLine ("현재  ↻ {0} · {1} · 형식 복구 재시도 대기" -f $retryProvider, (Get-DuoForgeProgressStageLabelInternal -Stage ([string]$retryData.stage)))
+        $retryParts = @($retryProvider, (Get-DuoForgeProgressStageLabelInternal -Stage ([string]$retryData.stage)))
+        $retryTarget = Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId ([string](Get-DuoForgeObjectValue -Object $retryData -Name 'targetDocumentId')) -Mode ([string]$Snapshot.mode)
+        if (-not [string]::IsNullOrWhiteSpace($retryTarget)) { $retryParts += $retryTarget }
+        $retryParts += Get-DuoForgeProgressRetryLabelInternal -RetryMode ([string](Get-DuoForgeObjectValue -Object $retryData -Name 'retryMode'))
+        & $addLine ("현재  ↻ {0}" -f ($retryParts -join ' · '))
     }
     elseif ($lastEventType -eq 'STAGE_FAILED') {
         $failedData = $Snapshot.lastEvent.data
         $failedProvider = if ([string]$failedData.provider -eq 'codex') { 'Codex' } else { 'Claude' }
-        & $addLine ("현재  ! {0} · {1} · 재개 가능 오류" -f $failedProvider, (Get-DuoForgeProgressStageLabelInternal -Stage ([string]$failedData.stage)))
+        $failedParts = @($failedProvider, (Get-DuoForgeProgressStageLabelInternal -Stage ([string]$failedData.stage)))
+        $failedTarget = Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId ([string](Get-DuoForgeObjectValue -Object $failedData -Name 'targetDocumentId')) -Mode ([string]$Snapshot.mode)
+        if (-not [string]::IsNullOrWhiteSpace($failedTarget)) { $failedParts += $failedTarget }
+        $failedParts += [string]$Snapshot.statusLabel
+        & $addLine ("현재  ! {0}" -f ($failedParts -join ' · '))
     }
     else {
         & $addLine ("현재  {0}" -f $Snapshot.statusLabel)
@@ -447,7 +498,10 @@ function New-DuoForgeProgressFrameInternal {
 
     if ($null -ne $Snapshot.latest) {
         $latestProvider = if ([string]$Snapshot.latest.provider -eq 'codex') { 'Codex' } else { 'Claude' }
-        & $addLine ("최근 확정  ✓ {0} · R{1} {2}" -f $latestProvider, $Snapshot.latest.round, $Snapshot.latest.label)
+        $latestParts = @($latestProvider, ("R{0} {1}" -f $Snapshot.latest.round, $Snapshot.latest.label))
+        $latestTarget = Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId ([string](Get-DuoForgeObjectValue -Object $Snapshot.latest -Name 'targetDocumentId')) -Mode ([string]$Snapshot.mode)
+        if (-not [string]::IsNullOrWhiteSpace($latestTarget)) { $latestParts += $latestTarget }
+        & $addLine ("최근 확정  ✓ {0}" -f ($latestParts -join ' · '))
         foreach ($summaryLine in @(Split-DuoForgeProgressTextInternal -Text ([string]$Snapshot.latest.summary) -Width ([Math]::Max(12, $lineWidth - 2)) -MaximumLines $summaryBudget)) {
             & $addLine ("  $summaryLine")
         }
@@ -569,7 +623,13 @@ function Write-DuoForgeProgressLogEventInternal {
     if ($type -eq 'PROVIDER_TICK') { return }
     $snapshot = Get-DuoForgeProgressSnapshotInternal -RunDirectory ([string]$View.runDirectory) -LastEvent $Event
     $step = @($snapshot.steps | Where-Object { [string]$_.stepKey -eq $stepKey } | Select-Object -First 1)
-    $label = if ($step.Count -gt 0) { "R$([int]$step[0].round) $([string]$step[0].provider) $(Get-DuoForgeProgressStageLabelInternal -Stage ([string]$step[0].stage))" } else { $stepKey }
+    $label = if ($step.Count -gt 0) {
+        $stepParts = @("R$([int]$step[0].round)", [string]$step[0].provider, (Get-DuoForgeProgressStageLabelInternal -Stage ([string]$step[0].stage)))
+        $stepTarget = Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId ([string](Get-DuoForgeObjectValue -Object $step[0] -Name 'targetDocumentId')) -Mode ([string]$snapshot.mode)
+        if (-not [string]::IsNullOrWhiteSpace($stepTarget)) { $stepParts += $stepTarget }
+        $stepParts -join ' '
+    }
+    else { $stepKey }
     switch ($type) {
         'STAGE_STARTED' { Write-Host ("● {0} 시작" -f $label) -ForegroundColor Yellow }
         'STAGE_RESULT_RECEIVED' { Write-Host ("● {0} 응답 수신 · 검증 중" -f $label) -ForegroundColor DarkYellow }
@@ -577,8 +637,11 @@ function Write-DuoForgeProgressLogEventInternal {
             Write-Host ("✓ {0} 확정" -f $label) -ForegroundColor Green
             if ($null -ne $snapshot.latest) { Write-Host ("  {0}" -f (Limit-DuoForgeProgressTextInternal -Text ([string]$snapshot.latest.summary) -Width 120)) }
         }
-        'STAGE_RETRY_SCHEDULED' { Write-Host ("↻ {0} 형식 복구 재시도 대기" -f $label) -ForegroundColor Yellow }
-        'STAGE_FAILED' { Write-Host ("! {0} 실패 · 재개 가능 상태로 보존" -f $label) -ForegroundColor Red }
+        'STAGE_RETRY_SCHEDULED' {
+            $retryLabel = Get-DuoForgeProgressRetryLabelInternal -RetryMode ([string](Get-DuoForgeObjectValue -Object $data -Name 'retryMode'))
+            Write-Host ("↻ {0} {1}" -f $label, $retryLabel) -ForegroundColor Yellow
+        }
+        'STAGE_FAILED' { Write-Host ("! {0} 실패 · {1} 상태로 보존" -f $label, $snapshot.statusLabel) -ForegroundColor Red }
         'STAGE_INTERRUPTED_RECOVERED' { Write-Host ("↻ 이전에 중단된 단계를 재개 대상으로 복구: {0}" -f $label) -ForegroundColor Yellow }
     }
 }
@@ -596,7 +659,7 @@ function Invoke-DuoForgeProgressObserverInternal {
     $event = [ordered]@{
         at = Get-DuoForgeUtcNow
         type = $Type
-        runDirectory = $RunDirectory
+        runId = Split-Path -Leaf ([System.IO.Path]::GetFullPath($RunDirectory))
         data = ConvertTo-DuoForgeHashtable -InputObject $Data
     }
     try { $null = & $Observer $event }
