@@ -664,6 +664,8 @@ try {
         $missingGraphProgress = & $module { param($directory) Get-DuoForgeProgressSnapshotInternal -RunDirectory $directory } $run.runDirectory
         Assert-True ('owner-response' -in @($missingGraphProgress.steps.stage))
         Assert-False ('document-review' -in @($missingGraphProgress.steps.stage))
+        Assert-Equal @($missingGraphProgress.recentCommitted).Count 0
+        Assert-True ($null -eq $missingGraphProgress.latest)
         Assert-Equal $missingGraphBudget.providers.codex.plannedRemaining 6
         Assert-Equal $missingGraphBudget.providers.claude.plannedRemaining 6
 
@@ -687,6 +689,10 @@ try {
         & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $stepsPath $graph
         $state.lastCompletedStage = [string]$precommitted[-1].stepKey
         & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $statePath $state
+        $precommittedProgress = & $module { param($directory) Get-DuoForgeProgressSnapshotInternal -RunDirectory $directory } $run.runDirectory
+        Assert-Equal @($precommittedProgress.recentCommitted).Count 2
+        Assert-Equal (@($precommittedProgress.recentCommitted.stepKey) -join ',') (@($precommitted.stepKey) -join ',')
+        Assert-Equal $precommittedProgress.latest.stepKey $precommitted[-1].stepKey
         Assert-True (& $module { param($directory) Assert-DuoForgeRunStorageContractInternal -RunDirectory $directory } $run.runDirectory)
         $state.workflowVersion = 'workflow-v2'
         & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $statePath $state
@@ -790,6 +796,8 @@ try {
         Assert-NotContainsText $prompt.text '"targetDocumentId":'
         $progress = & $module { param($directory) Get-DuoForgeProgressSnapshotInternal -RunDirectory $directory } $runDirectory
         Assert-Equal $progress.committedSteps 1
+        Assert-Equal @($progress.recentCommitted).Count 1
+        Assert-Equal $progress.latest.stepKey $progress.recentCommitted[0].stepKey
 
         $calledSteps = [System.Collections.Generic.List[string]]::new()
         $result = & $module {
@@ -1743,7 +1751,38 @@ try {
             $partial.latest.issueCounts = [ordered]@{ critical = 1; major = 2; minor = 3 }
             $partial.latest.responseCounts = [ordered]@{ ACCEPTED = 4; PARTIALLY_ACCEPTED = 5; REJECTED = 6; DEFERRED = 0; NEEDS_EVIDENCE = 0; ASK_USER = 0 }
             $partial.latest.adoptionCounts = [ordered]@{ ACCEPTED = 7; PARTIALLY_ACCEPTED = 8; REJECTED = 0; DEFERRED = 0 }
+            $partial.recentCommitted = @($partial.latest)
+            $actionSummary = Get-DuoForgeProgressActionSummaryInternal -Record $partial.latest
+            $partial.latest.summary = '검증 요약'
+            $partial.latest.issueCounts = [ordered]@{ critical = 0; major = 2; minor = 0 }
+            $partial.latest.responseCounts = [ordered]@{ ACCEPTED = 0; PARTIALLY_ACCEPTED = 0; REJECTED = 0; DEFERRED = 0; NEEDS_EVIDENCE = 1; ASK_USER = 0 }
+            $partial.latest.adoptionCounts = [ordered]@{ ACCEPTED = 0; PARTIALLY_ACCEPTED = 0; REJECTED = 1; DEFERRED = 0 }
+            $sparseActionSummary = Get-DuoForgeProgressActionSummaryInternal -Record $partial.latest
             $active = @(New-DuoForgeProgressFrameInternal -Snapshot $partial -Width 72 -Height 20 -ViewState ([ordered]@{ providerElapsedSeconds = 4 }))
+            $targetSnapshot = ConvertTo-DuoForgeHashtable -InputObject $snapshot
+            $targetSnapshot.mode = 'dual-document'
+            $targetSnapshot.recentCommitted[0].targetDocumentId = 'A'
+            $targetSnapshot.recentCommitted[1].targetDocumentId = 'B'
+            $targetSnapshot.latest = $targetSnapshot.recentCommitted[-1]
+            $targetFrame = @(New-DuoForgeProgressFrameInternal -Snapshot $targetSnapshot -Width 100 -Height 30)
+            $bothTargetSnapshot = ConvertTo-DuoForgeHashtable -InputObject $targetSnapshot
+            $bothTargetSnapshot.recentCommitted = @($bothTargetSnapshot.recentCommitted[0])
+            $bothTargetSnapshot.recentCommitted[0].targetDocumentId = ''
+            $bothTargetSnapshot.recentCommitted[0].sourceDocumentIds = @('A', 'B')
+            $bothTargetSnapshot.latest = $bothTargetSnapshot.recentCommitted[0]
+            $bothTargetFrame = @(New-DuoForgeProgressFrameInternal -Snapshot $bothTargetSnapshot -Width 100 -Height 30)
+            $mergeSnapshot = ConvertTo-DuoForgeHashtable -InputObject $snapshot
+            $mergeSnapshot.mode = 'document-merge'
+            $mergeSnapshot.recentCommitted = @($mergeSnapshot.recentCommitted[-1])
+            $mergeSnapshot.latest = $mergeSnapshot.recentCommitted[0]
+            $mergeFrame = @(New-DuoForgeProgressFrameInternal -Snapshot $mergeSnapshot -Width 100 -Height 30)
+            $unsafeSnapshot = ConvertTo-DuoForgeHashtable -InputObject $partial
+            $unsafeSnapshot.recentCommitted[0].summary = "`e[31m긴 한글 😀 요약`e[0m`n다음 줄"
+            $unsafeSnapshot.recentCommitted[0].issueCounts = [ordered]@{ critical = 0; major = 0; minor = 0 }
+            $unsafeSnapshot.recentCommitted[0].responseCounts = [ordered]@{ ACCEPTED = 0; PARTIALLY_ACCEPTED = 0; REJECTED = 0; DEFERRED = 0; NEEDS_EVIDENCE = 0; ASK_USER = 0 }
+            $unsafeSnapshot.recentCommitted[0].adoptionCounts = [ordered]@{ ACCEPTED = 0; PARTIALLY_ACCEPTED = 0; REJECTED = 0; DEFERRED = 0 }
+            $unsafeSnapshot.latest = $unsafeSnapshot.recentCommitted[0]
+            $unsafeFrame = @(New-DuoForgeProgressFrameInternal -Snapshot $unsafeSnapshot -Width 72 -Height 20)
             $waiting = ConvertTo-DuoForgeHashtable -InputObject $partial
             $waiting.lastEvent = [ordered]@{ type = 'STAGE_STARTED'; data = [ordered]@{ stepKey = $partial.steps[1].stepKey } }
             $waitingFrame = @(New-DuoForgeProgressFrameInternal -Snapshot $waiting -Width 100 -Height 30 -ViewState ([ordered]@{ providerElapsedSeconds = 4 }))
@@ -1773,11 +1812,22 @@ try {
                 $event = [ordered]@{ type = 'STAGE_STARTED'; data = [ordered]@{ stepKey = $snapshot.steps[0].stepKey } }
                 Write-DuoForgeProgressLogEventInternal -View $view -Event $event
             } 6>&1 | Out-String)
+            $committedLogText = (& {
+                $view = [ordered]@{ runDirectory = $directory }
+                $event = [ordered]@{ type = 'STAGE_COMMITTED'; data = [ordered]@{ stepKey = $snapshot.latest.stepKey } }
+                Write-DuoForgeProgressLogEventInternal -View $view -Event $event
+                Write-DuoForgeProgressLogEventInternal -View $view -Event ([ordered]@{ type = 'PROVIDER_TICK'; data = [ordered]@{ stepKey = $snapshot.latest.stepKey; elapsedSeconds = 1 } })
+                Write-DuoForgeProgressLogEventInternal -View $view -Event ([ordered]@{ type = 'PROVIDER_TICK'; data = [ordered]@{ stepKey = $snapshot.latest.stepKey; elapsedSeconds = 2 } })
+            } 6>&1 | Out-String)
             $emojiSafe = ConvertTo-DuoForgeProgressTextInternal -Text (('a' * 1199) + '😀후속')
             [ordered]@{
                 wide = $wide
                 narrow = $narrow
                 active = $active
+                target = $targetFrame
+                bothTarget = $bothTargetFrame
+                merge = $mergeFrame
+                unsafe = $unsafeFrame
                 waiting = $waitingFrame
                 retry = $retryFrame
                 standardRetry = $standardRetryFrame
@@ -1785,7 +1835,16 @@ try {
                 quota = $quotaFrame
                 blocked = $blockedFrame
                 logText = $logText
+                committedLogText = $committedLogText
+                committedSummary = [string]$snapshot.latest.summary
+                previousCommittedSummaries = @($snapshot.recentCommitted | Select-Object -First 2 | ForEach-Object { [string]$_.summary })
+                actionSummary = $actionSummary
+                sparseActionSummary = $sparseActionSummary
                 narrowWidths = @($narrow | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) })
+                wideWidths = @($wide | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) })
+                unsafeWidths = @($unsafeFrame | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) })
+                narrowFeedHeaders = @($narrow | Where-Object { [string]$_ -like '최근 확정  ✓*' }).Count
+                narrowBarriers = @($narrow | Where-Object { [string]$_ -match '^[✓●↻◐○] (준비|R[0-9]+)' }).Count
                 koreanWidth = Get-DuoForgeProgressTextWidthInternal -Text '한글A'
                 safe = ConvertTo-DuoForgeProgressTextInternal -Text ("`e[31m위험`e[0m`n다음")
                 emojiSafe = $emojiSafe
@@ -1795,16 +1854,33 @@ try {
         Assert-ContainsText ($rendered.wide -join "`n") '장벽 레일'
         Assert-ContainsText ($rendered.wide -join "`n") '최근 확정'
         Assert-ContainsText ($rendered.wide -join "`n") '최종 검증'
+        Assert-ContainsText ($rendered.wide -join "`n") '공동 문서'
         Assert-True ($rendered.narrow.Count -le 19)
         Assert-True (@($rendered.narrowWidths | Where-Object { [int]$_ -gt 71 }).Count -eq 0)
+        Assert-True ($rendered.wide.Count -le 29)
+        Assert-True (@($rendered.wideWidths | Where-Object { [int]$_ -gt 99 }).Count -eq 0)
+        Assert-True (@($rendered.unsafeWidths | Where-Object { [int]$_ -gt 71 }).Count -eq 0)
+        Assert-Equal $rendered.narrowFeedHeaders 3
+        Assert-True ($rendered.narrowBarriers -ge 3)
+        Assert-ContainsText ($rendered.narrow -join "`n") '현재  완료'
         Assert-ContainsText ($rendered.narrow -join "`n") '실행 종료 · 완료'
         Assert-ContainsText ($rendered.narrow -join "`n") '쟁점 전체'
         Assert-ContainsText ($rendered.narrow -join "`n") 'Enter 키를 누르면'
         Assert-ContainsText ($rendered.active -join "`n") '응답 수신 · 구조 검증 중'
         Assert-ContainsText ($rendered.active -join "`n") '현재  ● Claude · 독립 초안 · 문서 A'
         Assert-ContainsText ($rendered.active -join "`n") '최근 확정  ✓ Codex · R2 최종 검증 · 문서 B'
-        Assert-ContainsText ($rendered.active -join "`n") '검증된 대상 문서 요약'
-        Assert-ContainsText ($rendered.active -join "`n") '쟁점 C 1 · M 2 · m 3 | 응답 수용 4 · 부분 5 · 거부 6 | 채택 15'
+        Assert-ContainsText ($rendered.active -join "`n") '검증 요약'
+        Assert-ContainsText ($rendered.active -join "`n") '새 쟁점 주요 2'
+        Assert-ContainsText ($rendered.active -join "`n") '검토 응답 근거 필요 1'
+        Assert-ContainsText ($rendered.active -join "`n") '실제 편집 미반영 1'
+        Assert-ContainsText ($rendered.target -join "`n") '최근 확정  ✓ Claude · R2 검토 응답 · 문서 A'
+        Assert-ContainsText ($rendered.target -join "`n") '최근 확정  ✓ Claude · R2 공동 문서 합성 · 문서 B'
+        Assert-ContainsText ($rendered.bothTarget -join "`n") '문서 A/B'
+        Assert-ContainsText ($rendered.merge -join "`n") '합의 문서 C'
+        Assert-ContainsText ($rendered.unsafe -join "`n") '긴 한글 😀 요약 다음 줄'
+        Assert-False ([string]($rendered.unsafe -join "`n") -like "*`e*")
+        Assert-Equal $rendered.actionSummary '새 쟁점 치명적 1 · 주요 2 · 경미 3 | 검토 응답 수용 4 · 부분 수용 5 · 거부 6 | 실제 편집 반영 7 · 부분 반영 8'
+        Assert-Equal $rendered.sparseActionSummary '새 쟁점 주요 2 | 검토 응답 근거 필요 1 | 실제 편집 미반영 1'
         Assert-ContainsText ($rendered.waiting -join "`n") '현재  ● Claude · 독립 초안 · 문서 A · 응답 대기 00:04'
         Assert-ContainsText ($rendered.waiting -join "`n") 'Codex ✓  Claude ●'
         Assert-ContainsText ($rendered.active -join "`n") '쟁점 원장  전체 단계 확정 후 집계'
@@ -1815,6 +1891,11 @@ try {
         Assert-ContainsText ($rendered.blocked -join "`n") '현재  ! Claude · 대상 문서 최종 검증 · 문서 B · 사전 검사 차단'
         Assert-ContainsText $rendered.logText '공동 문서 시작'
         Assert-False ([string]$rendered.logText -like "*`e*")
+        Assert-Equal ([regex]::Matches($rendered.committedLogText, [regex]::Escape($rendered.committedSummary)).Count) 1
+        Assert-Equal @($rendered.committedLogText -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count 2
+        Assert-Equal ([regex]::Matches($rendered.committedLogText, '확정').Count) 1
+        foreach ($previousSummary in @($rendered.previousCommittedSummaries)) { Assert-NotContainsText $rendered.committedLogText $previousSummary }
+        Assert-False ([string]$rendered.committedLogText -like "*`e*")
         Assert-Equal $rendered.koreanWidth 5
         Assert-Equal $rendered.safe '위험 다음'
         Assert-False ([string]$rendered.safe -like "*`e*")
@@ -1833,6 +1914,118 @@ try {
         } $run.runDirectory
         Assert-NotContainsText $tampered.latestSummary '변조된 확정 요약'
         Assert-True ($tampered.latestStepKey -ne $tampered.finalStepKey)
+    }
+
+    Test-Case '확정 피드는 단계 그래프 순서의 유효한 최근 3건을 선택하고 손상 항목을 이전 결과로 채운다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'progress-feed\input\brief.md')
+        $workspace = Join-Path $tempRoot 'progress-feed\results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $engineResult = & $module {
+            param($directory)
+            $callback = {
+                param($step)
+                $fake = New-DuoForgeFakeStageResult -Step $step
+                $fake.summary = "확정 요약 $($step.stepKey)"
+                $fake
+            }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory
+        Assert-Equal $engineResult.status 'COMPLETED'
+
+        $feed = & $module {
+            param($directory)
+            $graphPath = Join-Path $directory 'steps.json'
+            $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $graphPath)
+            $committedSteps = @($graph.steps | Where-Object { [string]$_.status -eq 'COMMITTED' })
+            [System.IO.File]::SetLastWriteTimeUtc([string]$committedSteps[0].artifactPath, [datetime]'2099-01-01T00:00:00Z')
+            [System.IO.File]::SetLastWriteTimeUtc([string]$committedSteps[-1].artifactPath, [datetime]'2000-01-01T00:00:00Z')
+
+            $initial = Get-DuoForgeProgressSnapshotInternal -RunDirectory $directory
+            $expectedInitial = @($committedSteps | Select-Object -Last 3 | ForEach-Object { [string]$_.stepKey })
+            $frameCounts = [ordered]@{}
+            for ($count = 0; $count -le 3; $count++) {
+                $copy = ConvertTo-DuoForgeHashtable -InputObject $initial
+                $copy.recentCommitted = if ($count -eq 0) { @() } else { @($initial.recentCommitted | Select-Object -First $count) }
+                $copy.latest = if ($count -eq 0) { $null } else { $copy.recentCommitted[-1] }
+                $frame = @(New-DuoForgeProgressFrameInternal -Snapshot $copy -Width 72 -Height 20)
+                $frameCounts[[string]$count] = [ordered]@{
+                    feedHeaders = @($frame | Where-Object { [string]$_ -like '최근 확정  ✓*' }).Count
+                    lines = $frame.Count
+                    widths = @($frame | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) })
+                    barriers = @($frame | Where-Object { [string]$_ -match '^[✓●↻◐○] (준비|R[0-9]+)' }).Count
+                    text = $frame -join "`n"
+                }
+            }
+
+            $schemaStep = $committedSteps[-2]
+            $schemaArtifact = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path ([string]$schemaStep.artifactPath))
+            $schemaArtifact.result.stage = 'cross-review'
+            Write-DuoForgeJsonAtomic -Path ([string]$schemaStep.artifactPath) -Value $schemaArtifact
+            $schemaStep.artifactHash = Get-DuoForgeSha256 -Path ([string]$schemaStep.artifactPath)
+
+            $hashStep = $committedSteps[-1]
+            $hashArtifact = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path ([string]$hashStep.artifactPath))
+            $hashArtifact.result.summary = '변조된 최신 요약'
+            Write-DuoForgeJsonAtomic -Path ([string]$hashStep.artifactPath) -Value $hashArtifact
+            Write-DuoForgeJsonAtomic -Path $graphPath -Value $graph
+
+            $afterTamper = Get-DuoForgeProgressSnapshotInternal -RunDirectory $directory
+            $invalidKeys = @([string]$schemaStep.stepKey, [string]$hashStep.stepKey)
+            $expectedAfterTamper = @($committedSteps | Where-Object { [string]$_.stepKey -notin $invalidKeys } | Select-Object -Last 3 | ForEach-Object { [string]$_.stepKey })
+            [ordered]@{
+                initialKeys = @($initial.recentCommitted | ForEach-Object { [string]$_.stepKey })
+                expectedInitial = $expectedInitial
+                initialLatest = [string]$initial.latest.stepKey
+                afterTamperKeys = @($afterTamper.recentCommitted | ForEach-Object { [string]$_.stepKey })
+                expectedAfterTamper = $expectedAfterTamper
+                afterTamperLatest = [string]$afterTamper.latest.stepKey
+                invalidKeys = $invalidKeys
+                frameCounts = $frameCounts
+            }
+        } $run.runDirectory
+
+        Assert-Equal ($feed.initialKeys -join ',') ($feed.expectedInitial -join ',')
+        Assert-Equal $feed.initialLatest $feed.initialKeys[-1]
+        Assert-Equal ($feed.afterTamperKeys -join ',') ($feed.expectedAfterTamper -join ',')
+        Assert-Equal $feed.afterTamperLatest $feed.afterTamperKeys[-1]
+        foreach ($invalidKey in @($feed.invalidKeys)) { Assert-False ($invalidKey -in @($feed.afterTamperKeys)) }
+        foreach ($count in 0..3) { Assert-Equal $feed.frameCounts[[string]$count].feedHeaders $count }
+        Assert-ContainsText $feed.frameCounts['0'].text '아직 커밋된 토론 단계가 없습니다.'
+        Assert-True ($feed.frameCounts['3'].lines -le 19)
+        Assert-True (@($feed.frameCounts['3'].widths | Where-Object { [int]$_ -gt 71 }).Count -eq 0)
+        Assert-True ($feed.frameCounts['3'].barriers -ge 3)
+        $feed3Headers = @($feed.frameCounts['3'].text -split "`n" | Where-Object { $_ -like '최근 확정  ✓*' })
+        Assert-ContainsText ([string]$feed3Headers[0]) '검토 응답'
+        Assert-ContainsText ([string]$feed3Headers[1]) '공동 문서 합성'
+        Assert-ContainsText ([string]$feed3Headers[2]) '최종 검증'
+        Assert-ContainsText $feed.frameCounts['3'].text '현재  완료'
+        Assert-ContainsText $feed.frameCounts['3'].text '쟁점 전체'
+        Assert-ContainsText $feed.frameCounts['3'].text '확정된 구조화 결과만 표시합니다'
+    }
+
+    Test-Case '자연어 행동 집계는 새 쟁점과 검토 응답 및 실제 편집을 분리하고 0건을 생략한다' {
+        $summaries = & $module {
+            $all = [ordered]@{
+                issueCounts = [ordered]@{ critical = 1; major = 2; minor = 3 }
+                responseCounts = [ordered]@{ ACCEPTED = 4; PARTIALLY_ACCEPTED = 5; REJECTED = 6; DEFERRED = 7; NEEDS_EVIDENCE = 8; ASK_USER = 9 }
+                adoptionCounts = [ordered]@{ ACCEPTED = 10; PARTIALLY_ACCEPTED = 11; REJECTED = 12; DEFERRED = 13 }
+            }
+            $zero = [ordered]@{
+                issueCounts = [ordered]@{ critical = 0; major = 0; minor = 0 }
+                responseCounts = [ordered]@{ ACCEPTED = 0; PARTIALLY_ACCEPTED = 0; REJECTED = 0; DEFERRED = 0; NEEDS_EVIDENCE = 0; ASK_USER = 0 }
+                adoptionCounts = [ordered]@{ ACCEPTED = 0; PARTIALLY_ACCEPTED = 0; REJECTED = 0; DEFERRED = 0 }
+            }
+            [ordered]@{
+                all = Get-DuoForgeProgressActionSummaryInternal -Record $all
+                zero = Get-DuoForgeProgressActionSummaryInternal -Record $zero
+            }
+        }
+        Assert-Equal $summaries.all '새 쟁점 치명적 1 · 주요 2 · 경미 3 | 검토 응답 수용 4 · 부분 수용 5 · 거부 6 · 보류 7 · 근거 필요 8 · 사용자 결정 9 | 실제 편집 반영 10 · 부분 반영 11 · 미반영 12 · 보류 13'
+        Assert-Equal $summaries.zero ''
+        Assert-NotContainsText $summaries.all 'C/M/m'
+        Assert-NotContainsText $summaries.all '채택'
     }
 
     Test-Case '진행 이벤트는 검증과 저장 뒤에만 단계 확정을 공개하고 원문을 싣지 않는다' {
@@ -3989,10 +4182,19 @@ Setext 결론
                 param($directory)
                 $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $directory 'steps.json'))
                 $step = @($graph.steps | Where-Object { [string]$_.stage -eq 'context-batch-analysis' } | Select-Object -First 1)[0]
-                Get-DuoForgeProgressArtifactRecordInternal -Step $step -WorkflowVersion workflow-v2
+                $record = Get-DuoForgeProgressArtifactRecordInternal -Step $step -WorkflowVersion workflow-v2
+                $snapshot = Get-DuoForgeProgressSnapshotInternal -RunDirectory $directory
+                $snapshot.recentCommitted = @($record)
+                $snapshot.latest = $record
+                [ordered]@{
+                    record = $record
+                    frame = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 100 -Height 30)
+                }
             } $run.runDirectory
-            Assert-NotContainsText ([string]$contextProgress.summary) 'RAW-CONTEXT-PROGRESS-MUST-NOT-RENDER'
-            Assert-ContainsText ([string]$contextProgress.summary) '문맥 배치 분석 결과'
+            Assert-NotContainsText ([string]$contextProgress.record.summary) 'RAW-CONTEXT-PROGRESS-MUST-NOT-RENDER'
+            Assert-ContainsText ([string]$contextProgress.record.summary) '문맥 배치 분석 결과'
+            Assert-NotContainsText ($contextProgress.frame -join "`n") 'RAW-CONTEXT-PROGRESS-MUST-NOT-RENDER'
+            Assert-ContainsText ($contextProgress.frame -join "`n") '문맥 배치 분석 결과'
             foreach ($promptKey in @($trace.prompts.Keys | Where-Object { $_ -notlike 'context-*' })) {
                 Assert-NotContainsText $trace.prompts[$promptKey] 'RAW-CONTEXT-A-'
                 Assert-NotContainsText $trace.prompts[$promptKey] 'RAW-CONTEXT-B-'

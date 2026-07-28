@@ -189,6 +189,28 @@ function Get-DuoForgeProgressTargetLabelInternal {
     }
 }
 
+function Get-DuoForgeProgressRecordTargetLabelInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Record,
+        [AllowNull()][AllowEmptyString()][string]$Mode
+    )
+
+    $targetLabel = Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId ([string](Get-DuoForgeObjectValue -Object $Record -Name 'targetDocumentId')) -Mode $Mode
+    if (-not [string]::IsNullOrWhiteSpace($targetLabel)) { return $targetLabel }
+    if ($Mode -ne 'dual-document') { return '' }
+
+    $documentIds = @(
+        @(Get-DuoForgeObjectValue -Object $Record -Name 'sourceDocumentIds' -Default @()) |
+            ForEach-Object { [string]$_ } |
+            Where-Object { $_ -in @('A', 'B') } |
+            Select-Object -Unique
+    )
+    if ($documentIds.Count -eq 2 -and 'A' -in $documentIds -and 'B' -in $documentIds) { return '문서 A/B' }
+    if ($documentIds.Count -eq 1) { return Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId $documentIds[0] -Mode $Mode }
+    return ''
+}
+
 function Get-DuoForgeProgressStateLabelInternal {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Status)
@@ -331,6 +353,7 @@ function Get-DuoForgeProgressArtifactRecordInternal {
         round = [int]$Step.round
         stage = [string]$Step.stage
         targetDocumentId = [string](Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId')
+        sourceDocumentIds = @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @())
         label = Get-DuoForgeProgressStageLabelInternal -Stage ([string]$Step.stage)
         summary = if ([string]$Step.stage -eq 'context-batch-analysis') { '문맥 배치 분석 결과가 검증·저장되었습니다.' } else { ConvertTo-DuoForgeProgressTextInternal -Text ([string](Get-DuoForgeObjectValue -Object $result -Name 'summary')) }
         issueCounts = $issueCounts
@@ -339,6 +362,54 @@ function Get-DuoForgeProgressArtifactRecordInternal {
         questionCount = @((Get-DuoForgeObjectValue -Object $result -Name 'openQuestions' -Default @())).Count
         attemptCount = [int]$Step.attemptCount
     }
+}
+
+function Get-DuoForgeProgressActionSummaryInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Record)
+
+    $groups = [System.Collections.Generic.List[string]]::new()
+    $issues = Get-DuoForgeObjectValue -Object $Record -Name 'issueCounts' -Default ([ordered]@{})
+    $issueParts = [System.Collections.Generic.List[string]]::new()
+    foreach ($item in @(
+        [ordered]@{ key = 'critical'; label = '치명적' },
+        [ordered]@{ key = 'major'; label = '주요' },
+        [ordered]@{ key = 'minor'; label = '경미' }
+    )) {
+        $count = [int](Get-DuoForgeObjectValue -Object $issues -Name ([string]$item.key) -Default 0)
+        if ($count -gt 0) { $issueParts.Add(('{0} {1}' -f $item.label, $count)) }
+    }
+    if ($issueParts.Count -gt 0) { $groups.Add('새 쟁점 ' + ($issueParts -join ' · ')) }
+
+    $responses = Get-DuoForgeObjectValue -Object $Record -Name 'responseCounts' -Default ([ordered]@{})
+    $responseParts = [System.Collections.Generic.List[string]]::new()
+    foreach ($item in @(
+        [ordered]@{ key = 'ACCEPTED'; label = '수용' },
+        [ordered]@{ key = 'PARTIALLY_ACCEPTED'; label = '부분 수용' },
+        [ordered]@{ key = 'REJECTED'; label = '거부' },
+        [ordered]@{ key = 'DEFERRED'; label = '보류' },
+        [ordered]@{ key = 'NEEDS_EVIDENCE'; label = '근거 필요' },
+        [ordered]@{ key = 'ASK_USER'; label = '사용자 결정' }
+    )) {
+        $count = [int](Get-DuoForgeObjectValue -Object $responses -Name ([string]$item.key) -Default 0)
+        if ($count -gt 0) { $responseParts.Add(('{0} {1}' -f $item.label, $count)) }
+    }
+    if ($responseParts.Count -gt 0) { $groups.Add('검토 응답 ' + ($responseParts -join ' · ')) }
+
+    $adoptions = Get-DuoForgeObjectValue -Object $Record -Name 'adoptionCounts' -Default ([ordered]@{})
+    $adoptionParts = [System.Collections.Generic.List[string]]::new()
+    foreach ($item in @(
+        [ordered]@{ key = 'ACCEPTED'; label = '반영' },
+        [ordered]@{ key = 'PARTIALLY_ACCEPTED'; label = '부분 반영' },
+        [ordered]@{ key = 'REJECTED'; label = '미반영' },
+        [ordered]@{ key = 'DEFERRED'; label = '보류' }
+    )) {
+        $count = [int](Get-DuoForgeObjectValue -Object $adoptions -Name ([string]$item.key) -Default 0)
+        if ($count -gt 0) { $adoptionParts.Add(('{0} {1}' -f $item.label, $count)) }
+    }
+    if ($adoptionParts.Count -gt 0) { $groups.Add('실제 편집 ' + ($adoptionParts -join ' · ')) }
+
+    return $groups -join ' | '
 }
 
 function Get-DuoForgeProgressSnapshotInternal {
@@ -369,12 +440,8 @@ function Get-DuoForgeProgressSnapshotInternal {
         $record = Get-DuoForgeProgressArtifactRecordInternal -Step $step -WorkflowVersion $workflowVersion
         if ($null -ne $record) { $artifactRecords.Add($record) }
     }
-    $lastStepKey = if ($null -ne $LastEvent -and $LastEvent.Contains('data')) { [string](Get-DuoForgeObjectValue -Object $LastEvent.data -Name 'stepKey') } else { '' }
-    if ([string]::IsNullOrWhiteSpace($lastStepKey) -or @($artifactRecords | Where-Object { $_.stepKey -eq $lastStepKey }).Count -eq 0) {
-        $lastStepKey = [string]$state.lastCompletedStage
-    }
-    $latest = @($artifactRecords | Where-Object { $_.stepKey -eq $lastStepKey } | Select-Object -Last 1)
-    if ($latest.Count -eq 0) { $latest = @($artifactRecords | Select-Object -Last 1) }
+    $recentCommitted = @($artifactRecords | Select-Object -Last 3)
+    $latest = @($recentCommitted | Select-Object -Last 1)
 
     $activeSteps = @($graph.steps | Where-Object { [string]$_.status -eq 'STARTED' })
     $committed = @($graph.steps | Where-Object { [string]$_.status -eq 'COMMITTED' }).Count
@@ -394,6 +461,7 @@ function Get-DuoForgeProgressSnapshotInternal {
         activeSteps = $activeSteps
         committedSteps = $committed
         totalSteps = @($graph.steps).Count
+        recentCommitted = $recentCommitted
         latest = if ($latest.Count -gt 0) { $latest[0] } else { $null }
         issueCount = @($ledger.issues).Count
         openIssueCount = @($ledger.issues | Where-Object { [string]$_.resolutionStatus -notin @('RESOLVED', 'SUPERSEDED') }).Count
@@ -436,6 +504,15 @@ function New-DuoForgeProgressFrameInternal {
         $lines.Add((Limit-DuoForgeProgressTextInternal -Text $Text -Width $lineWidth))
     }
     $divider = '─' * [Math]::Min($lineWidth, 120)
+    $recentCommitted = @(
+        if ($Snapshot.Contains('recentCommitted')) {
+            $Snapshot.recentCommitted | Select-Object -Last 3
+        }
+        elseif ($null -ne $Snapshot.latest) {
+            $Snapshot.latest
+        }
+    )
+    $finalMessage = if ($null -ne $ViewState -and $ViewState.Contains('finalMessage')) { [string]$ViewState.finalMessage } else { '' }
     & $addLine 'DUOFORGE  토론 진행판'
     & $addLine ("{0} · {1} · {2}" -f $Snapshot.name, $Snapshot.modeLabel, $Snapshot.runId)
 
@@ -444,11 +521,10 @@ function New-DuoForgeProgressFrameInternal {
     $filled = [Math]::Min($barWidth, [Math]::Floor($barWidth * [int]$Snapshot.committedSteps / $total))
     $bar = ('█' * $filled) + ('░' * ($barWidth - $filled))
     & $addLine ("진행  {0}  {1}/{2} · {3}" -f $bar, $Snapshot.committedSteps, $Snapshot.totalSteps, $Snapshot.statusLabel)
-    & $addLine $divider
-    & $addLine '장벽 레일'
+    & $addLine ('장벽 레일 ' + ('─' * [Math]::Max(1, $lineWidth - (Get-DuoForgeProgressTextWidthInternal -Text '장벽 레일 '))))
 
-    $summaryBudget = if ($Height -ge 26) { 4 } else { 2 }
-    $fixedLines = 13 + $summaryBudget
+    $feedLineCount = if ($recentCommitted.Count -eq 0) { 1 } else { $recentCommitted.Count * 2 }
+    $fixedLines = 9 + $feedLineCount + $(if ([string]::IsNullOrWhiteSpace($finalMessage)) { 0 } else { 1 })
     $barrierBudget = [Math]::Max(3, [Math]::Min(8, ($Height - 1) - $fixedLines))
     $visibleBarriers = @(Get-DuoForgeVisibleProgressBarriersInternal -Barriers @($Snapshot.barriers) -Maximum $barrierBudget)
     foreach ($barrier in $visibleBarriers) {
@@ -496,26 +572,45 @@ function New-DuoForgeProgressFrameInternal {
         & $addLine ("현재  {0}" -f $Snapshot.statusLabel)
     }
 
-    if ($null -ne $Snapshot.latest) {
-        $latestProvider = if ([string]$Snapshot.latest.provider -eq 'codex') { 'Codex' } else { 'Claude' }
-        $latestParts = @($latestProvider, ("R{0} {1}" -f $Snapshot.latest.round, $Snapshot.latest.label))
-        $latestTarget = Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId ([string](Get-DuoForgeObjectValue -Object $Snapshot.latest -Name 'targetDocumentId')) -Mode ([string]$Snapshot.mode)
-        if (-not [string]::IsNullOrWhiteSpace($latestTarget)) { $latestParts += $latestTarget }
-        & $addLine ("최근 확정  ✓ {0}" -f ($latestParts -join ' · '))
-        foreach ($summaryLine in @(Split-DuoForgeProgressTextInternal -Text ([string]$Snapshot.latest.summary) -Width ([Math]::Max(12, $lineWidth - 2)) -MaximumLines $summaryBudget)) {
-            & $addLine ("  $summaryLine")
+    if ($recentCommitted.Count -gt 0) {
+        foreach ($record in $recentCommitted) {
+            $providerLabel = if ([string]$record.provider -eq 'codex') { 'Codex' } else { 'Claude' }
+            $headerParts = @($providerLabel, ("R{0} {1}" -f $record.round, $record.label))
+            $targetLabel = Get-DuoForgeProgressRecordTargetLabelInternal -Record $record -Mode ([string]$Snapshot.mode)
+            if (-not [string]::IsNullOrWhiteSpace($targetLabel)) { $headerParts += $targetLabel }
+            & $addLine ("최근 확정  ✓ {0}" -f ($headerParts -join ' · '))
+
+            $summary = ConvertTo-DuoForgeProgressTextInternal -Text ([string]$record.summary)
+            $actionSummary = Get-DuoForgeProgressActionSummaryInternal -Record $record
+            $detailWidth = [Math]::Max(4, $lineWidth - 2)
+            if (-not [string]::IsNullOrWhiteSpace($summary) -and -not [string]::IsNullOrWhiteSpace($actionSummary)) {
+                $actionWidth = Get-DuoForgeProgressTextWidthInternal -Text $actionSummary
+                $summaryFullWidth = Get-DuoForgeProgressTextWidthInternal -Text $summary
+                $minimumSummaryWidth = [Math]::Min($summaryFullWidth, 4)
+                $visibleActionWidth = [Math]::Min($actionWidth, [Math]::Max(1, $detailWidth - $minimumSummaryWidth - 1))
+                $summaryWidth = [Math]::Max(1, $detailWidth - $visibleActionWidth - 1)
+                $visibleSummary = Limit-DuoForgeProgressTextInternal -Text $summary -Width $summaryWidth
+                $remainingActionWidth = [Math]::Max(1, $detailWidth - (Get-DuoForgeProgressTextWidthInternal -Text $visibleSummary) - 1)
+                $visibleAction = Limit-DuoForgeProgressTextInternal -Text $actionSummary -Width $remainingActionWidth
+                $detail = $visibleSummary + '—' + $visibleAction
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace($actionSummary)) {
+                $detail = Limit-DuoForgeProgressTextInternal -Text $actionSummary -Width $detailWidth
+            }
+            elseif (-not [string]::IsNullOrWhiteSpace($summary)) {
+                $detail = Limit-DuoForgeProgressTextInternal -Text $summary -Width $detailWidth
+            }
+            else {
+                $detail = '검증된 세부 요약이 없습니다.'
+            }
+            & $addLine ("  $detail")
         }
-        $issues = $Snapshot.latest.issueCounts
-        $responses = $Snapshot.latest.responseCounts
-        $adoptions = $Snapshot.latest.adoptionCounts
-        & $addLine ("  쟁점 C {0} · M {1} · m {2} | 응답 수용 {3} · 부분 {4} · 거부 {5} | 채택 {6}" -f $issues.critical, $issues.major, $issues.minor, $responses.ACCEPTED, $responses.PARTIALLY_ACCEPTED, $responses.REJECTED, ($adoptions.ACCEPTED + $adoptions.PARTIALLY_ACCEPTED))
     }
     else {
         & $addLine '최근 확정  아직 커밋된 토론 단계가 없습니다.'
     }
 
     & $addLine $divider
-    $finalMessage = if ($null -ne $ViewState -and $ViewState.Contains('finalMessage')) { [string]$ViewState.finalMessage } else { '' }
     if (-not [string]::IsNullOrWhiteSpace($finalMessage)) { & $addLine $finalMessage }
     if ([string]$Snapshot.status -eq 'RUNNING') {
         & $addLine '쟁점 원장  전체 단계 확정 후 집계'
