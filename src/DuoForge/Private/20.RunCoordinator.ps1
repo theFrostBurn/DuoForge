@@ -31,7 +31,8 @@ function Get-DuoForgeRemainingCallBudget {
         $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
         $contextPlanPath = Join-Path $RunDirectory 'inputs\context-plan.json'
         $contextBatchCount = if (Test-Path -LiteralPath $contextPlanPath -PathType Leaf) { @((Read-DuoForgeJson -Path $contextPlanPath).batches).Count } else { 0 }
-        $graph = New-DuoForgeStageGraph -Mode ([string]$manifest.mode) -MaxRounds ([int]$manifest.maxRounds) -FirstSynthesizer $firstSynthesizer -ContextBatchCount $contextBatchCount -WorkflowVersion $workflowVersion
+        $contextBatchDocumentIds = @(Get-DuoForgeContextBatchDocumentIdsInternal -RunDirectory $RunDirectory)
+        $graph = New-DuoForgeStageGraph -Mode ([string]$manifest.mode) -MaxRounds ([int]$manifest.maxRounds) -FirstSynthesizer $firstSynthesizer -ContextBatchCount $contextBatchCount -ContextBatchDocumentIds $contextBatchDocumentIds -WorkflowVersion $workflowVersion
     }
 
     $providers = [ordered]@{}
@@ -68,10 +69,10 @@ function Invoke-DuoForgeResumeLiveInternal {
     $directory = [string]$run.runDirectory
     $null = Invoke-WithDuoForgeRunLock -RunDirectory $directory -ScriptBlock { $true }
     $run = Get-DuoForgeRunInternal -RunId $RunId -ResultsRoot $ResultsRoot
-    $null = Assert-DuoForgeRunStorageContractInternal -RunDirectory $directory
     if ([string]$run.manifest.mode -eq 'dual-project-audit') {
-        throw (New-DuoForgeException -Code 'DF-MODE-3A-DISABLED' -Message '3A는 현재 Windows 격리 후보가 범위 밖 읽기와 자식 프로세스 차단에 실패하여 비활성화되어 있습니다.')
+        throw (New-DuoForgeException -Code 'DF-PREFLIGHT-3A-ISOLATION' -Message '모드 4는 현재 Windows 격리 후보가 범위 밖 읽기와 자식 프로세스 차단에 실패하여 비활성화되어 있습니다.')
     }
+    $null = Assert-DuoForgeRunStorageContractInternal -RunDirectory $directory
     $null = Assert-DuoForgeProviderSelectionsInternal -Selections (Get-DuoForgeObjectValue -Object $run.manifest -Name 'providerSelections')
     if ([string]$run.state.status -in @('COMPLETED', 'COMPLETED_PARTIAL')) {
         return [ordered]@{ status = [string]$run.state.status; invoked = 0 }

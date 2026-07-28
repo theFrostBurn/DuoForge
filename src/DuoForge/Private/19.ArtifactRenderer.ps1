@@ -182,7 +182,7 @@ function Merge-DuoForgeStageIssues {
             else {
                 $issue = New-DuoForgeIssueInternal `
                     -ExistingIssues @($issues) `
-                    -Round ([int]$stageRecord.round) `
+                    -Round ([Math]::Max(1, [int]$stageRecord.round)) `
                     -RaisedBy ([string]$stageRecord.provider) `
                     -Target $target `
                     -Category $category `

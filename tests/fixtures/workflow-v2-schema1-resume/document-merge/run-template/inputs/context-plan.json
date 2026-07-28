@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "enabled": false,
+  "totalFiles": 2,
+  "totalBytes": 112,
+  "targetBatchBytes": 288358,
+  "requiredBatchCount": 0,
+  "selectedBatchCount": 0,
+  "selectedBytes": 112,
+  "predictedFileCoveragePercent": 100.0,
+  "predictedByteCoveragePercent": 100.0,
+  "requiresPartialConsent": false,
+  "completionStatus": "COMPLETED",
+  "batches": [],
+  "actualFileCoveragePercent": 100.0,
+  "actualByteCoveragePercent": 100.0
+}

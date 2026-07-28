@@ -42,6 +42,7 @@ function New-DuoForgeStageGraph {
         [ValidateRange(2, 3)][int]$MaxRounds = 2,
         [ValidateSet('alternate', 'codex', 'claude')][string]$FirstSynthesizer = 'alternate',
         [ValidateRange(0, 100)][int]$ContextBatchCount = 0,
+        [AllowEmptyCollection()][string[]]$ContextBatchDocumentIds = @(),
         [ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion = 'workflow-v2'
     )
 
@@ -54,9 +55,22 @@ function New-DuoForgeStageGraph {
     if ($ContextBatchCount -gt 0) {
         for ($batch = 1; $batch -le $ContextBatchCount; $batch++) {
             $batchId = 'batch-{0:D3}' -f $batch
+            $hasSemanticBatchLineage = (
+                $ContextBatchDocumentIds.Count -ge $batch -and [string]$ContextBatchDocumentIds[$batch - 1] -in @('A', 'B')
+            )
+            $contextSourceDocumentIds = if ($Mode -eq 'shared-document') { @('brief') } elseif ($hasSemanticBatchLineage) { @([string]$ContextBatchDocumentIds[$batch - 1]) } else { @('A', 'B') }
             foreach ($provider in @('codex', 'claude')) {
                 $key = "context-$batchId-$provider-analysis"
-                $record = New-DuoForgeStageRecord -StepKey $key -Provider $provider -Round 0 -Stage 'context-batch-analysis' -WorkflowVersion $WorkflowVersion -SourceDocumentIds $(if ($Mode -eq 'shared-document') { @('brief') } else { @('A', 'B') })
+                $recordParameters = @{
+                    StepKey = $key
+                    Provider = $provider
+                    Round = 0
+                    Stage = 'context-batch-analysis'
+                    WorkflowVersion = $WorkflowVersion
+                    SourceDocumentIds = $contextSourceDocumentIds
+                }
+                if ($Mode -eq 'document-merge' -and $hasSemanticBatchLineage) { $recordParameters.TargetDocumentId = 'merged' }
+                $record = New-DuoForgeStageRecord @recordParameters
                 $record.contextBatchId = $batchId
                 $steps.Add($record)
                 $contextBarrier.Add($key)
@@ -164,6 +178,41 @@ function New-DuoForgeStageGraph {
     }
 }
 
+function Get-DuoForgeContextBatchDocumentIdsInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$RunDirectory)
+
+    $path = Join-Path $RunDirectory 'inputs\context-plan.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return @() }
+    $plan = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $path)
+    $values = [System.Collections.Generic.List[string]]::new()
+    foreach ($batch in @($plan.batches)) { $values.Add([string](Get-DuoForgeObjectValue -Object $batch -Name 'documentId' -Default '')) }
+    return @($values)
+}
+
+function Get-DuoForgeContextEvidenceContractForStepInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RunDirectory,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Step
+    )
+
+    if ([string]$Step.stage -ne 'context-batch-analysis') { return $null }
+    $path = Join-Path $RunDirectory 'inputs\context-plan.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw (New-DuoForgeException -Code 'DF-RUN-STORAGE-CONTRACT' -Message '문맥 배치 단계의 context-plan을 찾을 수 없습니다.') }
+    $plan = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $path)
+    if ([int](Get-DuoForgeObjectValue -Object $plan -Name 'schemaVersion' -Default 1) -ne 2) { return $null }
+    $batchId = [string](Get-DuoForgeObjectValue -Object $Step -Name 'contextBatchId' -Default '')
+    $batch = @($plan.batches | Where-Object { [string]$_.batchId -eq $batchId })
+    if ($batch.Count -ne 1) { throw (New-DuoForgeException -Code 'DF-RUN-STORAGE-CONTRACT' -Message "문맥 배치 단계의 계획 항목이 없거나 중복되었습니다: $batchId") }
+    $contract = Get-DuoForgeObjectValue -Object $batch[0] -Name 'evidenceContract'
+    if ($contract -isnot [System.Collections.IDictionary]) { throw (New-DuoForgeException -Code 'DF-RUN-STORAGE-CONTRACT' -Message "schema 2 문맥 배치의 CORE 근거 계약이 없습니다: $batchId") }
+    foreach ($name in @('sourceDocumentId', 'path', 'location', 'excerptHash')) {
+        if ([string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $contract -Name $name -Default ''))) { throw (New-DuoForgeException -Code 'DF-RUN-STORAGE-CONTRACT' -Message "schema 2 문맥 배치의 CORE 근거 계약이 불완전합니다: $batchId/$name") }
+    }
+    return ConvertTo-DuoForgeHashtable -InputObject $contract
+}
+
 function Initialize-DuoForgeStageGraph {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$RunDirectory)
@@ -177,7 +226,8 @@ function Initialize-DuoForgeStageGraph {
     $firstSynthesizer = if ([string]::IsNullOrWhiteSpace([string]$manifest.firstSynthesizer)) { 'alternate' } else { [string]$manifest.firstSynthesizer }
     $contextPlanPath = Join-Path $RunDirectory 'inputs\context-plan.json'
     $contextBatchCount = if (Test-Path -LiteralPath $contextPlanPath -PathType Leaf) { @((Read-DuoForgeJson -Path $contextPlanPath).batches).Count } else { 0 }
-    $graph = New-DuoForgeStageGraph -Mode ([string]$manifest.mode) -MaxRounds ([int]$manifest.maxRounds) -FirstSynthesizer $firstSynthesizer -ContextBatchCount $contextBatchCount -WorkflowVersion $workflowVersion
+    $contextBatchDocumentIds = @(Get-DuoForgeContextBatchDocumentIdsInternal -RunDirectory $RunDirectory)
+    $graph = New-DuoForgeStageGraph -Mode ([string]$manifest.mode) -MaxRounds ([int]$manifest.maxRounds) -FirstSynthesizer $firstSynthesizer -ContextBatchCount $contextBatchCount -ContextBatchDocumentIds $contextBatchDocumentIds -WorkflowVersion $workflowVersion
     Write-DuoForgeJsonAtomic -Path $path -Value $graph
     return $graph
 }
@@ -236,7 +286,8 @@ function Repair-DuoForgeCorruptedStageArtifactsInternal {
             try {
                 $wrapper = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $path)
                 $knownIssueTargets = if ($workflowVersion -eq 'workflow-v2') { Get-DuoForgeKnownIssueTargetsInternal -RunDirectory $RunDirectory -Graph $Graph -ExcludeStepKey ([string]$step.stepKey) } else { $null }
-                $null = Test-DuoForgeStageResultInternal -Result $wrapper.result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -KnownIssueTargets $knownIssueTargets -ThrowOnError
+                $contextEvidenceContract = Get-DuoForgeContextEvidenceContractForStepInternal -RunDirectory $RunDirectory -Step $step
+                $null = Test-DuoForgeStageResultInternal -Result $wrapper.result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -KnownIssueTargets $knownIssueTargets -ContextEvidenceContract $contextEvidenceContract -ThrowOnError
             }
             catch { $valid = $false }
         }
@@ -455,7 +506,8 @@ function Invoke-DuoForgeStageEngine {
                         attempt = [int]$step.attemptCount
                     })
                     $knownIssueTargets = if ($workflowVersion -eq 'workflow-v2') { Get-DuoForgeKnownIssueTargetsInternal -RunDirectory $RunDirectory -Graph $graph -ExcludeStepKey ([string]$step.stepKey) } else { $null }
-                    $null = Test-DuoForgeStageResultInternal -Result $result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -KnownIssueTargets $knownIssueTargets -ThrowOnError
+                    $contextEvidenceContract = Get-DuoForgeContextEvidenceContractForStepInternal -RunDirectory $RunDirectory -Step $step
+                    $null = Test-DuoForgeStageResultInternal -Result $result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -KnownIssueTargets $knownIssueTargets -ContextEvidenceContract $contextEvidenceContract -ThrowOnError
                     $artifactDirectory = Join-Path $RunDirectory ("rounds\round-{0:D2}\raw-redacted" -f [int]$step.round)
                     [System.IO.Directory]::CreateDirectory($artifactDirectory) | Out-Null
                     $artifactPath = Join-Path $artifactDirectory ($step.stepKey + '.json')

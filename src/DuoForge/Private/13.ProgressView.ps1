@@ -293,7 +293,7 @@ function Get-DuoForgeProgressArtifactRecordInternal {
         round = [int]$Step.round
         stage = [string]$Step.stage
         label = Get-DuoForgeProgressStageLabelInternal -Stage ([string]$Step.stage)
-        summary = ConvertTo-DuoForgeProgressTextInternal -Text ([string](Get-DuoForgeObjectValue -Object $result -Name 'summary'))
+        summary = if ([string]$Step.stage -eq 'context-batch-analysis') { '문맥 배치 분석 결과가 검증·저장되었습니다.' } else { ConvertTo-DuoForgeProgressTextInternal -Text ([string](Get-DuoForgeObjectValue -Object $result -Name 'summary')) }
         issueCounts = $issueCounts
         responseCounts = $responseCounts
         adoptionCounts = $adoptionCounts
@@ -320,7 +320,8 @@ function Get-DuoForgeProgressSnapshotInternal {
         $contextPlanPath = Join-Path $RunDirectory 'inputs\context-plan.json'
         $contextBatchCount = if (Test-Path -LiteralPath $contextPlanPath -PathType Leaf) { @((Read-DuoForgeJson -Path $contextPlanPath).batches).Count } else { 0 }
         $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
-        $graph = New-DuoForgeStageGraph -Mode ([string]$manifest.mode) -MaxRounds ([int]$manifest.maxRounds) -FirstSynthesizer $firstSynthesizer -ContextBatchCount $contextBatchCount -WorkflowVersion $workflowVersion
+        $contextBatchDocumentIds = @(Get-DuoForgeContextBatchDocumentIdsInternal -RunDirectory $RunDirectory)
+        $graph = New-DuoForgeStageGraph -Mode ([string]$manifest.mode) -MaxRounds ([int]$manifest.maxRounds) -FirstSynthesizer $firstSynthesizer -ContextBatchCount $contextBatchCount -ContextBatchDocumentIds $contextBatchDocumentIds -WorkflowVersion $workflowVersion
     }
 
     $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest

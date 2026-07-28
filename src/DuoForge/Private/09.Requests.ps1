@@ -393,6 +393,16 @@ function Test-DuoForgeStartRequestInternal {
         $basePlan = Get-DuoForgeExecutionPlanInternal -Mode $mode -MaxRounds ([int]$Request.maxRounds) -FirstSynthesizer ([string]$Request.firstSynthesizer) -MaxCallsPerProvider ([int]$Config.limits.maxCallsPerProviderPerRun) -WorkflowVersion 'workflow-v2'
         $partialValidation = [ordered]@{ request = $Request; inputs = $inputs }
         $contextPlan = New-DuoForgeContextBatchPlanInternal -ValidationResult $partialValidation -Config $Config -BaseExecutionPlan $basePlan
+        if ([bool]$contextPlan.enabled -and $mode -in @('document-merge', 'dual-document')) {
+            $candidateById = @{}
+            foreach ($candidate in @($contextPlan.candidateBlueprints)) { $candidateById[[string]$candidate.candidateId] = $candidate }
+            $selectedDocumentIds = @($contextPlan.selectedCandidateIds | ForEach-Object { [string]$candidateById[[string]$_].documentId } | Sort-Object -Unique)
+            $requiredDocumentIds = @($contextPlan.sourceBlueprints | ForEach-Object { [string]$_.documentId } | Sort-Object -Unique)
+            $missingDocumentIds = @($requiredDocumentIds | Where-Object { $_ -notin $selectedDocumentIds })
+            if ($missingDocumentIds.Count -gt 0) {
+                $errors.Add([ordered]@{ code = 'DF-CONTEXT-DOCUMENT-CAPACITY'; message = "A/B 문맥을 각각 최소 한 배치씩 분석할 호출 여유가 없습니다. 누락 문서: $($missingDocumentIds -join ', ')" })
+            }
+        }
         $plan = Get-DuoForgeExecutionPlanInternal -Mode $mode -MaxRounds ([int]$Request.maxRounds) -FirstSynthesizer ([string]$Request.firstSynthesizer) -MaxCallsPerProvider ([int]$Config.limits.maxCallsPerProviderPerRun) -ContextBatchCount ([int]$contextPlan.selectedBatchCount) -WorkflowVersion 'workflow-v2'
         if (-not $plan.withinLimits) {
             $errors.Add([ordered]@{ code = 'DF-PLAN-CALL-LIMIT'; message = '최악 호출 계획이 공급자별 강제 호출 상한을 초과합니다.' })

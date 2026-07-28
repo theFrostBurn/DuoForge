@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 2,
+  "workflowVersion": "workflow-v2",
+  "mode": "document-merge",
+  "maxRounds": 2,
+  "steps": [
+    {
+      "stepKey": "r01-codex-independent-merge-draft", "provider": "codex", "round": 1, "stage": "independent-merge-draft", "dependsOn": [],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "codex", "targetDocumentId": "merged", "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r01-claude-independent-merge-draft", "provider": "claude", "round": 1, "stage": "independent-merge-draft", "dependsOn": [],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "claude", "targetDocumentId": "merged", "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r01-codex-cross-review", "provider": "codex", "round": 1, "stage": "cross-review", "dependsOn": ["r01-codex-independent-merge-draft", "r01-claude-independent-merge-draft"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "codex", "targetDocumentId": "merged", "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r01-claude-cross-review", "provider": "claude", "round": 1, "stage": "cross-review", "dependsOn": ["r01-codex-independent-merge-draft", "r01-claude-independent-merge-draft"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "claude", "targetDocumentId": "merged", "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r01-codex-review-response", "provider": "codex", "round": 1, "stage": "review-response", "dependsOn": ["r01-codex-cross-review", "r01-claude-cross-review"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "codex", "targetDocumentId": "merged", "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r01-claude-review-response", "provider": "claude", "round": 1, "stage": "review-response", "dependsOn": ["r01-codex-cross-review", "r01-claude-cross-review"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "claude", "targetDocumentId": "merged", "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r01-codex-synthesis", "provider": "codex", "round": 1, "stage": "synthesis", "dependsOn": ["r01-codex-review-response", "r01-claude-review-response"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "codex", "targetDocumentId": "merged", "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r02-codex-joint-document-review", "provider": "codex", "round": 2, "stage": "joint-document-review", "dependsOn": ["r01-codex-synthesis"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "codex", "targetDocumentId": "merged", "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r02-claude-joint-document-review", "provider": "claude", "round": 2, "stage": "joint-document-review", "dependsOn": ["r01-codex-synthesis"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "claude", "targetDocumentId": "merged", "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r02-codex-review-response", "provider": "codex", "round": 2, "stage": "review-response", "dependsOn": ["r02-codex-joint-document-review", "r02-claude-joint-document-review"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "codex", "targetDocumentId": "merged", "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r02-claude-review-response", "provider": "claude", "round": 2, "stage": "review-response", "dependsOn": ["r02-codex-joint-document-review", "r02-claude-joint-document-review"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "claude", "targetDocumentId": "merged", "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r02-claude-synthesis", "provider": "claude", "round": 2, "stage": "synthesis", "dependsOn": ["r02-codex-review-response", "r02-claude-review-response"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "claude", "targetDocumentId": "merged", "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r02-codex-final-validation", "provider": "codex", "round": 2, "stage": "final-validation", "dependsOn": ["r02-claude-synthesis"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "codex", "targetDocumentId": "merged", "sourceDocumentIds": ["A", "B"]
+    }
+  ]
+}

@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 3,
+  "workflowVersion": "workflow-v2",
+  "runId": "fixture-schema1-document-merge",
+  "name": "Sanitized schema 1 document-merge fixture",
+  "mode": "document-merge",
+  "createdAt": "2026-07-28T00:00:00.0000000Z",
+  "updatedAt": "2026-07-28T00:00:00.0000000Z",
+  "resultsRoot": "__RESULTS_ROOT__",
+  "runDirectory": "__RUN_DIRECTORY__",
+  "documentType": "prd",
+  "maxRounds": 2,
+  "firstSynthesizer": "alternate",
+  "pauseAfterRound": false,
+  "allowPartial": false,
+  "subscriptionOnly": true,
+  "promptTemplateVersion": "duoforge-stage-v3",
+  "artifactVisibilityPolicy": "transitive-dependencies-v1",
+  "providers": {
+    "codex": { "version": "sanitized-codex-cli", "authType": "chatgpt" },
+    "claude": { "version": "sanitized-claude-cli", "authType": "claude.ai" }
+  },
+  "providerSelections": {
+    "codex": { "model": "gpt-5.6-sol", "reasoningEffort": "high" },
+    "claude": { "model": "opus", "reasoningEffort": "high" }
+  },
+  "executionPlan": {
+    "schemaVersion": 1,
+    "workflowVersion": "workflow-v2",
+    "mode": "document-merge",
+    "maxRounds": 2,
+    "minimumNormalRounds": 2,
+    "retryPerStage": 1,
+    "providers": {
+      "codex": {
+        "baseCalls": 7,
+        "retryBudget": 7,
+        "maximumCalls": 14,
+        "limit": 24,
+        "calls": [
+          { "provider": "codex", "round": 1, "stage": "independent-merge-draft" },
+          { "provider": "codex", "round": 1, "stage": "cross-review" },
+          { "provider": "codex", "round": 1, "stage": "review-response" },
+          { "provider": "codex", "round": 1, "stage": "synthesis" },
+          { "provider": "codex", "round": 2, "stage": "joint-document-review" },
+          { "provider": "codex", "round": 2, "stage": "review-response" },
+          { "provider": "codex", "round": 2, "stage": "final-validation" }
+        ]
+      },
+      "claude": {
+        "baseCalls": 6,
+        "retryBudget": 6,
+        "maximumCalls": 12,
+        "limit": 24,
+        "calls": [
+          { "provider": "claude", "round": 1, "stage": "independent-merge-draft" },
+          { "provider": "claude", "round": 1, "stage": "cross-review" },
+          { "provider": "claude", "round": 1, "stage": "review-response" },
+          { "provider": "claude", "round": 2, "stage": "joint-document-review" },
+          { "provider": "claude", "round": 2, "stage": "review-response" },
+          { "provider": "claude", "round": 2, "stage": "synthesis" }
+        ]
+      }
+    },
+    "synthesizers": ["codex", "claude"],
+    "withinLimits": true,
+    "explanationCallsExcluded": true,
+    "contextBatchCount": 0
+  },
+  "contextPlan": {
+    "schemaVersion": 1,
+    "enabled": false,
+    "totalFiles": 2,
+    "totalBytes": 112,
+    "targetBatchBytes": 288358,
+    "requiredBatchCount": 0,
+    "selectedBatchCount": 0,
+    "selectedBytes": 112,
+    "predictedFileCoveragePercent": 100.0,
+    "predictedByteCoveragePercent": 100.0,
+    "requiresPartialConsent": false,
+    "completionStatus": "COMPLETED",
+    "batches": [],
+    "actualFileCoveragePercent": 100.0,
+    "actualByteCoveragePercent": 100.0
+  },
+  "maxWallClockMinutes": 90,
+  "inputSnapshotHashes": ["__SNAPSHOT_A_HASH__", "__SNAPSHOT_B_HASH__"]
+}

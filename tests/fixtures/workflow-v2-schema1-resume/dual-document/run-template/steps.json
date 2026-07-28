@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 2,
+  "workflowVersion": "workflow-v2",
+  "mode": "dual-document",
+  "maxRounds": 2,
+  "steps": [
+    {
+      "stepKey": "r01-codex-document-review", "provider": "codex", "round": 1, "stage": "document-review", "dependsOn": [],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "codex", "targetDocumentId": null, "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r01-claude-document-review", "provider": "claude", "round": 1, "stage": "document-review", "dependsOn": [],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "claude", "targetDocumentId": null, "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r01-codex-review-response", "provider": "codex", "round": 1, "stage": "review-response", "dependsOn": ["r01-codex-document-review", "r01-claude-document-review"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "codex", "targetDocumentId": null, "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r01-claude-review-response", "provider": "claude", "round": 1, "stage": "review-response", "dependsOn": ["r01-codex-document-review", "r01-claude-document-review"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "claude", "targetDocumentId": null, "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r01-codex-document-a-revision", "provider": "codex", "round": 1, "stage": "document-revision", "dependsOn": ["r01-codex-review-response", "r01-claude-review-response"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "codex", "targetDocumentId": "A", "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r01-claude-document-b-revision", "provider": "claude", "round": 1, "stage": "document-revision", "dependsOn": ["r01-codex-review-response", "r01-claude-review-response"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "claude", "targetDocumentId": "B", "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r02-codex-document-review", "provider": "codex", "round": 2, "stage": "document-review", "dependsOn": ["r01-codex-document-a-revision", "r01-claude-document-b-revision"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "codex", "targetDocumentId": null, "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r02-claude-document-review", "provider": "claude", "round": 2, "stage": "document-review", "dependsOn": ["r01-codex-document-a-revision", "r01-claude-document-b-revision"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "claude", "targetDocumentId": null, "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r02-codex-review-response", "provider": "codex", "round": 2, "stage": "review-response", "dependsOn": ["r02-codex-document-review", "r02-claude-document-review"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "codex", "targetDocumentId": null, "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r02-claude-review-response", "provider": "claude", "round": 2, "stage": "review-response", "dependsOn": ["r02-codex-document-review", "r02-claude-document-review"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "claude", "targetDocumentId": null, "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r02-claude-document-a-revision", "provider": "claude", "round": 2, "stage": "document-revision", "dependsOn": ["r02-codex-review-response", "r02-claude-review-response"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "claude", "targetDocumentId": "A", "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r02-codex-document-b-revision", "provider": "codex", "round": 2, "stage": "document-revision", "dependsOn": ["r02-codex-review-response", "r02-claude-review-response"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "codex", "targetDocumentId": "B", "sourceDocumentIds": ["A", "B"]
+    },
+    {
+      "stepKey": "r02-codex-document-a-validation", "provider": "codex", "round": 2, "stage": "document-validation", "dependsOn": ["r02-claude-document-a-revision", "r02-codex-document-b-revision"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "codex", "targetDocumentId": "A", "sourceDocumentIds": ["A"]
+    },
+    {
+      "stepKey": "r02-claude-document-b-validation", "provider": "claude", "round": 2, "stage": "document-validation", "dependsOn": ["r02-claude-document-a-revision", "r02-codex-document-b-revision"],
+      "status": "PENDING", "attemptCount": 0, "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": [],
+      "performedBy": "claude", "targetDocumentId": "B", "sourceDocumentIds": ["B"]
+    }
+  ]
+}

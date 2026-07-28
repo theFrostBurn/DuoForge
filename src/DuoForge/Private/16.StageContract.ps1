@@ -64,6 +64,7 @@ function Test-DuoForgeStageResultInternal {
         [AllowNull()][string]$ExpectedTargetDocumentId,
         [AllowEmptyCollection()][string[]]$ExpectedSourceDocumentIds = @(),
         [AllowNull()][System.Collections.IDictionary]$KnownIssueTargets,
+        [AllowNull()][System.Collections.IDictionary]$ContextEvidenceContract,
         [switch]$ThrowOnError
     )
 
@@ -174,24 +175,38 @@ function Test-DuoForgeStageResultInternal {
         }
         if ($WorkflowVersion -eq 'workflow-v2') {
             $issueTarget = [string](Get-DuoForgeObjectValue -Object $issue -Name 'targetDocumentId')
-            if ($issueTarget -notin @('A', 'B', 'merged')) { $errors.Add('issue.targetDocumentId 값이 잘못되었습니다.') }
-            elseif ($issueTarget -notin @($lineagePolicy.issueTargetDocumentIds)) {
+            if ($issueTarget -cnotin @('A', 'B', 'merged')) { $errors.Add('issue.targetDocumentId 값이 잘못되었습니다.') }
+            elseif ($issueTarget -cnotin @($lineagePolicy.issueTargetDocumentIds)) {
                 $errors.Add("issue.targetDocumentId가 $ExpectedStage 단계의 허용 대상과 다릅니다: $issueTarget")
             }
-            foreach ($evidence in @(Get-DuoForgeObjectValue -Object $issue -Name 'evidence' -Default @())) {
+            $evidenceItems = @(Get-DuoForgeObjectValue -Object $issue -Name 'evidence' -Default @())
+            if ($ExpectedStage -eq 'context-batch-analysis' -and $null -ne $ContextEvidenceContract -and $evidenceItems.Count -lt 1) { $errors.Add('schema 2 context-batch-analysis issue에는 CORE 근거가 하나 이상 필요합니다.') }
+            foreach ($evidence in $evidenceItems) {
                 foreach ($name in @('sourceDocumentId', 'proposedByProvider', 'path', 'location', 'excerptHash')) {
                     if ([string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $evidence -Name $name))) {
                         $errors.Add("issue.evidence.$name 값이 비어 있습니다.")
                     }
                 }
-                if ([string](Get-DuoForgeObjectValue -Object $evidence -Name 'sourceDocumentId') -notin @('brief', 'A', 'B', 'merged')) {
+                if ([string](Get-DuoForgeObjectValue -Object $evidence -Name 'sourceDocumentId') -cnotin @('brief', 'A', 'B', 'merged')) {
                     $errors.Add('issue.evidence.sourceDocumentId 값이 잘못되었습니다.')
                 }
-                elseif ([string](Get-DuoForgeObjectValue -Object $evidence -Name 'sourceDocumentId') -notin @($lineagePolicy.evidenceSourceDocumentIds)) {
+                elseif ([string](Get-DuoForgeObjectValue -Object $evidence -Name 'sourceDocumentId') -cnotin @($lineagePolicy.evidenceSourceDocumentIds)) {
                     $errors.Add("issue.evidence.sourceDocumentId가 $ExpectedStage 단계의 허용 출처와 다릅니다.")
                 }
                 if ([string](Get-DuoForgeObjectValue -Object $evidence -Name 'proposedByProvider') -notin @('codex', 'claude')) {
                     $errors.Add('issue.evidence.proposedByProvider 값이 잘못되었습니다.')
+                }
+                elseif ($ExpectedStage -eq 'context-batch-analysis' -and $null -ne $ContextEvidenceContract -and [string](Get-DuoForgeObjectValue -Object $evidence -Name 'proposedByProvider') -cne $ExpectedProvider) {
+                    $errors.Add('context-batch-analysis evidence.proposedByProvider가 실행 공급자와 다릅니다.')
+                }
+                if ($ExpectedStage -eq 'context-batch-analysis' -and $null -ne $ContextEvidenceContract) {
+                    foreach ($name in @('sourceDocumentId', 'path', 'location', 'excerptHash')) {
+                        $actualEvidenceValue = [string](Get-DuoForgeObjectValue -Object $evidence -Name $name -Default '')
+                        $expectedEvidenceValue = [string](Get-DuoForgeObjectValue -Object $ContextEvidenceContract -Name $name -Default '')
+                        if ($actualEvidenceValue -cne $expectedEvidenceValue) {
+                            $errors.Add("context-batch-analysis evidence.$name 값이 CORE 근거 계약과 다릅니다.")
+                        }
+                    }
                 }
             }
         }
@@ -259,19 +274,19 @@ function Test-DuoForgeStageResultInternal {
                     $errors.Add("adoptions.$name 값이 비어 있습니다.")
                 }
             }
-            if ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'sourceDocumentId') -notin @('brief', 'A', 'B', 'merged')) {
+            if ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'sourceDocumentId') -cnotin @('brief', 'A', 'B', 'merged')) {
                 $errors.Add('adoptions.sourceDocumentId 값이 잘못되었습니다.')
             }
-            elseif ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'sourceDocumentId') -notin @($lineagePolicy.adoptionSourceDocumentIds)) {
+            elseif ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'sourceDocumentId') -cnotin @($lineagePolicy.adoptionSourceDocumentIds)) {
                 $errors.Add("adoptions.sourceDocumentId가 $ExpectedStage 단계의 허용 출처와 다릅니다.")
             }
             if ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'proposedByProvider') -notin @('codex', 'claude')) {
                 $errors.Add('adoptions.proposedByProvider 값이 잘못되었습니다.')
             }
-            if ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'targetDocumentId') -notin @('A', 'B', 'merged')) {
+            if ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'targetDocumentId') -cnotin @('A', 'B', 'merged')) {
                 $errors.Add('adoptions.targetDocumentId 값이 잘못되었습니다.')
             }
-            elseif ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'targetDocumentId') -notin @($lineagePolicy.adoptionTargetDocumentIds)) {
+            elseif ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'targetDocumentId') -cnotin @($lineagePolicy.adoptionTargetDocumentIds)) {
                 $errors.Add("adoptions.targetDocumentId가 $ExpectedStage 단계의 허용 대상과 다릅니다.")
             }
             if ($null -ne $KnownIssueTargets) {

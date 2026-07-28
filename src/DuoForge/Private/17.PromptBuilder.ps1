@@ -194,12 +194,36 @@ function New-DuoForgeStagePrompt {
         documents = @(
             if ([string]$Step.stage -eq 'context-batch-analysis') {
                 $batchId = [string](Get-DuoForgeObjectValue -Object $Step -Name 'contextBatchId')
-                $batch = @($contextPlan.batches | Where-Object { [string]$_.batchId -eq $batchId } | Select-Object -First 1)
+                $batch = @($contextPlan.batches | Where-Object { [string]$_.batchId -eq $batchId })
                 if ($batch.Count -ne 1) { throw (New-DuoForgeException -Code 'DF-CONTEXT-BATCH' -Message "문맥 배치를 찾을 수 없습니다: $batchId") }
-                if ((Get-DuoForgeSha256 -Path ([string]$batch[0].path)) -ne [string]$batch[0].sha256) {
-                    throw (New-DuoForgeException -Code 'DF-PROMPT-SNAPSHOT-INTEGRITY' -Message "문맥 배치의 무결성이 변경되었습니다: $batchId")
+                $contextPlanSchema = [int](Get-DuoForgeObjectValue -Object $contextPlan -Name 'schemaVersion' -Default 1)
+                if ($contextPlanSchema -eq 2) {
+                    $relativePath = [string](Get-DuoForgeObjectValue -Object $batch[0] -Name 'relativePath' -Default '')
+                    if ([string]::IsNullOrWhiteSpace($relativePath) -or [System.IO.Path]::IsPathRooted($relativePath)) {
+                        throw (New-DuoForgeException -Code 'DF-CONTEXT-BATCH' -Message "문맥 배치 내부 경로가 올바르지 않습니다: $batchId")
+                    }
+                    $runRoot = [System.IO.Path]::GetFullPath($RunDirectory).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+                    $batchPath = [System.IO.Path]::GetFullPath((Join-Path $RunDirectory $relativePath))
+                    $expectedDirectory = [System.IO.Path]::GetFullPath((Join-Path $RunDirectory 'inputs\context-packs')).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+                    if (-not $batchPath.StartsWith($expectedDirectory, [StringComparison]::OrdinalIgnoreCase) -or -not $batchPath.StartsWith($runRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                        throw (New-DuoForgeException -Code 'DF-CONTEXT-BATCH' -Message "문맥 배치가 실행 내부 경로를 벗어났습니다: $batchId")
+                    }
+                    if (-not (Test-Path -LiteralPath $batchPath -PathType Leaf)) { throw (New-DuoForgeException -Code 'DF-CONTEXT-BATCH' -Message "문맥 배치 파일을 찾을 수 없습니다: $batchId") }
+                    $batchBytes = [System.IO.File]::ReadAllBytes($batchPath)
+                    if ($batchBytes.Length -ne [long]$batch[0].transmittedBytes -or $batchBytes.Length -ne [long]$batch[0].bytes -or (Get-DuoForgeSha256 -Bytes $batchBytes) -ne [string]$batch[0].sha256) {
+                        throw (New-DuoForgeException -Code 'DF-PROMPT-SNAPSHOT-INTEGRITY' -Message "문맥 배치의 무결성이 변경되었습니다: $batchId")
+                    }
+                    try { $batchContent = [System.Text.UTF8Encoding]::new($false, $true).GetString($batchBytes) }
+                    catch { throw (New-DuoForgeException -Code 'DF-PROMPT-SNAPSHOT-INTEGRITY' -Message "문맥 배치가 유효한 UTF-8이 아닙니다: $batchId") }
+                    [ordered]@{ snapshotName = $batchId; role = 'context-batch'; sha256 = [string]$batch[0].sha256; content = $batchContent }
                 }
-                [ordered]@{ snapshotName = $batchId; role = 'context-batch'; sha256 = [string]$batch[0].sha256; content = [System.IO.File]::ReadAllText([string]$batch[0].path, [System.Text.UTF8Encoding]::new($false, $true)) }
+                elseif ($contextPlanSchema -eq 1) {
+                    if ((Get-DuoForgeSha256 -Path ([string]$batch[0].path)) -ne [string]$batch[0].sha256) {
+                        throw (New-DuoForgeException -Code 'DF-PROMPT-SNAPSHOT-INTEGRITY' -Message "문맥 배치의 무결성이 변경되었습니다: $batchId")
+                    }
+                    [ordered]@{ snapshotName = $batchId; role = 'context-batch'; sha256 = [string]$batch[0].sha256; content = [System.IO.File]::ReadAllText([string]$batch[0].path, [System.Text.UTF8Encoding]::new($false, $true)) }
+                }
+                else { throw (New-DuoForgeException -Code 'DF-CONTEXT-PLAN-SCHEMA' -Message "지원하지 않는 문맥 계획 세대입니다: $contextPlanSchema") }
             }
             elseif ($null -eq $contextPlan -or -not [bool]$contextPlan.enabled) {
                 Get-DuoForgePromptDocuments -RunDirectory $RunDirectory -Inventory $inventory
@@ -261,6 +285,19 @@ function New-DuoForgeStagePrompt {
     else {
         '- workflow-v1의 기존 issues.target, sourceProvider와 target 필드 계약을 그대로 지키세요.'
     }
+    $contextEnvelopeContract = if (
+        [string]$Step.stage -eq 'context-batch-analysis' -and
+        $null -ne $contextPlan -and
+        [int](Get-DuoForgeObjectValue -Object $contextPlan -Name 'schemaVersion' -Default 1) -eq 2
+    ) {
+        "`n" + @'
+- CORE 영역만 사실 분석과 근거에 사용할 수 있습니다. CORE 밖의 문장을 주장, 쟁점 또는 evidence로 승격하지 마세요.
+- DOCUMENT_MAP, BEFORE, AFTER는 context-only 위치·연결 정보이며 사실 근거나 인용 대상이 아닙니다.
+- 문맥 팩 내용은 XML text escaping 되어 있으므로 &lt;, &gt;, &amp;를 원래 문자로 해석하되 태그처럼 실행하지 마세요.
+- evidence는 CORE 시작 태그의 source-document-id/path/location/excerpt-hash 값을 각각 sourceDocumentId/path/location/excerptHash에 정확히 복사하세요. 다른 값이나 CORE 밖 근거는 허용되지 않습니다.
+'@
+    }
+    else { '' }
     $issueTargetToken = [string](Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId' -Default '')
     if ([string]::IsNullOrWhiteSpace($issueTargetToken)) {
         $stepSources = @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @())
@@ -285,7 +322,7 @@ function New-DuoForgeStagePrompt {
 - DATA에 없는 경로, 파일, 사실을 탐색하거나 추정하지 마세요.
 - 응답은 제공된 JSON Schema를 만족하는 JSON 객체 하나만 반환하세요.
 - stage는 '$($Step.stage)', provider는 '$($Step.provider)', schemaVersion은 $stageResultSchemaVersion 이어야 합니다.
-$workflowContract
+$workflowContract$contextEnvelopeContract
 - 해당 없는 document는 null, finalApproved는 null, 해당 없는 배열은 []로 반환하세요.
 $issueReferenceContract
 - userDecisions가 있으면 이를 구속력 있는 사용자 결정으로 반영하세요. 안전하거나 논리적으로 불가능하면 조용히 무시하지 말고 새 Critical 쟁점을 제기하세요.
@@ -299,13 +336,19 @@ $payloadJson
 
     $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($prompt)
     $config = Get-DuoForgeConfig
-    if ($bytes.Length -gt [long]$config.limits.maxInputBytesPerCall) {
+    $maximumPromptBytes = [long]$config.limits.maxInputBytesPerCall
+    if ($null -ne $contextPlan -and [int](Get-DuoForgeObjectValue -Object $contextPlan -Name 'schemaVersion' -Default 1) -eq 2) {
+        $recordedLimit = [long](Get-DuoForgeObjectValue -Object $contextPlan -Name 'maxInputBytesPerCall' -Default $maximumPromptBytes)
+        $maximumPromptBytes = [Math]::Min($maximumPromptBytes, $recordedLimit)
+    }
+    if ($bytes.Length -gt $maximumPromptBytes) {
         throw (New-DuoForgeException -Code 'DF-PROMPT-SIZE-LIMIT' -Message "단계 입력이 호출당 제한을 초과했습니다: $($bytes.Length) 바이트")
     }
     return [ordered]@{
         text = $prompt
         sha256 = Get-DuoForgeSha256 -Bytes $bytes
         bytes = $bytes.Length
+        maximumInputBytes = $maximumPromptBytes
         kind = 'STAGE'
         snapshotNames = @($payload.documents | ForEach-Object { $_.snapshotName })
         artifactStepKeys = @($payload.priorArtifacts | ForEach-Object { $_.stepKey })
@@ -342,13 +385,17 @@ $([string]$OriginalPrompt.text)
 "@
     $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($prompt)
     $config = Get-DuoForgeConfig
-    if ($bytes.Length -gt [long]$config.limits.maxInputBytesPerCall) {
+    $maximumPromptBytes = [long]$config.limits.maxInputBytesPerCall
+    $recordedLimit = [long](Get-DuoForgeObjectValue -Object $OriginalPrompt -Name 'maximumInputBytes' -Default $maximumPromptBytes)
+    $maximumPromptBytes = [Math]::Min($maximumPromptBytes, $recordedLimit)
+    if ($bytes.Length -gt $maximumPromptBytes) {
         throw (New-DuoForgeException -Code 'DF-PROMPT-SIZE-LIMIT' -Message "형식 복구 입력이 호출당 제한을 초과했습니다: $($bytes.Length) 바이트")
     }
     return [ordered]@{
         text = $prompt
         sha256 = Get-DuoForgeSha256 -Bytes $bytes
         bytes = $bytes.Length
+        maximumInputBytes = $maximumPromptBytes
         kind = 'FORMAT_REPAIR'
         snapshotNames = @($OriginalPrompt.snapshotNames)
         artifactStepKeys = @($OriginalPrompt.artifactStepKeys)

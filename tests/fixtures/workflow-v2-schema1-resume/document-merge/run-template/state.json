@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "runId": "fixture-schema1-document-merge",
+  "mode": "document-merge",
+  "documentType": "prd",
+  "round": 0,
+  "maxRounds": 2,
+  "status": "RESUMABLE_ERROR",
+  "lastCompletedStage": null,
+  "openIssues": [],
+  "blockingIssues": [],
+  "answeredIssues": [],
+  "coverage": { "filePercent": 100.0, "bytePercent": 100.0, "completionStatus": "COMPLETED" },
+  "runtimeSeconds": 0,
+  "createdAt": "2026-07-28T00:00:00.0000000Z",
+  "updatedAt": "2026-07-28T00:00:00.0000000Z"
+}

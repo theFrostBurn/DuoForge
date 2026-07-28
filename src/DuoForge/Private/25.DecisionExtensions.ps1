@@ -99,6 +99,7 @@ function Add-DuoForgeRoundInternal {
     $null = Assert-DuoForgeStagePromptPolicyInternal -Manifest $run.manifest
     return Invoke-WithDuoForgeRunLock -RunDirectory ([string]$run.runDirectory) -ScriptBlock {
         $directory = [string]$run.runDirectory
+        $null = Assert-DuoForgeRunStorageContractInternal -RunDirectory $directory
         $manifest = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $directory 'manifest.json'))
         if ([int]$manifest.maxRounds -ge 3) { throw (New-DuoForgeException -Code 'DF-ROUND-MAX' -Message '이미 최대 3라운드로 설정되어 있습니다.') }
         if ([string]$manifest.mode -notin @('shared-document', 'document-merge', 'dual-document')) { throw (New-DuoForgeException -Code 'DF-ROUND-MODE' -Message '이 모드에서는 추가 라운드를 지원하지 않습니다.') }
@@ -114,7 +115,8 @@ function Add-DuoForgeRoundInternal {
         [System.IO.Directory]::CreateDirectory($historyDirectory) | Out-Null
         Write-DuoForgeJsonAtomic -Path (Join-Path $historyDirectory ("steps-before-round-3-{0}.json" -f [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'))) -Value $oldGraph
 
-        $newGraph = New-DuoForgeStageGraph -Mode ([string]$manifest.mode) -MaxRounds 3 -FirstSynthesizer ([string]$manifest.firstSynthesizer) -ContextBatchCount $contextBatchCount -WorkflowVersion $workflowVersion
+        $contextBatchDocumentIds = @(Get-DuoForgeContextBatchDocumentIdsInternal -RunDirectory $directory)
+        $newGraph = New-DuoForgeStageGraph -Mode ([string]$manifest.mode) -MaxRounds 3 -FirstSynthesizer ([string]$manifest.firstSynthesizer) -ContextBatchCount $contextBatchCount -ContextBatchDocumentIds $contextBatchDocumentIds -WorkflowVersion $workflowVersion
         $oldByKey = @{}
         foreach ($step in @($oldGraph.steps)) { $oldByKey[[string]$step.stepKey] = $step }
         for ($index = 0; $index -lt @($newGraph.steps).Count; $index++) {
