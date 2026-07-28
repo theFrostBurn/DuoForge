@@ -1,16 +1,3 @@
-function Get-DuoForgeProviderEnvironmentAllowList {
-    [CmdletBinding()]
-    param()
-
-    return @(
-        'SystemRoot', 'WINDIR', 'ComSpec', 'TEMP', 'TMP', 'PATH', 'PATHEXT',
-        'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'APPDATA',
-        'PROGRAMDATA', 'ProgramFiles', 'ProgramFiles(x86)', 'PROCESSOR_ARCHITECTURE',
-        'PSModulePath', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR',
-        'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE'
-    )
-}
-
 function New-DuoForgeProviderWorkDirectory {
     [CmdletBinding()]
     param(
@@ -266,6 +253,10 @@ function Invoke-DuoForgeLiveProviderStage {
     }
     $manifest = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json')
     $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
+    $providerContext = Resolve-DuoForgeProviderExecutionContextInternal -Provider ([string]$Step.provider)
+    if (-not [bool]$providerContext.liveRuntimeEligible) {
+        throw (New-DuoForgeException -Code 'DF-AUTH-CONTEXT' -Message '현재 PowerShell의 사용자 프로필과 공급자 인증 컨텍스트가 일치하지 않습니다. 일반 호스트 PowerShell 7에서 다시 실행해 주세요.')
+    }
     $expectedTargetDocumentId = Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId'
     $expectedSourceDocumentIds = @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @())
     $spec = Get-DuoForgeProviderCommandSpecInternal -Provider ([string]$Step.provider) -RunDirectory $RunDirectory -Step $Step -Prompt $Prompt
@@ -303,7 +294,9 @@ function Invoke-DuoForgeLiveProviderStage {
             WorkingDirectory = [string]$spec.workingDirectory
             TimeoutSeconds = $TimeoutSeconds
             StandardInput = [string]$spec.prompt
-            EnvironmentAllowList = Get-DuoForgeProviderEnvironmentAllowList
+            EnvironmentAllowList = @($providerContext.environmentAllowList)
+            EnvironmentOverrides = $providerContext.environmentOverrides
+            CommandInvocation = $providerContext.invocation
         }
         if ($null -ne $onTick) { $processArguments['OnTick'] = $onTick }
         $processResult = Invoke-DuoForgeProcess @processArguments

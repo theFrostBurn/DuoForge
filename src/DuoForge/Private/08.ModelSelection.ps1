@@ -69,14 +69,13 @@ function Get-DuoForgeCodexModelFallbackInternal {
 
 function Get-DuoForgeCodexModelCachePathInternal {
     [CmdletBinding()]
-    param()
+    param([System.Collections.IDictionary]$ProviderContext)
 
-    $userProfile = [Environment]::GetEnvironmentVariable('USERPROFILE', [EnvironmentVariableTarget]::Process)
-    if ([string]::IsNullOrWhiteSpace($userProfile)) {
-        $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
-    }
-    if ([string]::IsNullOrWhiteSpace($userProfile)) { return $null }
-    return Join-Path $userProfile '.codex\models_cache.json'
+    if ($null -eq $ProviderContext) { $ProviderContext = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex }
+    if (-not [bool]$ProviderContext.liveRuntimeEligible) { return $null }
+    $authHome = [string]$ProviderContext.authHomePath
+    if ([string]::IsNullOrWhiteSpace($authHome)) { return $null }
+    return Join-Path $authHome 'models_cache.json'
 }
 
 function Get-DuoForgeCodexModelsFromCacheInternal {
@@ -184,9 +183,10 @@ function ConvertFrom-DuoForgeCodexModelListResponseInternal {
 
 function Resolve-DuoForgeCodexAppServerInvocationInternal {
     [CmdletBinding()]
-    param()
+    param([System.Collections.IDictionary]$ProviderContext)
 
-    $invocation = Resolve-DuoForgeCommandInvocation -CommandName 'codex'
+    if ($null -eq $ProviderContext) { $ProviderContext = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex }
+    $invocation = $ProviderContext.invocation
     if ($null -eq $invocation) { return $null }
     if ([System.IO.Path]::GetExtension([string]$invocation.source) -in @('.cmd', '.bat')) {
         $npmRoot = [System.IO.Path]::GetDirectoryName([string]$invocation.source)
@@ -205,9 +205,14 @@ function Resolve-DuoForgeCodexAppServerInvocationInternal {
 
 function Invoke-DuoForgeCodexModelListInternal {
     [CmdletBinding()]
-    param([int]$TimeoutSeconds = 15)
+    param(
+        [int]$TimeoutSeconds = 15,
+        [System.Collections.IDictionary]$ProviderContext
+    )
 
-    $invocation = Resolve-DuoForgeCodexAppServerInvocationInternal
+    if ($null -eq $ProviderContext) { $ProviderContext = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex }
+    if (-not [bool]$ProviderContext.liveRuntimeEligible) { return $null }
+    $invocation = Resolve-DuoForgeCodexAppServerInvocationInternal -ProviderContext $ProviderContext
     if ($null -eq $invocation) { return $null }
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
@@ -221,6 +226,7 @@ function Invoke-DuoForgeCodexModelListInternal {
     $startInfo.StandardInputEncoding = [System.Text.UTF8Encoding]::new($false)
     $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
     $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+    Set-DuoForgeProcessEnvironmentInternal -StartInfo $startInfo -EnvironmentAllowList @($ProviderContext.environmentAllowList) -EnvironmentOverrides $ProviderContext.environmentOverrides
     foreach ($argument in @($invocation.prefixArguments) + @('app-server', '--listen', 'stdio://')) {
         $startInfo.ArgumentList.Add([string]$argument)
     }
@@ -271,19 +277,31 @@ function Invoke-DuoForgeCodexModelListInternal {
 
 function Get-DuoForgeCodexModelsFromCliInternal {
     [CmdletBinding()]
-    param()
+    param([System.Collections.IDictionary]$ProviderContext)
 
+    if ($null -eq $ProviderContext) { $ProviderContext = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex }
+    $cacheKey = 'codex|{0}|{1}|{2}' -f [string](Get-DuoForgeObjectValue -Object $ProviderContext.invocation -Name 'source' -Default ''), [string]$ProviderContext.authHomePath, [bool]$ProviderContext.liveRuntimeEligible
     if (-not (Get-Variable -Name DuoForgeCliCatalogCache -Scope Script -ErrorAction SilentlyContinue)) {
         $script:DuoForgeCliCatalogCache = @{}
     }
-    if ($script:DuoForgeCliCatalogCache.ContainsKey('codex')) {
-        return @($script:DuoForgeCliCatalogCache['codex'])
+    if ($script:DuoForgeCliCatalogCache.ContainsKey($cacheKey)) {
+        return @($script:DuoForgeCliCatalogCache[$cacheKey])
     }
 
-    $response = Invoke-DuoForgeCodexModelListInternal
+    $response = Invoke-DuoForgeCodexModelListInternal -ProviderContext $ProviderContext
     $models = @(ConvertFrom-DuoForgeCodexModelListResponseInternal -Response $response)
-    $script:DuoForgeCliCatalogCache['codex'] = @($models)
+    $script:DuoForgeCliCatalogCache[$cacheKey] = @($models)
     return @($models)
+}
+
+function Clear-DuoForgeProviderCatalogCacheInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][ValidateSet('codex', 'claude')][string]$Provider)
+
+    if (-not (Get-Variable -Name DuoForgeCliCatalogCache -Scope Script -ErrorAction SilentlyContinue)) { return }
+    foreach ($key in @($script:DuoForgeCliCatalogCache.Keys | Where-Object { [string]$_ -like "$Provider|*" })) {
+        $script:DuoForgeCliCatalogCache.Remove($key)
+    }
 }
 
 function Get-DuoForgeClaudeModelFallbackInternal {
@@ -365,21 +383,26 @@ function ConvertFrom-DuoForgeClaudeHelpInternal {
 
 function Get-DuoForgeClaudeCatalogFromCliInternal {
     [CmdletBinding()]
-    param()
+    param([System.Collections.IDictionary]$ProviderContext)
 
+    if ($null -eq $ProviderContext) { $ProviderContext = Resolve-DuoForgeProviderExecutionContextInternal -Provider claude }
+    $cacheKey = 'claude|{0}|{1}|{2}' -f [string](Get-DuoForgeObjectValue -Object $ProviderContext.invocation -Name 'source' -Default ''), [string]$ProviderContext.authHomePath, [bool]$ProviderContext.liveRuntimeEligible
     if (-not (Get-Variable -Name DuoForgeCliCatalogCache -Scope Script -ErrorAction SilentlyContinue)) {
         $script:DuoForgeCliCatalogCache = @{}
     }
-    if ($script:DuoForgeCliCatalogCache.ContainsKey('claude')) {
-        return $script:DuoForgeCliCatalogCache['claude']
+    if ($script:DuoForgeCliCatalogCache.ContainsKey($cacheKey)) {
+        return $script:DuoForgeCliCatalogCache[$cacheKey]
     }
 
-    $process = Invoke-DuoForgeProcess -CommandName 'claude' -Arguments @('--help') -TimeoutSeconds 10
+    $process = if ([bool]$ProviderContext.liveRuntimeEligible) {
+        Invoke-DuoForgeProcess -CommandName 'claude' -Arguments @('--help') -TimeoutSeconds 10 -CommandInvocation $ProviderContext.invocation -EnvironmentAllowList @($ProviderContext.environmentAllowList) -EnvironmentOverrides $ProviderContext.environmentOverrides
+    }
+    else { [ordered]@{ started = $false; timedOut = $false; exitCode = $null; stdout = ''; stderr = ''; errorCategory = 'profile-mismatch' } }
     $catalog = if ($process.started -and -not $process.timedOut -and $process.exitCode -eq 0) {
         ConvertFrom-DuoForgeClaudeHelpInternal -HelpText ([string]$process.stdout)
     }
     else { $null }
-    $script:DuoForgeCliCatalogCache['claude'] = $catalog
+    $script:DuoForgeCliCatalogCache[$cacheKey] = $catalog
     return $catalog
 }
 
@@ -389,12 +412,16 @@ function Get-DuoForgeProviderSelectionOptionsInternal {
         [Parameter(Mandatory)]
         [ValidateSet('codex', 'claude')]
         [string]$Provider,
-        [AllowNull()][AllowEmptyString()][string]$CodexModelCachePath = (Get-DuoForgeCodexModelCachePathInternal),
+        [AllowNull()][AllowEmptyString()][string]$CodexModelCachePath,
         $CodexModelListResponse,
         [AllowNull()][AllowEmptyString()][string]$ClaudeHelpText
     )
 
     if ($Provider -eq 'codex') {
+        $providerContext = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex
+        if (-not $PSBoundParameters.ContainsKey('CodexModelCachePath')) {
+            $CodexModelCachePath = Get-DuoForgeCodexModelCachePathInternal -ProviderContext $providerContext
+        }
         $models = @()
         $catalogSource = 'codex-app-server'
         if ($PSBoundParameters.ContainsKey('CodexModelListResponse')) {
@@ -406,7 +433,7 @@ function Get-DuoForgeProviderSelectionOptionsInternal {
             $catalogSource = 'codex-model-cache'
         }
         else {
-            $models = @(Get-DuoForgeCodexModelsFromCliInternal)
+            $models = @(Get-DuoForgeCodexModelsFromCliInternal -ProviderContext $providerContext)
         }
         if ($models.Count -eq 0 -and -not $PSBoundParameters.ContainsKey('CodexModelCachePath')) {
             $models = @(Get-DuoForgeCodexModelsFromCacheInternal -CachePath $CodexModelCachePath)
@@ -435,7 +462,7 @@ function Get-DuoForgeProviderSelectionOptionsInternal {
         ConvertFrom-DuoForgeClaudeHelpInternal -HelpText $ClaudeHelpText
     }
     else {
-        Get-DuoForgeClaudeCatalogFromCliInternal
+        Get-DuoForgeClaudeCatalogFromCliInternal -ProviderContext (Resolve-DuoForgeProviderExecutionContextInternal -Provider claude)
     }
     $catalogSource = 'claude-cli-help'
     if ($null -eq $catalog) {

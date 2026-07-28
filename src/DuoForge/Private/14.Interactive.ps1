@@ -1,30 +1,63 @@
-function Invoke-DuoForgeGuidedLogin {
+function Invoke-DuoForgeGuidedLoginCoreInternal {
     [CmdletBinding()]
-    param([ValidateSet('codex', 'claude')][string]$Provider)
-
-    if (-not (Test-DuoForgeInteractiveHost)) {
-        throw (New-DuoForgeException -Code 'DF-AUTH-NONINTERACTIVE' -Message '비대화형 환경에서는 로그인 프로세스를 시작하지 않습니다.')
-    }
-
-    if ($Provider -eq 'codex') {
-        Write-Host 'Codex 공식 브라우저 로그인을 시작합니다. DuoForge는 인증 정보나 코드를 입력받지 않습니다.'
-        & codex login
+    param(
+        [Parameter(Mandatory)][ValidateSet('codex', 'claude')][string]$Provider,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$ProviderContext,
+        [Parameter(Mandatory)]$CurrentReport,
+        [scriptblock]$ProcessInvoker,
+        [scriptblock]$ProviderDiagnosticInvoker,
+        [switch]$RenderReport
+    )
+    $loginArguments = if ($Provider -eq 'codex') { @('login') } else { @('auth', 'login') }
+    $processResult = if ($null -ne $ProcessInvoker) {
+        & $ProcessInvoker $Provider $loginArguments $ProviderContext
     }
     else {
-        Write-Host 'Claude 공식 브라우저 로그인을 시작합니다. DuoForge는 인증 정보나 코드를 입력받지 않습니다.'
-        & claude auth login
+        Invoke-DuoForgeProcess -CommandName $Provider -Arguments $loginArguments -CommandInvocation $ProviderContext.invocation -EnvironmentAllowList @($ProviderContext.environmentAllowList) -EnvironmentOverrides $ProviderContext.environmentOverrides -Interactive -TimeoutSeconds 900
     }
-    $exitCode = if ($null -eq $LASTEXITCODE) { 1 } else { [int]$LASTEXITCODE }
-    $report = Invoke-DuoForgeDoctorInternal
+    Clear-DuoForgeProviderCatalogCacheInternal -Provider $Provider
+    $exitCode = if ($null -eq $processResult.exitCode) { 1 } else { [int]$processResult.exitCode }
+    $diagnostic = if ($null -ne $ProviderDiagnosticInvoker) {
+        & $ProviderDiagnosticInvoker $Provider $ProviderContext
+    }
+    else {
+        Get-DuoForgeProviderDiagnostic -Provider $Provider -ProviderContext $ProviderContext
+    }
+    $report = Update-DuoForgeDoctorProviderInternal -Report $CurrentReport -Provider $Provider -Diagnostic $diagnostic
     $outcome = Get-DuoForgeGuidedLoginOutcomeInternal -Provider $Provider -ExitCode $exitCode -PostReport $report
+    $outcome['postReport'] = $report
     if ([string]$outcome.status -eq 'CANCELLED_OR_FAILED') {
         Write-Host '로그인이 취소되었거나 완료되지 않았습니다. 공급자 CLI가 표시한 URL·기기 코드 흐름을 그대로 사용하거나 수동 명령을 다시 실행해 주세요.' -ForegroundColor Yellow
     }
     elseif ([string]$outcome.status -eq 'AUTH_NOT_CONFIRMED') {
         Write-Host '로그인 명령은 끝났지만 구독 인증을 확인하지 못했습니다. 수동 명령을 확인한 뒤 다시 검사해 주세요.' -ForegroundColor Yellow
     }
-    Write-DuoForgeDoctorReport -Report $report
+    if ($RenderReport) { Write-DuoForgeDoctorReport -Report $report }
     return $outcome
+}
+
+function Invoke-DuoForgeGuidedLogin {
+    [CmdletBinding()]
+    param(
+        [ValidateSet('codex', 'claude')][string]$Provider,
+        $CurrentReport
+    )
+
+    if (-not (Test-DuoForgeInteractiveHost)) {
+        throw (New-DuoForgeException -Code 'DF-AUTH-NONINTERACTIVE' -Message '비대화형 환경에서는 로그인 프로세스를 시작하지 않습니다.')
+    }
+    $providerContext = Resolve-DuoForgeProviderExecutionContextInternal -Provider $Provider
+    if (-not [bool]$providerContext.liveRuntimeEligible) {
+        throw (New-DuoForgeException -Code 'DF-AUTH-CONTEXT' -Message '현재 격리 프로필에서는 브라우저 로그인을 시작하지 않습니다. 일반 호스트 PowerShell 7에서 다시 실행해 주세요.')
+    }
+    if ($Provider -eq 'codex') {
+        Write-Host 'Codex 공식 브라우저 로그인을 시작합니다. DuoForge는 인증 정보나 코드를 입력받지 않습니다.'
+    }
+    else {
+        Write-Host 'Claude 공식 브라우저 로그인을 시작합니다. DuoForge는 인증 정보나 코드를 입력받지 않습니다.'
+    }
+    if ($null -eq $CurrentReport) { $CurrentReport = Invoke-DuoForgeDoctorInternal }
+    return Invoke-DuoForgeGuidedLoginCoreInternal -Provider $Provider -ProviderContext $providerContext -CurrentReport $CurrentReport -RenderReport
 }
 
 function Get-DuoForgeInteractiveSetupActionsInternal {
@@ -36,36 +69,44 @@ function Get-DuoForgeInteractiveSetupActionsInternal {
 
 function Invoke-DuoForgeInteractiveSetup {
     [CmdletBinding()]
-    param([switch]$ShowReadyReport)
+    param(
+        [switch]$ShowReadyReport,
+        [scriptblock]$DoctorInvoker,
+        [scriptblock]$InputReader
+    )
 
+    $setupReport = $null
     while ($true) {
         Write-Host '환경과 구독 로그인을 확인하고 있습니다...' -ForegroundColor DarkGray
-        $report = Invoke-DuoForgeDoctorInternal
-        if ([bool]$report.readyForDocumentModes) {
-            if ($ShowReadyReport) { Write-DuoForgeDoctorReport -Report $report }
+        if ($null -eq $setupReport) {
+            $setupReport = if ($null -ne $DoctorInvoker) { & $DoctorInvoker } else { Invoke-DuoForgeDoctorInternal }
+        }
+        if ([bool]$setupReport.readyForDocumentModes) {
+            if ($ShowReadyReport) { Write-DuoForgeDoctorReport -Report $setupReport }
             else { Write-Host 'Codex와 Claude 구독 실행 환경이 준비되었습니다.' -ForegroundColor Green }
-            return $report
+            return $setupReport
         }
 
-        Write-DuoForgeDoctorReport -Report $report
-        $actions = @(Get-DuoForgeInteractiveSetupActionsInternal -Report $report)
+        Write-DuoForgeDoctorReport -Report $setupReport
+        $actions = @(Get-DuoForgeInteractiveSetupActionsInternal -Report $setupReport)
         Write-Host ''
         if ('codex-login' -in $actions) { Write-Host '[C] Codex 공식 로그인 시작' }
         if ('claude-login' -in $actions) { Write-Host '[A] Claude 공식 로그인 시작' }
         Write-Host '[M] 수동 로그인 명령 보기'
         Write-Host '[R] 다시 검사'
         Write-Host '[B] 홈으로 돌아가기'
-        $choice = (Read-Host '선택').Trim()
-        if ($choice -ieq 'B') { return $report }
-        if ($choice -ieq 'C' -and 'codex-login' -in $actions) { Invoke-DuoForgeGuidedLogin -Provider codex; continue }
-        if ($choice -ieq 'A' -and 'claude-login' -in $actions) { Invoke-DuoForgeGuidedLogin -Provider claude; continue }
+        $choice = if ($null -ne $InputReader) { [string](& $InputReader '선택') } else { Read-Host '선택' }
+        $choice = $choice.Trim()
+        if ($choice -ieq 'B') { return $setupReport }
+        if ($choice -ieq 'C' -and 'codex-login' -in $actions) { $setupReport = (Invoke-DuoForgeGuidedLogin -Provider codex -CurrentReport $setupReport).postReport; continue }
+        if ($choice -ieq 'A' -and 'claude-login' -in $actions) { $setupReport = (Invoke-DuoForgeGuidedLogin -Provider claude -CurrentReport $setupReport).postReport; continue }
         if ($choice -ieq 'M') {
             Write-Host 'Codex: codex login'
             Write-Host 'Claude: claude auth login'
             Write-Host '로그인 확인: codex login status / claude auth status'
             continue
         }
-        if ($choice -ieq 'R') { continue }
+        if ($choice -ieq 'R') { $setupReport = $null; continue }
         Write-Host '현재 가능한 항목을 선택해 주세요.' -ForegroundColor Yellow
     }
 }

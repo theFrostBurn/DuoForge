@@ -78,12 +78,15 @@ function Test-Case {
 
 function New-FakeDoctor {
     return [ordered]@{
+        powershell = [ordered]@{ version = '7.6.3'; executable = 'pwsh.exe'; ready = $true }
+        apiCredentialConflicts = @()
         readyForDocumentModes = $true
         readyForProjectAudit = $false
         providers = [ordered]@{
-            codex = [ordered]@{ version = 'codex-test'; authType = 'chatgpt' }
-            claude = [ordered]@{ version = 'claude-test'; authType = 'claude.ai' }
+            codex = [ordered]@{ installed = $true; version = 'codex-test'; authType = 'chatgpt'; authStatus = 'VERIFIED_SUBSCRIPTION'; subscription = $true; documentProfileSupported = $true; status = 'READY_DOCUMENTS' }
+            claude = [ordered]@{ installed = $true; version = 'claude-test'; authType = 'claude.ai'; authStatus = 'VERIFIED_SUBSCRIPTION'; subscription = $true; documentProfileSupported = $true; status = 'READY_DOCUMENTS' }
         }
+        recommendations = @()
     }
 }
 
@@ -644,6 +647,195 @@ try {
         Assert-NotContainsText $json 'secret-org'
         $codex = ConvertFrom-DuoForgeCodexAuthStatus -Text 'Logged in using ChatGPT' -ExitCode 0
         Assert-True ([bool]$codex.subscription)
+    }
+
+    Test-Case '일반 doctor는 Validation 없이 준비 및 차단 보고서를 렌더링한다' {
+        $ready = New-FakeDoctor
+        $blocked = New-FakeDoctor
+        $blocked.readyForDocumentModes = $false
+        $blocked.providers.codex.authType = 'unknown'
+        $blocked.providers.codex.authStatus = 'VERIFIED_NOT_LOGGED_IN'
+        $blocked.providers.codex.subscription = $false
+        $blocked.providers.codex.status = 'BLOCKED'
+        $blocked.recommendations = @('codex login으로 ChatGPT 구독 로그인을 완료해 주세요.')
+        $rendered = & $module {
+            param($readyReport, $blockedReport)
+            $readyText = (& { Write-DuoForgeDoctorReport -Report $readyReport } 6>&1 | Out-String)
+            $blockedText = (& { Write-DuoForgeDoctorReport -Report $blockedReport } 6>&1 | Out-String)
+            return [ordered]@{ ready = $readyText; blocked = $blockedText }
+        } $ready $blocked
+        Assert-ContainsText $rendered.ready '문서 모드 준비: 예'
+        Assert-ContainsText $rendered.blocked '문서 모드 준비: 아니요'
+        Assert-ContainsText $rendered.blocked 'codex login'
+    }
+
+    Test-Case '최초 설정 화면은 차단 doctor 뒤 로그인 선택지와 재검사를 표시한다' {
+        $blocked = New-FakeDoctor
+        $blocked.readyForDocumentModes = $false
+        $blocked.providers.codex.authType = 'unknown'
+        $blocked.providers.codex.authStatus = 'VERIFIED_NOT_LOGGED_IN'
+        $blocked.providers.codex.subscription = $false
+        $blocked.providers.codex.status = 'BLOCKED'
+        $blocked.recommendations = @('codex login으로 ChatGPT 구독 로그인을 완료해 주세요.')
+        $rendered = & $module {
+            param($report)
+            (& { Invoke-DuoForgeInteractiveSetup -DoctorInvoker { $report } -InputReader { 'B' } } 6>&1 | Out-String)
+        } $blocked
+        Assert-ContainsText $rendered '[C] Codex 공식 로그인 시작'
+        Assert-ContainsText $rendered '[R] 다시 검사'
+        Assert-NotContainsText $rendered 'Claude 공식 로그인 시작'
+    }
+
+    Test-Case '공급자 실행 컨텍스트는 프로필 불일치를 미로그인과 분리하고 명시적 인증 홈을 보존한다' {
+        $contexts = & $module {
+            $host = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex -ProcessUserProfile 'C:\Users\cookie' -DotNetUserProfile 'C:\Users\cookie' -ExplicitAuthHome ''
+            $sandbox = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex -ProcessUserProfile 'C:\Users\cookie' -DotNetUserProfile 'C:\Users\CodexSandboxOffline' -ExplicitAuthHome ''
+            $explicit = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex -ProcessUserProfile 'C:\Users\cookie' -DotNetUserProfile 'C:\Users\cookie' -ExplicitAuthHome 'D:\Auth\codex-home'
+            return [ordered]@{ host = $host; sandbox = $sandbox; explicit = $explicit }
+        }
+        Assert-Equal $contexts.host.authContextStatus 'AVAILABLE'
+        Assert-True ([bool]$contexts.host.liveRuntimeEligible)
+        Assert-Equal $contexts.sandbox.authContextStatus 'PROFILE_MISMATCH'
+        Assert-False ([bool]$contexts.sandbox.liveRuntimeEligible)
+        Assert-Equal $contexts.explicit.authHomeSource 'explicit'
+        Assert-Equal $contexts.explicit.environmentOverrides.CODEX_HOME 'D:\Auth\codex-home'
+    }
+
+    Test-Case '인증 상태는 확인된 미로그인과 프로필·타임아웃·형식 오류를 구분한다' {
+        $states = & $module {
+            $host = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex -ProcessUserProfile 'C:\Users\cookie' -DotNetUserProfile 'C:\Users\cookie' -ExplicitAuthHome ''
+            $sandbox = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex -ProcessUserProfile 'C:\Users\cookie' -DotNetUserProfile 'C:\Users\CodexSandboxOffline' -ExplicitAuthHome ''
+            $loggedOutProcess = [ordered]@{ started = $true; timedOut = $false; exitCode = 1; stdout = ''; stderr = 'Not logged in'; errorCategory = $null }
+            $loggedOutZeroProcess = [ordered]@{ started = $true; timedOut = $false; exitCode = 0; stdout = 'Not logged in'; stderr = ''; errorCategory = $null }
+            $timeoutProcess = [ordered]@{ started = $true; timedOut = $true; exitCode = $null; stdout = ''; stderr = ''; errorCategory = 'timeout' }
+            $unknownProcess = [ordered]@{ started = $true; timedOut = $false; exitCode = 0; stdout = 'new status format'; stderr = ''; errorCategory = $null }
+            return [ordered]@{
+                loggedOut = Get-DuoForgeProviderAuthStatusInternal -Provider codex -ProcessResult $loggedOutProcess -ProviderContext $host
+                loggedOutZero = Get-DuoForgeProviderAuthStatusInternal -Provider codex -ProcessResult $loggedOutZeroProcess -ProviderContext $host
+                sandbox = Get-DuoForgeProviderAuthStatusInternal -Provider codex -ProcessResult $loggedOutProcess -ProviderContext $sandbox
+                timeout = Get-DuoForgeProviderAuthStatusInternal -Provider codex -ProcessResult $timeoutProcess -ProviderContext $host
+                unknown = Get-DuoForgeProviderAuthStatusInternal -Provider codex -ProcessResult $unknownProcess -ProviderContext $host
+            }
+        }
+        Assert-Equal $states.loggedOut.status 'VERIFIED_NOT_LOGGED_IN'
+        Assert-Equal $states.loggedOutZero.status 'VERIFIED_NOT_LOGGED_IN'
+        Assert-Equal $states.sandbox.status 'PROFILE_MISMATCH'
+        Assert-Equal $states.timeout.status 'STATUS_UNAVAILABLE'
+        Assert-Equal $states.unknown.status 'STATUS_FORMAT_UNSUPPORTED'
+    }
+
+    Test-Case '상태 확인 불가 공급자에는 브라우저 로그인 동작을 제안하지 않는다' {
+        $report = New-FakeDoctor
+        $report.readyForDocumentModes = $false
+        $report.providers.codex.subscription = $false
+        $report.providers.codex.authStatus = 'PROFILE_MISMATCH'
+        $report.providers.codex.status = 'BLOCKED_CONTEXT'
+        $gate = & $module { param($value) Get-DuoForgeAuthenticationGateInternal -Report $value } $report
+        Assert-False ('codex-login' -in @($gate.actions))
+        Assert-True ('recheck' -in @($gate.actions))
+        Assert-True ('codex' -in @($gate.contextUnavailableProviders))
+    }
+
+    Test-Case 'Codex 모델 캐시는 공통 인증 홈을 따르고 프로필 불일치에서는 사용하지 않는다' {
+        $paths = & $module {
+            $explicit = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex -ProcessUserProfile 'C:\Users\cookie' -DotNetUserProfile 'C:\Users\cookie' -ExplicitAuthHome 'D:\Auth\codex-home'
+            $sandbox = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex -ProcessUserProfile 'C:\Users\cookie' -DotNetUserProfile 'C:\Users\CodexSandboxOffline' -ExplicitAuthHome ''
+            return [ordered]@{
+                explicit = Get-DuoForgeCodexModelCachePathInternal -ProviderContext $explicit
+                sandbox = Get-DuoForgeCodexModelCachePathInternal -ProviderContext $sandbox
+            }
+        }
+        Assert-Equal $paths.explicit 'D:\Auth\codex-home\models_cache.json'
+        Assert-True ([string]::IsNullOrWhiteSpace([string]$paths.sandbox))
+    }
+
+    Test-Case '안내형 로그인 코어는 성공·취소·상태 미확인을 오프라인으로 구분한다' {
+        $results = & $module {
+            $context = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex -ProcessUserProfile 'C:\Users\cookie' -DotNetUserProfile 'C:\Users\cookie' -ExplicitAuthHome 'D:\Auth\codex-home'
+            $makeReport = {
+                param([bool]$CodexSubscription, [string]$CodexAuthStatus, [bool]$ClaudeSubscription)
+                return [ordered]@{
+                    powershell = [ordered]@{ version = '7.6.3'; executable = 'pwsh.exe'; ready = $true }
+                    apiCredentialConflicts = @()
+                    readyForDocumentModes = $CodexSubscription -and $ClaudeSubscription
+                    readyForProjectAudit = $false
+                    providers = [ordered]@{
+                        codex = [ordered]@{ installed = $true; version = 'codex-test'; authType = if ($CodexSubscription) { 'chatgpt' } else { 'unknown' }; authStatus = $CodexAuthStatus; subscription = $CodexSubscription; documentProfileSupported = $true; status = if ($CodexSubscription) { 'READY_DOCUMENTS' } else { 'BLOCKED' } }
+                        claude = [ordered]@{ installed = $true; version = 'claude-test'; authType = if ($ClaudeSubscription) { 'claude.ai' } else { 'unknown' }; authStatus = if ($ClaudeSubscription) { 'VERIFIED_SUBSCRIPTION' } else { 'VERIFIED_NOT_LOGGED_IN' }; subscription = $ClaudeSubscription; documentProfileSupported = $true; status = if ($ClaudeSubscription) { 'READY_DOCUMENTS' } else { 'BLOCKED' } }
+                    }
+                    recommendations = @()
+                }
+            }
+            $makeCodexDiagnostic = {
+                param([bool]$Subscription, [string]$AuthStatus)
+                [ordered]@{ installed = $true; version = 'codex-test'; authType = if ($Subscription) { 'chatgpt' } else { 'unknown' }; authStatus = $AuthStatus; subscription = $Subscription; documentProfileSupported = $true; status = if ($Subscription) { 'READY_DOCUMENTS' } else { 'BLOCKED' } }
+            }
+            $success = Invoke-DuoForgeGuidedLoginCoreInternal -Provider codex -ProviderContext $context -CurrentReport (& $makeReport $false 'VERIFIED_NOT_LOGGED_IN' $false) -ProcessInvoker { [ordered]@{ exitCode = 0 } } -ProviderDiagnosticInvoker { & $makeCodexDiagnostic $true 'VERIFIED_SUBSCRIPTION' }
+            $cancelled = Invoke-DuoForgeGuidedLoginCoreInternal -Provider codex -ProviderContext $context -CurrentReport (& $makeReport $false 'VERIFIED_NOT_LOGGED_IN' $true) -ProcessInvoker { [ordered]@{ exitCode = 1 } } -ProviderDiagnosticInvoker { & $makeCodexDiagnostic $false 'VERIFIED_NOT_LOGGED_IN' }
+            $unavailable = Invoke-DuoForgeGuidedLoginCoreInternal -Provider codex -ProviderContext $context -CurrentReport (& $makeReport $false 'VERIFIED_NOT_LOGGED_IN' $true) -ProcessInvoker { [ordered]@{ exitCode = 0 } } -ProviderDiagnosticInvoker { & $makeCodexDiagnostic $false 'STATUS_UNAVAILABLE' }
+            return [ordered]@{ success = $success; cancelled = $cancelled; unavailable = $unavailable }
+        }
+        Assert-Equal $results.success.status 'READY'
+        Assert-False ([bool]$results.success.modelCallsAllowed) '다른 공급자가 미로그인이면 모델 호출이 열리면 안 됩니다.'
+        Assert-False ([bool]$results.success.postReport.providers.claude.subscription) '상대 공급자의 기존 상태가 바뀌었습니다.'
+        Assert-Equal $results.cancelled.status 'CANCELLED_OR_FAILED'
+        Assert-True ([bool]$results.cancelled.postReport.providers.claude.subscription) '상대 공급자의 성공 상태를 보존하지 못했습니다.'
+        Assert-Equal $results.unavailable.status 'AUTH_STATUS_UNAVAILABLE'
+        Assert-False ('codex-login' -in @($results.unavailable.nextActions))
+    }
+
+    Test-Case '안내형 로그인 뒤 해당 공급자 모델 카탈로그 캐시만 무효화한다' {
+        $keys = & $module {
+            $script:DuoForgeCliCatalogCache = @{
+                'codex|source|home|True' = @('old-codex')
+                'claude|source|home|True' = @('old-claude')
+            }
+            Clear-DuoForgeProviderCatalogCacheInternal -Provider codex
+            $remaining = @($script:DuoForgeCliCatalogCache.Keys)
+            $script:DuoForgeCliCatalogCache = @{}
+            return $remaining
+        }
+        Assert-False ('codex|source|home|True' -in @($keys))
+        Assert-True ('claude|source|home|True' -in @($keys))
+    }
+
+    Test-Case '공통 자식 환경은 명시적 인증 홈을 전달하고 부모 환경을 바꾸지 않는다' {
+        $previous = [Environment]::GetEnvironmentVariable('CODEX_HOME', [EnvironmentVariableTarget]::Process)
+        try {
+            [Environment]::SetEnvironmentVariable('CODEX_HOME', 'D:\Parent\codex-home', [EnvironmentVariableTarget]::Process)
+            $child = & $module {
+                $context = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex -ProcessUserProfile 'C:\Users\cookie' -DotNetUserProfile 'C:\Users\cookie' -ExplicitAuthHome 'D:\Child\codex-home'
+                $pwsh = Resolve-DuoForgeCommandInvocation -CommandName 'pwsh.exe'
+                Invoke-DuoForgeProcess -CommandName 'pwsh.exe' -CommandInvocation $pwsh -Arguments @('-NoLogo', '-NoProfile', '-Command', '[Console]::Write($env:CODEX_HOME)') -EnvironmentAllowList @($context.environmentAllowList) -EnvironmentOverrides $context.environmentOverrides
+            }
+            Assert-Equal $child.exitCode 0
+            Assert-Equal ([string]$child.stdout) 'D:\Child\codex-home'
+            Assert-Equal ([Environment]::GetEnvironmentVariable('CODEX_HOME', [EnvironmentVariableTarget]::Process)) 'D:\Parent\codex-home'
+        }
+        finally {
+            [Environment]::SetEnvironmentVariable('CODEX_HOME', $previous, [EnvironmentVariableTarget]::Process)
+        }
+    }
+
+    Test-Case 'API 인증 우선 조건은 여섯 변수의 이름만 반환한다' {
+        $names = @('OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY')
+        $previous = @{}
+        try {
+            foreach ($name in $names) {
+                $previous[$name] = [Environment]::GetEnvironmentVariable($name, [EnvironmentVariableTarget]::Process)
+                [Environment]::SetEnvironmentVariable($name, $null, [EnvironmentVariableTarget]::Process)
+            }
+            foreach ($name in $names) {
+                [Environment]::SetEnvironmentVariable($name, 'never-print-this-test-secret', [EnvironmentVariableTarget]::Process)
+                $conflicts = & $module { Get-DuoForgeApiCredentialConflicts }
+                Assert-True ($name -in @($conflicts))
+                Assert-NotContainsText ($conflicts | ConvertTo-Json -Compress) 'never-print-this-test-secret'
+                [Environment]::SetEnvironmentVariable($name, $null, [EnvironmentVariableTarget]::Process)
+            }
+        }
+        finally {
+            foreach ($name in $names) { [Environment]::SetEnvironmentVariable($name, $previous[$name], [EnvironmentVariableTarget]::Process) }
+        }
     }
 
     Test-Case '첫 실행 설정은 준비되지 않은 공급자 로그인과 재검사만 제안한다' {
@@ -2092,6 +2284,8 @@ try {
         $allowed = Test-DuoForgeStartRequest -Request $allowedRequest -DoctorReport (New-FakeDoctor) -Config $config
         Assert-True ([bool]$allowed.valid) ($allowed.errors | ConvertTo-Json -Depth 20 -Compress)
         Assert-True ($allowed.executionPlan.contextBatchCount -gt 0)
+        $planText = & $module { param($validation) (& { Write-DuoForgeExecutionPlan -Validation $validation } 6>&1 | Out-String) } $allowed
+        Assert-ContainsText $planText '문맥 배치:'
         $run = New-DuoForgeRun -ValidationResult $allowed
         $contextPlan = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'inputs\context-plan.json') | ConvertFrom-Json -Depth 100
         Assert-Equal @($contextPlan.batches).Count $allowed.contextPlan.selectedBatchCount

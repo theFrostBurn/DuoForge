@@ -25,11 +25,14 @@ function ConvertFrom-DuoForgeCodexAuthStatusInternal {
 
     $subscription = $ExitCode -eq 0 -and $Text -match '(?i)logged\s+in\s+using\s+chatgpt'
     $api = $ExitCode -eq 0 -and $Text -match '(?i)(api[- ]?key|openai_api_key)'
+    $loggedOut = $Text -match '(?i)(not\s+logged\s+in|logged\s+out|login\s+required|please\s+(?:log\s*in|login))'
     return [ordered]@{
         authenticated = $ExitCode -eq 0
         subscription = $subscription -and -not $api
         authType = if ($subscription -and -not $api) { 'chatgpt' } elseif ($api) { 'api' } else { 'unknown' }
         exitCode = $ExitCode
+        recognized = $subscription -or $api -or $loggedOut
+        loggedOut = $loggedOut
     }
 }
 
@@ -46,27 +49,96 @@ function ConvertFrom-DuoForgeClaudeAuthStatusInternal {
     $authMethod = 'unknown'
     $apiProvider = 'unknown'
     $subscriptionType = $null
-    if ($ExitCode -eq 0) {
-        try {
-            $status = $Text | ConvertFrom-Json -Depth 20
+    $recognized = $false
+    try {
+        $status = $Text | ConvertFrom-Json -Depth 20 -ErrorAction Stop
+        $loggedInProperty = $status.PSObject.Properties['loggedIn']
+        if ($null -ne $loggedInProperty) {
+            $recognized = $true
             $loggedIn = [bool]$status.loggedIn
             if (-not [string]::IsNullOrWhiteSpace([string]$status.authMethod)) { $authMethod = [string]$status.authMethod }
             if (-not [string]::IsNullOrWhiteSpace([string]$status.apiProvider)) { $apiProvider = [string]$status.apiProvider }
             if (-not [string]::IsNullOrWhiteSpace([string]$status.subscriptionType)) { $subscriptionType = [string]$status.subscriptionType }
         }
-        catch {
-            $loggedIn = $false
-        }
     }
+    catch { $loggedIn = $false }
 
-    $subscription = $loggedIn -and $authMethod -eq 'claude.ai' -and $apiProvider -eq 'firstParty'
+    $authenticated = $ExitCode -eq 0 -and $loggedIn
+    $subscription = $authenticated -and $authMethod -eq 'claude.ai' -and $apiProvider -eq 'firstParty'
     return [ordered]@{
-        authenticated = $loggedIn
+        authenticated = $authenticated
         subscription = $subscription
         authType = if ($subscription) { 'claude.ai' } elseif ($loggedIn) { 'non-subscription-or-unknown' } else { 'unknown' }
         subscriptionType = if ($subscription) { $subscriptionType } else { $null }
         exitCode = $ExitCode
+        recognized = $recognized
+        loggedOut = $recognized -and -not $loggedIn
     }
+}
+
+function Get-DuoForgeProviderAuthStatusInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('codex', 'claude')][string]$Provider,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$ProcessResult,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$ProviderContext
+    )
+
+    if ([string]$ProviderContext.authContextStatus -eq 'PROFILE_MISMATCH') {
+        return [ordered]@{ status = 'PROFILE_MISMATCH'; authenticated = $false; subscription = $false; authType = 'unknown'; subscriptionType = $null; exitCode = $ProcessResult.exitCode }
+    }
+    if (-not [bool](Get-DuoForgeObjectValue -Object $ProcessResult -Name 'started' -Default $false) -or
+        [bool](Get-DuoForgeObjectValue -Object $ProcessResult -Name 'timedOut' -Default $false)) {
+        return [ordered]@{ status = 'STATUS_UNAVAILABLE'; authenticated = $false; subscription = $false; authType = 'unknown'; subscriptionType = $null; exitCode = $ProcessResult.exitCode }
+    }
+
+    $text = [string](Get-DuoForgeObjectValue -Object $ProcessResult -Name 'stdout' -Default '') + [Environment]::NewLine + [string](Get-DuoForgeObjectValue -Object $ProcessResult -Name 'stderr' -Default '')
+    if ($text -match '(?i)(access\s+(?:is\s+)?denied|permission\s+denied|operation\s+not\s+permitted)') {
+        return [ordered]@{ status = 'STATUS_UNAVAILABLE'; authenticated = $false; subscription = $false; authType = 'unknown'; subscriptionType = $null; exitCode = $ProcessResult.exitCode }
+    }
+    $exitCode = if ($null -eq $ProcessResult.exitCode) { 1 } else { [int]$ProcessResult.exitCode }
+    $parsed = if ($Provider -eq 'codex') {
+        ConvertFrom-DuoForgeCodexAuthStatusInternal -Text $text -ExitCode $exitCode
+    }
+    else {
+        ConvertFrom-DuoForgeClaudeAuthStatusInternal -Text ([string]$ProcessResult.stdout) -ExitCode $exitCode
+    }
+    $status = if ($parsed.subscription) {
+        'VERIFIED_SUBSCRIPTION'
+    }
+    elseif ($parsed.loggedOut) {
+        'VERIFIED_NOT_LOGGED_IN'
+    }
+    elseif ($parsed.recognized -and $parsed.authenticated) {
+        'VERIFIED_API_AUTH'
+    }
+    elseif ($exitCode -eq 0) {
+        'STATUS_FORMAT_UNSUPPORTED'
+    }
+    else {
+        'STATUS_UNAVAILABLE'
+    }
+    return [ordered]@{
+        status = $status
+        authenticated = [bool]$parsed.authenticated
+        subscription = [bool]$parsed.subscription
+        authType = [string]$parsed.authType
+        subscriptionType = Get-DuoForgeObjectValue -Object $parsed -Name 'subscriptionType'
+        exitCode = $exitCode
+    }
+}
+
+function Invoke-DuoForgeProviderContextProcessInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('codex', 'claude')][string]$Provider,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$ProviderContext,
+        [scriptblock]$ProcessInvoker
+    )
+
+    if ($null -ne $ProcessInvoker) { return & $ProcessInvoker $Provider $Arguments $ProviderContext }
+    return Invoke-DuoForgeProcess -CommandName $Provider -Arguments $Arguments -CommandInvocation $ProviderContext.invocation -EnvironmentAllowList @($ProviderContext.environmentAllowList) -EnvironmentOverrides $ProviderContext.environmentOverrides
 }
 
 function Get-DuoForgeProviderDiagnostic {
@@ -74,10 +146,17 @@ function Get-DuoForgeProviderDiagnostic {
     param(
         [Parameter(Mandatory)]
         [ValidateSet('codex', 'claude')]
-        [string]$Provider
+        [string]$Provider,
+
+        [System.Collections.IDictionary]$ProviderContext,
+
+        [scriptblock]$ProcessInvoker
     )
 
-    $command = Resolve-DuoForgeCommandInvocation -CommandName $Provider
+    if ($null -eq $ProviderContext) {
+        $ProviderContext = Resolve-DuoForgeProviderExecutionContextInternal -Provider $Provider
+    }
+    $command = $ProviderContext.invocation
     if ($null -eq $command) {
         return [ordered]@{
             provider = $Provider
@@ -89,21 +168,23 @@ function Get-DuoForgeProviderDiagnostic {
             requiredFlags = [ordered]@{}
             documentProfileSupported = $false
             projectAuditProfileSupported = $false
+            authStatus = 'STATUS_UNAVAILABLE'
+            authContext = [ordered]@{ status = [string]$ProviderContext.authContextStatus; authHomeSource = [string]$ProviderContext.authHomeSource; profileMismatch = [bool]$ProviderContext.profileMismatch; liveRuntimeEligible = $false }
             status = 'MISSING'
         }
     }
 
-    $versionResult = Invoke-DuoForgeProcess -CommandName $Provider -Arguments @('--version')
+    $versionResult = Invoke-DuoForgeProviderContextProcessInternal -Provider $Provider -Arguments @('--version') -ProviderContext $ProviderContext -ProcessInvoker $ProcessInvoker
     $versionText = (($versionResult.stdout + ' ' + $versionResult.stderr).Trim() -split "`r?`n")[0]
 
     if ($Provider -eq 'codex') {
-        $helpResult = Invoke-DuoForgeProcess -CommandName 'codex' -Arguments @('exec', '--help')
-        $globalHelpResult = Invoke-DuoForgeProcess -CommandName 'codex' -Arguments @('--help')
+        $helpResult = Invoke-DuoForgeProviderContextProcessInternal -Provider $Provider -Arguments @('exec', '--help') -ProviderContext $ProviderContext -ProcessInvoker $ProcessInvoker
+        $globalHelpResult = Invoke-DuoForgeProviderContextProcessInternal -Provider $Provider -Arguments @('--help') -ProviderContext $ProviderContext -ProcessInvoker $ProcessInvoker
         $helpText = $helpResult.stdout + [Environment]::NewLine + $helpResult.stderr + [Environment]::NewLine + $globalHelpResult.stdout + [Environment]::NewLine + $globalHelpResult.stderr
         $required = @('--ask-for-approval', '--config', '--model', '--sandbox', '--skip-git-repo-check', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--output-schema', '--json', '--output-last-message')
         $flagStatus = Test-DuoForgeHelpFlags -HelpText $helpText -RequiredFlags $required
-        $authResult = Invoke-DuoForgeProcess -CommandName 'codex' -Arguments @('login', 'status')
-        $auth = ConvertFrom-DuoForgeCodexAuthStatusInternal -Text ($authResult.stdout + [Environment]::NewLine + $authResult.stderr) -ExitCode $(if ($null -eq $authResult.exitCode) { 1 } else { $authResult.exitCode })
+        $authResult = Invoke-DuoForgeProviderContextProcessInternal -Provider $Provider -Arguments @('login', 'status') -ProviderContext $ProviderContext -ProcessInvoker $ProcessInvoker
+        $auth = Get-DuoForgeProviderAuthStatusInternal -Provider codex -ProcessResult $authResult -ProviderContext $ProviderContext
         $documentSupported = @($flagStatus.Values | Where-Object { -not $_ }).Count -eq 0
         return [ordered]@{
             provider = 'codex'
@@ -112,22 +193,24 @@ function Get-DuoForgeProviderDiagnostic {
             authenticated = $auth.authenticated
             subscription = $auth.subscription
             authType = $auth.authType
+            authStatus = $auth.status
             authStatusExitCode = $auth.exitCode
+            authContext = [ordered]@{ status = [string]$ProviderContext.authContextStatus; authHomeSource = [string]$ProviderContext.authHomeSource; profileMismatch = [bool]$ProviderContext.profileMismatch; liveRuntimeEligible = [bool]$ProviderContext.liveRuntimeEligible; commandSource = [string]$ProviderContext.invocation.source }
             requiredFlags = $flagStatus
             ignoreRulesAvailable = [bool]$flagStatus['--ignore-rules']
             zeroToolSurfaceVerified = $false
             documentProfileSupported = $documentSupported
             projectAuditProfileSupported = $false
-            status = if ($auth.subscription -and $documentSupported) { 'READY_DOCUMENTS' } else { 'BLOCKED' }
+            status = if ($auth.subscription -and $documentSupported -and $ProviderContext.liveRuntimeEligible) { 'READY_DOCUMENTS' } elseif ($auth.status -eq 'PROFILE_MISMATCH') { 'BLOCKED_CONTEXT' } else { 'BLOCKED' }
         }
     }
 
-    $helpResult = Invoke-DuoForgeProcess -CommandName 'claude' -Arguments @('--help')
+    $helpResult = Invoke-DuoForgeProviderContextProcessInternal -Provider $Provider -Arguments @('--help') -ProviderContext $ProviderContext -ProcessInvoker $ProcessInvoker
     $helpText = $helpResult.stdout + [Environment]::NewLine + $helpResult.stderr
     $required = @('--model', '--effort', '--safe-mode', '--strict-mcp-config', '--tools', '--disallowedTools', '--no-chrome', '--no-session-persistence', '--permission-mode', '--output-format', '--json-schema')
     $flagStatus = Test-DuoForgeHelpFlags -HelpText $helpText -RequiredFlags $required
-    $authResult = Invoke-DuoForgeProcess -CommandName 'claude' -Arguments @('auth', 'status')
-    $auth = ConvertFrom-DuoForgeClaudeAuthStatusInternal -Text $authResult.stdout -ExitCode $(if ($null -eq $authResult.exitCode) { 1 } else { $authResult.exitCode })
+    $authResult = Invoke-DuoForgeProviderContextProcessInternal -Provider $Provider -Arguments @('auth', 'status') -ProviderContext $ProviderContext -ProcessInvoker $ProcessInvoker
+    $auth = Get-DuoForgeProviderAuthStatusInternal -Provider claude -ProcessResult $authResult -ProviderContext $ProviderContext
     $documentSupported = @($flagStatus.Values | Where-Object { -not $_ }).Count -eq 0
     return [ordered]@{
         provider = 'claude'
@@ -137,13 +220,60 @@ function Get-DuoForgeProviderDiagnostic {
         subscription = $auth.subscription
         authType = $auth.authType
         subscriptionType = $auth.subscriptionType
+        authStatus = $auth.status
         authStatusExitCode = $auth.exitCode
+        authContext = [ordered]@{ status = [string]$ProviderContext.authContextStatus; authHomeSource = [string]$ProviderContext.authHomeSource; profileMismatch = [bool]$ProviderContext.profileMismatch; liveRuntimeEligible = [bool]$ProviderContext.liveRuntimeEligible; commandSource = [string]$ProviderContext.invocation.source }
         requiredFlags = $flagStatus
         zeroToolSurfaceVerified = $false
         documentProfileSupported = $documentSupported
         projectAuditProfileSupported = $false
-        status = if ($auth.subscription -and $documentSupported) { 'READY_DOCUMENTS' } else { 'BLOCKED' }
+        status = if ($auth.subscription -and $documentSupported -and $ProviderContext.liveRuntimeEligible) { 'READY_DOCUMENTS' } elseif ($auth.status -eq 'PROFILE_MISMATCH') { 'BLOCKED_CONTEXT' } else { 'BLOCKED' }
     }
+}
+
+function Get-DuoForgeDoctorRecommendationsInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][bool]$PowerShellReady,
+        [Parameter(Mandatory)]$Codex,
+        [Parameter(Mandatory)]$Claude,
+        [AllowEmptyCollection()][string[]]$ApiConflicts = @()
+    )
+
+    $recommendations = [System.Collections.Generic.List[string]]::new()
+    if (-not $PowerShellReady) { $recommendations.Add('PowerShell 7 이상에서 다시 실행해 주세요.') }
+    if (-not $Codex.installed) { $recommendations.Add('Codex CLI를 설치해 주세요.') }
+    elseif ($Codex.authStatus -eq 'VERIFIED_NOT_LOGGED_IN') { $recommendations.Add('codex login으로 ChatGPT 구독 로그인을 완료해 주세요.') }
+    elseif ($Codex.authStatus -eq 'PROFILE_MISMATCH') { $recommendations.Add('Codex 인증을 확인할 수 없는 격리 프로필입니다. 일반 호스트 PowerShell 7에서 duoforge doctor를 다시 실행해 주세요.') }
+    elseif (-not $Codex.subscription) { $recommendations.Add('codex login status를 일반 호스트 PowerShell 7에서 다시 확인해 주세요. 상태 확인 실패를 미로그인으로 간주하지 않았습니다.') }
+    if (-not $Claude.installed) { $recommendations.Add('Claude Code CLI를 설치해 주세요.') }
+    elseif ($Claude.authStatus -eq 'VERIFIED_NOT_LOGGED_IN') { $recommendations.Add('claude auth login으로 Claude 구독 로그인을 완료해 주세요.') }
+    elseif ($Claude.authStatus -eq 'PROFILE_MISMATCH') { $recommendations.Add('Claude 인증을 확인할 수 없는 격리 프로필입니다. 일반 호스트 PowerShell 7에서 duoforge doctor를 다시 실행해 주세요.') }
+    elseif (-not $Claude.subscription) { $recommendations.Add('claude auth status를 일반 호스트 PowerShell 7에서 다시 확인해 주세요. 상태 확인 실패를 미로그인으로 간주하지 않았습니다.') }
+    if ($ApiConflicts.Count -gt 0) { $recommendations.Add('표시된 API 인증 우선 환경 변수를 사용자가 직접 정리한 뒤 다시 검사해 주세요. DuoForge는 값을 읽거나 자동 삭제하지 않습니다.') }
+    $recommendations.Add('3A는 현재 Windows 격리 후보가 범위 밖 읽기와 자식 프로세스 차단에 실패하여 비활성화되어 있습니다.')
+    return @($recommendations)
+}
+
+function Update-DuoForgeDoctorProviderInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Report,
+        [Parameter(Mandatory)][ValidateSet('codex', 'claude')][string]$Provider,
+        [Parameter(Mandatory)]$Diagnostic
+    )
+
+    $updated = ConvertTo-DuoForgeHashtable -InputObject $Report
+    $updated.providers[$Provider] = ConvertTo-DuoForgeHashtable -InputObject $Diagnostic
+    $codex = $updated.providers.codex
+    $claude = $updated.providers.claude
+    $pwshReady = [bool](Get-DuoForgeObjectValue -Object $updated.powershell -Name 'ready' -Default $false)
+    $apiConflicts = @(Get-DuoForgeObjectValue -Object $updated -Name 'apiCredentialConflicts' -Default @())
+    $updated.checkedAt = Get-DuoForgeUtcNow
+    $updated.readyForDocumentModes = $pwshReady -and $apiConflicts.Count -eq 0 -and $codex.subscription -and $claude.subscription -and $codex.documentProfileSupported -and $claude.documentProfileSupported
+    $updated.readyForProjectAudit = $false
+    $updated.recommendations = @(Get-DuoForgeDoctorRecommendationsInternal -PowerShellReady $pwshReady -Codex $codex -Claude $claude -ApiConflicts $apiConflicts)
+    return $updated
 }
 
 function Invoke-DuoForgeDoctorInternal {
@@ -157,14 +287,7 @@ function Invoke-DuoForgeDoctorInternal {
     $pwshReady = $PSVersionTable.PSVersion.Major -ge 7
     $documentReady = $pwshReady -and $apiConflicts.Count -eq 0 -and $codex.subscription -and $claude.subscription -and $codex.documentProfileSupported -and $claude.documentProfileSupported
 
-    $recommendations = [System.Collections.Generic.List[string]]::new()
-    if (-not $pwshReady) { $recommendations.Add('PowerShell 7 이상에서 다시 실행해 주세요.') }
-    if (-not $codex.installed) { $recommendations.Add('Codex CLI를 설치해 주세요.') }
-    elseif (-not $codex.subscription) { $recommendations.Add('codex login으로 ChatGPT 구독 로그인을 완료해 주세요.') }
-    if (-not $claude.installed) { $recommendations.Add('Claude Code CLI를 설치해 주세요.') }
-    elseif (-not $claude.subscription) { $recommendations.Add('claude auth login으로 Claude 구독 로그인을 완료해 주세요.') }
-    if ($apiConflicts.Count -gt 0) { $recommendations.Add('표시된 API 인증 우선 환경 변수를 사용자가 직접 정리한 뒤 다시 검사해 주세요. DuoForge는 값을 읽거나 자동 삭제하지 않습니다.') }
-    $recommendations.Add('3A는 현재 Windows 격리 후보가 범위 밖 읽기와 자식 프로세스 차단에 실패하여 비활성화되어 있습니다.')
+    $recommendations = @(Get-DuoForgeDoctorRecommendationsInternal -PowerShellReady $pwshReady -Codex $codex -Claude $claude -ApiConflicts $apiConflicts)
 
     return [ordered]@{
         schemaVersion = 1
@@ -192,11 +315,14 @@ function Get-DuoForgeAuthenticationGateInternal {
     param([Parameter(Mandatory)]$Report)
 
     $missingProviders = [System.Collections.Generic.List[string]]::new()
-    if (-not [bool](Get-DuoForgeObjectValue -Object $Report.providers.codex -Name 'subscription' -Default $false)) {
-        $missingProviders.Add('codex')
-    }
-    if (-not [bool](Get-DuoForgeObjectValue -Object $Report.providers.claude -Name 'subscription' -Default $false)) {
-        $missingProviders.Add('claude')
+    $contextUnavailableProviders = [System.Collections.Generic.List[string]]::new()
+    foreach ($provider in @('codex', 'claude')) {
+        $diagnostic = Get-DuoForgeObjectValue -Object $Report.providers -Name $provider
+        $subscription = [bool](Get-DuoForgeObjectValue -Object $diagnostic -Name 'subscription' -Default $false)
+        if ($subscription) { continue }
+        $authStatus = [string](Get-DuoForgeObjectValue -Object $diagnostic -Name 'authStatus' -Default 'VERIFIED_NOT_LOGGED_IN')
+        if ($authStatus -eq 'VERIFIED_NOT_LOGGED_IN') { $missingProviders.Add($provider) }
+        else { $contextUnavailableProviders.Add($provider) }
     }
 
     $ready = [bool](Get-DuoForgeObjectValue -Object $Report -Name 'readyForDocumentModes' -Default $false)
@@ -215,6 +341,7 @@ function Get-DuoForgeAuthenticationGateInternal {
         inputTransferAllowed = $ready
         blockCode = if ($ready) { $null } else { 'DF-PREFLIGHT-PROVIDERS' }
         missingProviders = @($missingProviders)
+        contextUnavailableProviders = @($contextUnavailableProviders)
         actions = @($actions)
     }
 }
@@ -229,13 +356,33 @@ function Get-DuoForgeGuidedLoginOutcomeInternal {
 
     $diagnostic = Get-DuoForgeObjectValue -Object $PostReport.providers -Name $Provider
     $subscription = [bool](Get-DuoForgeObjectValue -Object $diagnostic -Name 'subscription' -Default $false)
-    $status = if ($subscription) { 'READY' } elseif ($ExitCode -eq 0) { 'AUTH_NOT_CONFIRMED' } else { 'CANCELLED_OR_FAILED' }
+    $authStatus = [string](Get-DuoForgeObjectValue -Object $diagnostic -Name 'authStatus' -Default '')
+    $status = if ($subscription) {
+        'READY'
+    }
+    elseif ($ExitCode -ne 0) {
+        'CANCELLED_OR_FAILED'
+    }
+    elseif ($authStatus -in @('PROFILE_MISMATCH', 'STATUS_UNAVAILABLE', 'STATUS_FORMAT_UNSUPPORTED')) {
+        'AUTH_STATUS_UNAVAILABLE'
+    }
+    else {
+        'AUTH_NOT_CONFIRMED'
+    }
     return [ordered]@{
         provider = $Provider
         status = $status
         exitCode = $ExitCode
         subscription = $subscription
         modelCallsAllowed = [bool](Get-DuoForgeAuthenticationGateInternal -Report $PostReport).modelCallsAllowed
-        nextActions = if ($subscription) { @('recheck') } else { @("$provider-login", 'show-manual-login', 'recheck', 'exit') }
+        nextActions = if ($subscription) {
+            @('recheck')
+        }
+        elseif ($status -eq 'AUTH_STATUS_UNAVAILABLE') {
+            @('show-manual-login', 'recheck', 'exit')
+        }
+        else {
+            @("$provider-login", 'show-manual-login', 'recheck', 'exit')
+        }
     }
 }

@@ -1,3 +1,97 @@
+function Get-DuoForgeProviderEnvironmentAllowList {
+    [CmdletBinding()]
+    param()
+
+    return @(
+        'SystemRoot', 'WINDIR', 'ComSpec', 'TEMP', 'TMP', 'PATH', 'PATHEXT',
+        'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'APPDATA',
+        'PROGRAMDATA', 'ProgramFiles', 'ProgramFiles(x86)', 'PROCESSOR_ARCHITECTURE',
+        'PSModulePath', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR',
+        'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'SSL_CERT_FILE', 'REQUESTS_CA_BUNDLE'
+    )
+}
+
+function Resolve-DuoForgeProviderExecutionContextInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('codex', 'claude')][string]$Provider,
+        [AllowNull()][AllowEmptyString()][string]$ProcessUserProfile,
+        [AllowNull()][AllowEmptyString()][string]$DotNetUserProfile,
+        [AllowNull()][AllowEmptyString()][string]$ExplicitAuthHome
+    )
+
+    if (-not $PSBoundParameters.ContainsKey('ProcessUserProfile')) {
+        $ProcessUserProfile = [Environment]::GetEnvironmentVariable('USERPROFILE', [EnvironmentVariableTarget]::Process)
+    }
+    if (-not $PSBoundParameters.ContainsKey('DotNetUserProfile')) {
+        $DotNetUserProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+    }
+    $authHomeVariable = if ($Provider -eq 'codex') { 'CODEX_HOME' } else { 'CLAUDE_CONFIG_DIR' }
+    if (-not $PSBoundParameters.ContainsKey('ExplicitAuthHome')) {
+        $ExplicitAuthHome = [Environment]::GetEnvironmentVariable($authHomeVariable, [EnvironmentVariableTarget]::Process)
+    }
+
+    $normalizePath = {
+        param([string]$Path)
+        if ([string]::IsNullOrWhiteSpace($Path)) { return '' }
+        try { return [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/') }
+        catch { return $Path.Trim().TrimEnd('\', '/') }
+    }
+    $processProfilePath = & $normalizePath $ProcessUserProfile
+    $dotNetProfilePath = & $normalizePath $DotNetUserProfile
+    $profileMismatch = -not [string]::IsNullOrWhiteSpace($processProfilePath) -and
+        -not [string]::IsNullOrWhiteSpace($dotNetProfilePath) -and
+        -not $processProfilePath.Equals($dotNetProfilePath, [StringComparison]::OrdinalIgnoreCase)
+
+    $defaultProfilePath = if (-not [string]::IsNullOrWhiteSpace($processProfilePath)) { $processProfilePath } else { $dotNetProfilePath }
+    $authHomePath = if (-not [string]::IsNullOrWhiteSpace($ExplicitAuthHome)) {
+        & $normalizePath $ExplicitAuthHome
+    }
+    elseif (-not [string]::IsNullOrWhiteSpace($defaultProfilePath)) {
+        Join-Path $defaultProfilePath $(if ($Provider -eq 'codex') { '.codex' } else { '.claude' })
+    }
+    else { '' }
+    $overrides = [ordered]@{}
+    if (-not [string]::IsNullOrWhiteSpace($ExplicitAuthHome)) {
+        $overrides[$authHomeVariable] = $authHomePath
+    }
+
+    return [ordered]@{
+        provider = $Provider
+        invocation = Resolve-DuoForgeCommandInvocation -CommandName $Provider
+        authHomeVariable = $authHomeVariable
+        authHomePath = $authHomePath
+        authHomeSource = if (-not [string]::IsNullOrWhiteSpace($ExplicitAuthHome)) { 'explicit' } elseif ($profileMismatch) { 'mismatch' } else { 'profile-default' }
+        authContextStatus = if ($profileMismatch) { 'PROFILE_MISMATCH' } else { 'AVAILABLE' }
+        profileMismatch = $profileMismatch
+        liveRuntimeEligible = -not $profileMismatch
+        environmentAllowList = @(Get-DuoForgeProviderEnvironmentAllowList)
+        environmentOverrides = $overrides
+    }
+}
+
+function Set-DuoForgeProcessEnvironmentInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][System.Diagnostics.ProcessStartInfo]$StartInfo,
+        [string[]]$EnvironmentAllowList,
+        [System.Collections.IDictionary]$EnvironmentOverrides
+    )
+
+    if ($PSBoundParameters.ContainsKey('EnvironmentAllowList') -or $PSBoundParameters.ContainsKey('EnvironmentOverrides')) {
+        $StartInfo.Environment.Clear()
+        foreach ($name in @($EnvironmentAllowList | Select-Object -Unique)) {
+            $value = [Environment]::GetEnvironmentVariable([string]$name, [EnvironmentVariableTarget]::Process)
+            if ($null -ne $value) { $StartInfo.Environment[[string]$name] = [string]$value }
+        }
+        if ($null -ne $EnvironmentOverrides) {
+            foreach ($entry in @($EnvironmentOverrides.GetEnumerator())) {
+                if ($null -ne $entry.Value) { $StartInfo.Environment[[string]$entry.Key] = [string]$entry.Value }
+            }
+        }
+    }
+}
+
 function Resolve-DuoForgeCommandInvocation {
     [CmdletBinding()]
     param(
@@ -56,10 +150,16 @@ function Invoke-DuoForgeProcess {
 
         [string[]]$EnvironmentAllowList,
 
+        [System.Collections.IDictionary]$EnvironmentOverrides,
+
+        [System.Collections.IDictionary]$CommandInvocation,
+
+        [switch]$Interactive,
+
         [scriptblock]$OnTick
     )
 
-    $invocation = Resolve-DuoForgeCommandInvocation -CommandName $CommandName
+    $invocation = if ($null -ne $CommandInvocation) { $CommandInvocation } else { Resolve-DuoForgeCommandInvocation -CommandName $CommandName }
     if ($null -eq $invocation) {
         return [ordered]@{
             started = $false
@@ -75,22 +175,18 @@ function Invoke-DuoForgeProcess {
     $startInfo.FileName = $invocation.fileName
     $startInfo.WorkingDirectory = [System.IO.Path]::GetFullPath($WorkingDirectory)
     $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = $true
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    $startInfo.RedirectStandardInput = $PSBoundParameters.ContainsKey('StandardInput')
-    $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
-    $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
-
-    if ($PSBoundParameters.ContainsKey('EnvironmentAllowList')) {
-        $startInfo.Environment.Clear()
-        foreach ($name in @($EnvironmentAllowList | Select-Object -Unique)) {
-            $value = [Environment]::GetEnvironmentVariable([string]$name, [EnvironmentVariableTarget]::Process)
-            if ($null -ne $value) {
-                $startInfo.Environment[[string]$name] = [string]$value
-            }
-        }
+    $startInfo.CreateNoWindow = -not $Interactive
+    $startInfo.RedirectStandardOutput = -not $Interactive
+    $startInfo.RedirectStandardError = -not $Interactive
+    $startInfo.RedirectStandardInput = -not $Interactive -and $PSBoundParameters.ContainsKey('StandardInput')
+    if (-not $Interactive) {
+        $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
     }
+    $environmentParameters = @{ StartInfo = $startInfo }
+    if ($PSBoundParameters.ContainsKey('EnvironmentAllowList')) { $environmentParameters['EnvironmentAllowList'] = $EnvironmentAllowList }
+    if ($PSBoundParameters.ContainsKey('EnvironmentOverrides')) { $environmentParameters['EnvironmentOverrides'] = $EnvironmentOverrides }
+    Set-DuoForgeProcessEnvironmentInternal @environmentParameters
 
     foreach ($argument in @($invocation.prefixArguments) + @($Arguments)) {
         $startInfo.ArgumentList.Add([string]$argument)
@@ -104,8 +200,8 @@ function Invoke-DuoForgeProcess {
             return [ordered]@{ started = $false; exitCode = $null; timedOut = $false; stdout = ''; stderr = ''; errorCategory = 'start-failed' }
         }
 
-        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $stdoutTask = if ($Interactive) { $null } else { $process.StandardOutput.ReadToEndAsync() }
+        $stderrTask = if ($Interactive) { $null } else { $process.StandardError.ReadToEndAsync() }
         if ($startInfo.RedirectStandardInput) {
             $process.StandardInput.Write($StandardInput)
             $process.StandardInput.Close()
@@ -136,9 +232,10 @@ function Invoke-DuoForgeProcess {
             started = $true
             exitCode = if ($completed) { $process.ExitCode } else { $null }
             timedOut = -not $completed
-            stdout = $stdoutTask.GetAwaiter().GetResult()
-            stderr = $stderrTask.GetAwaiter().GetResult()
+            stdout = if ($Interactive) { '' } else { $stdoutTask.GetAwaiter().GetResult() }
+            stderr = if ($Interactive) { '' } else { $stderrTask.GetAwaiter().GetResult() }
             errorCategory = if ($completed) { $null } else { 'timeout' }
+            commandSource = [string]$invocation.source
         }
     }
     catch {

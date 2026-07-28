@@ -49,10 +49,6 @@ function Write-DuoForgeDoctorReport {
         $mark = if ($item.status -eq 'READY_DOCUMENTS') { '✓' } else { '✗' }
         Write-Host ("$mark {0}: {1}, 인증={2}, 문서 프로필={3}" -f $provider, $item.version, $item.authType, $item.documentProfileSupported)
     }
-    if ($null -ne $Validation.contextPlan -and [bool]$Validation.contextPlan.enabled) {
-        Write-Host ('문맥 배치: {0}/{1}, 예상 파일 커버리지 {2}%, 바이트 커버리지 {3}%' -f $Validation.contextPlan.selectedBatchCount, $Validation.contextPlan.requiredBatchCount, $Validation.contextPlan.predictedFileCoveragePercent, $Validation.contextPlan.predictedByteCoveragePercent)
-        if ([bool]$Validation.contextPlan.requiresPartialConsent) { Write-Host '일부 문맥만 분석되므로 결과는 COMPLETED_PARTIAL로 제한됩니다.' -ForegroundColor Yellow }
-    }
     if ($Report.apiCredentialConflicts.Count -gt 0) {
         Write-Host ('✗ API 인증 우선 환경 변수: {0}' -f ($Report.apiCredentialConflicts -join ', ')) -ForegroundColor Red
         Write-Host '  값은 읽거나 표시하지 않았습니다.'
@@ -99,6 +95,11 @@ function Write-DuoForgeExecutionPlan {
             $context = $Validation.inputs.documents[$documentId].context
             Write-Host ('문서 {0}: {1}, 자동 문맥 {2}개 / {3}' -f $documentId, $Validation.inputs.documents[$documentId].primary.path, $context.includedFiles, (Format-DuoForgeByteSize -Bytes $context.includedBytes))
         }
+    }
+    $contextPlan = Get-DuoForgeObjectValue -Object $Validation -Name 'contextPlan'
+    if ($null -ne $contextPlan -and [bool](Get-DuoForgeObjectValue -Object $contextPlan -Name 'enabled' -Default $false)) {
+        Write-Host ('문맥 배치: {0}/{1}, 예상 파일 커버리지 {2}%, 바이트 커버리지 {3}%' -f $contextPlan.selectedBatchCount, $contextPlan.requiredBatchCount, $contextPlan.predictedFileCoveragePercent, $contextPlan.predictedByteCoveragePercent)
+        if ([bool]$contextPlan.requiresPartialConsent) { Write-Host '일부 문맥만 분석되므로 결과는 COMPLETED_PARTIAL로 제한됩니다.' -ForegroundColor Yellow }
     }
     foreach ($warning in @($Validation.warnings)) {
         Write-Host ("경고 [$($warning.code)] $($warning.message)") -ForegroundColor Yellow
