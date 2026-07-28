@@ -2,7 +2,7 @@
 
 DuoForge는 Codex와 Claude가 불변 입력 스냅샷을 검토하고 토론하도록 조율하는 Windows 로컬 우선 CLI다. 문서 A/B는 공급자 소유권이 아닌 안정적인 문서 계보이며, Codex와 Claude는 교체 가능한 검토자·응답자·편집자·합성자·검증자다.
 
-현재 저장소는 PRD v1.6의 문서 모드 확장 Beta 구현이다. 공통 안전 기반, 진단, 필수 모델·추론 정도 선택, 실행 계획, 불변 스냅샷, 구조화 토론 단계, 재개 가능한 상태 저장, 고정형 토론 진행판, 쟁점 설명·근거 추가·사용자 결정과 최종 산출물 렌더링을 제공한다.
+현재 저장소는 PRD v1.6의 문서 모드 확장 Beta 1차 완료본이다. 공통 안전 기반, 진단, 필수 모델·추론 정도 선택, 실행 계획, 불변 스냅샷, 구조화 토론 단계, 재개 가능한 상태 저장, 고정형 토론 진행판, 쟁점 설명·근거 추가·사용자 결정과 최종 산출물 렌더링을 제공한다.
 
 | 화면 모드 | 내부 ID | 입력 | 결과 | 상태 |
 |---|---|---|---|---|
@@ -82,6 +82,10 @@ workflow-v2 쟁점은 검토자의 평가 `reviewerVerdicts`, 실제 편집 판�
 - 모드 1: 문서 유형별 최종 문서, `DEBATE_SUMMARY.md`, `DECISIONS.md`, `OPEN_QUESTIONS.md`
 - 모드 2: 합의 문서 C, `source-trace.md`, `DEBATE_SUMMARY.md`, `DECISIONS.md`, `OPEN_QUESTIONS.md`
 - 모드 3: `document-A-final.md`, `document-B-final.md`, `comparison.md`, `adoption-log.md`, `OPEN_QUESTIONS.md`
+
+## 실행 데이터
+
+기본 실행 기록과 최종 산출물은 저장소의 `results\<run-id>`에 생성된다. `results/`는 Git에서 제외되지만 재개·질문·근거 추가와 결과 열기에 필요한 실제 사용자 데이터이므로 캐시처럼 일괄 삭제하면 안 된다. 테스트 실행기는 별도 테스트 이름의 결과 루트를 사용하며, 저장소에는 완료 판정 요약과 재현 가능한 현재 workflow-v2 검증 경로만 유지한다.
 
 Codex 메뉴는 DuoForge 프로세스를 시작할 때 CLI의 `app-server model/list`를 호출해 현재 계정에 노출된 모델, 기본 모델과 모델별 기본·지원 추론 정도를 다시 받는다. 이 호출이 실패하면 CLI 로컬 캐시, 마지막으로 제한된 내장 목록 순서로 폴백하며 메뉴에 출처와 경고를 표시한다. CLI가 지정한 기본 모델을 권장하고, `high`가 해당 모델에 실제로 존재할 때만 `high`를 권장한다. `high`가 사라지면 CLI 기본 추론 정도, `medium`, 첫 지원값 순서로 이동한다.
 
@@ -169,16 +173,16 @@ DUOFORGE  토론 진행판
 
 라이브 실행 자체는 최종 계획 확인을 위해 비리디렉션 대화형 입출력을 요구하며, 리디렉션된 `resume --live`는 공급자 호출 전에 `DF-LIVE-NONINTERACTIVE`로 차단한다. 대화형 Windows Terminal 또는 VS Code 통합 터미널에서 VT를 지원하고 창이 최소 `72×20`이면 대체 화면 버퍼를 사용한다. 대화형 호스트에서 VT가 없거나 창이 좁거나 화면 갱신이 실패하면 모델 실행을 중단하지 않고 ANSI 없는 축약형 누적 진행 로그로 전환한다. 누적 로그는 기존처럼 단계 전환과 해당 단계의 최신 확정 요약 한 건만 기록하고 초 단위 heartbeat에는 같은 요약을 반복하지 않는다. 종료 화면에서 Enter를 누르면 대화형 메뉴 실행은 작업 메뉴로, 명시적 `resume --live`는 셸 프롬프트로 돌아간다.
 
-기존 공급자별 라이브 스모크와 2라운드 전체 단계 E2E는 `workflow-v1 shared-document/dual-document`의 역사적 증거이며 신규 모드 완료로 재해석하지 않는다. 2026-07-28에는 별도 `workflow-v2` 실제 공급자 E2E를 실행해 모드 1 `13/13`, 모드 2 `13/13`, 모드 3 `14/14` 단계와 입력 해시 불변·A/B 계보·최종 파일·이벤트/로그 비노출을 확인했다. 세 모드 모두 `AWAITING_USER` 체크포인트로 강화 검증을 통과했다. 이는 질문 카드와 사용자 게이트가 정상 작동한 E2E 성공 상태이며, 테스트 픽스처의 결정을 임의로 답해 `COMPLETED`로 바꾸는 추가 공급자 호출은 완료 조건이 아니다. 모드 3 최초 실행에서 발견한 Minor 근거 대기의 잘못된 차단 상태는 중앙 차단 규칙 재계산으로 수정한 뒤 신규 실제 공급자 실행으로 재검증했다. 실행 ID와 판정 근거는 [docs/STAGE0_SPIKE.md](docs/STAGE0_SPIKE.md)에 기록한다.
+기존 공급자별 라이브 스모크와 2라운드 전체 단계 E2E는 `workflow-v1 shared-document/dual-document`의 역사적 증거이며 신규 모드 완료로 재해석하지 않는다. 대체된 workflow-v1 테스트 전용 실행기와 생성 결과는 저장소 정리 범위에서 제거했으며, workflow-v1 읽기·재개 호환성은 직렬화 fixture를 사용하는 오프라인 회귀로 계속 보호한다. 2026-07-28에는 별도 `workflow-v2` 실제 공급자 E2E를 실행해 모드 1 `13/13`, 모드 2 `13/13`, 모드 3 `14/14` 단계와 입력 해시 불변·A/B 계보·최종 파일·이벤트/로그 비노출을 확인했다. 세 모드 모두 `AWAITING_USER` 체크포인트로 강화 검증을 통과했다. 이는 질문 카드와 사용자 게이트가 정상 작동한 E2E 성공 상태이며, 테스트 픽스처의 결정을 임의로 답해 `COMPLETED`로 바꾸는 추가 공급자 호출은 완료 조건이 아니다. 모드 3 최초 실행에서 발견한 Minor 근거 대기의 잘못된 차단 상태는 중앙 차단 규칙 재계산으로 수정한 뒤 신규 실제 공급자 실행으로 재검증했다. 실행 ID와 판정 근거는 [docs/STAGE0_SPIKE.md](docs/STAGE0_SPIKE.md)에 기록한다.
 
 ## 테스트
 
 2026-07-28 기준 오프라인 회귀는 102개다. 기존의 추가 근거 원자성·쟁점 계보·저장 세대·workflow-v1 전체 재개와 의미 기반 대용량 문맥 회귀에 더해 확정 피드 0·1·2·3건과 4건 이상 선택, 그래프 순서, 해시·스키마 손상 제외와 이전 결과 보충, 자연어 행동 집계, `72×20`·넓은 화면, 한글·emoji·제어문자, 문맥 배치 원요약 비노출, A/B·공동·합의 대상과 누적 로그 heartbeat 비중복을 포함한다.
 
-실제 공급자 E2E의 테스트 전용 Claude 선택은 `tests\workflow-v2-live-settings.json`에서 관리하며 현재 `sonnet/low`로 고정한다. 신규 workflow-v2와 레거시 라이브 E2E 실행기 모두 이 설정과 정확한 `LIVE` 동의를 요구한다. 일반 실행의 모델 선택 화면과 이미 저장된 실행의 선택값은 바꾸지 않으며, `opus/high`가 저장된 기존 E2E 실행은 재호출하지 않는다.
+실제 공급자 E2E의 테스트 전용 Claude 선택은 `tests\workflow-v2-live-settings.json`에서 관리하며 현재 `sonnet/low`로 고정한다. 현재 workflow-v2 라이브 E2E 실행기는 이 설정과 정확한 `LIVE` 동의를 요구한다. 일반 실행의 모델 선택 화면과 사용자 실행에 저장된 선택값은 바꾸지 않으며, 과거 `opus/high` E2E는 문서화된 시점 증거로만 취급하고 재호출하지 않는다.
 
 ```powershell
 & 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -File '.\tests\Run-Tests.ps1'
 ```
 
-구현 단계와 안전 판단은 [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md), 현재 CLI 검증 근거는 [docs/STAGE0_SPIKE.md](docs/STAGE0_SPIKE.md), 3A 격리 판정은 [docs/3A_ISOLATION_SPIKE.md](docs/3A_ISOLATION_SPIKE.md)를 참고한다.
+구현 단계와 안전 판단은 [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md), 당시 CLI·실제 공급자 E2E 검증 기록은 [docs/STAGE0_SPIKE.md](docs/STAGE0_SPIKE.md), 3A 격리 판정은 [docs/3A_ISOLATION_SPIKE.md](docs/3A_ISOLATION_SPIKE.md)를 참고한다. 현재 설치·로그인·모델 사용 가능 상태는 `.\duoforge.cmd doctor --json`으로 다시 확인한다.
