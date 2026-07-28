@@ -342,6 +342,23 @@ function Merge-DuoForgeStageIssues {
     if ($null -ne $UserDecisionRecords -and @($UserDecisionRecords | Where-Object { $null -ne $_ }).Count -gt 0) {
         $issues = [System.Collections.Generic.List[object]]::new(@(Apply-DuoForgeUserDecisionRecordsInternal -Issues @($issues) -DecisionRecords @($UserDecisionRecords)))
     }
+
+    foreach ($issue in @($issues | Where-Object { [string]$_.resolutionStatus -notin @('RESOLVED', 'SUPERSEDED') })) {
+        $blockingProposals = Get-DuoForgeObjectValue -Object $issue -Name 'blockingProposals' -Default ([ordered]@{})
+        $proposalValues = if ($blockingProposals -is [System.Collections.IDictionary]) {
+            @($blockingProposals.Values)
+        }
+        else {
+            @($blockingProposals.PSObject.Properties.Value)
+        }
+        $blockingProposal = @($proposalValues | Where-Object { [bool]$_ }).Count -gt 0
+        $issue.blocking = Get-DuoForgeIssueBlockingValue `
+            -Severity ([string]$issue.severity) `
+            -Category ([string]$issue.category) `
+            -RequiresUser ([bool]$issue.requiresUser) `
+            -BlockingProposal $blockingProposal
+    }
+
     $activeIssueIds = @($issues | Where-Object { $_.resolutionStatus -notin @('RESOLVED', 'SUPERSEDED', 'AWAITING_EVIDENCE') } | ForEach-Object { [string]$_.issueId })
     $questions = [System.Collections.Generic.List[object]]::new(@($questions | Where-Object { [string]$_.issueKey -in $activeIssueIds }))
 

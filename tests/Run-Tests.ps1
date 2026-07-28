@@ -1288,6 +1288,7 @@ try {
         foreach ($requiredName in @('performedBy', 'targetDocumentId', 'sourceDocumentIds')) {
             Assert-True ($requiredName -in @($stageSchemaV2.required))
         }
+        Assert-True ($null -eq $stageSchemaV2.properties.sourceDocumentIds.PSObject.Properties['uniqueItems'])
         Assert-True ('targetDocumentId' -in @($stageSchemaV2.properties.issues.items.required))
         Assert-False ('target' -in @($stageSchemaV2.properties.issues.items.required))
         foreach ($requiredName in @('sourceDocumentId', 'proposedByProvider', 'path', 'location', 'excerptHash')) {
@@ -1745,6 +1746,39 @@ try {
     }
 
     Test-Case '추가 근거는 불변 스냅샷으로 보존되고 요청 쟁점만 다시 검증한다' {
+        $minorMerge = & $module {
+            $minorIssue = [ordered]@{
+                issueKey = 'MINOR-EVIDENCE-001'; targetDocumentId = 'merged'; category = 'preference'; severity = 'minor'
+                claim = '선호 근거가 더 필요합니다.'; evidence = @(); proposal = '선호 근거를 추가하세요.'
+                requiresUser = $false; blockingProposal = $false
+            }
+            $question = [ordered]@{
+                issueKey = 'MINOR-EVIDENCE-001'; title = '선호 확인'; question = '선호를 확인할까요?'
+                options = @('A', 'B'); recommendedOption = 'A'
+            }
+            $response = [ordered]@{
+                issueKey = 'MINOR-EVIDENCE-001'; disposition = 'NEEDS_EVIDENCE'
+                rationale = '현재 근거로는 선호를 확정할 수 없습니다.'; locations = @()
+            }
+            $records = @(
+                [ordered]@{
+                    stepKey = 'minor-question'; provider = 'codex'; round = 1; stage = 'document-review'
+                    result = [ordered]@{ issues = @($minorIssue); issueResponses = @(); adoptions = @(); openQuestions = @($question) }
+                },
+                [ordered]@{
+                    stepKey = 'minor-evidence'; provider = 'claude'; round = 1; stage = 'review-response'
+                    result = [ordered]@{ issues = @(); issueResponses = @($response); adoptions = @(); openQuestions = @() }
+                }
+            )
+            $merged = Merge-DuoForgeStageIssues -StageResults $records -WorkflowVersion workflow-v2
+            $completion = Test-DuoForgeCompletionAllowedInternal -Issues @($merged.issues)
+            return [ordered]@{ merged = $merged; completion = $completion }
+        }
+        $minorIssue = @($minorMerge.merged.issues)[0]
+        Assert-Equal $minorIssue.resolutionStatus 'AWAITING_EVIDENCE'
+        Assert-False ([bool]$minorIssue.blocking)
+        Assert-Equal $minorMerge.completion.status 'COMPLETED'
+
         $input = New-MarkdownFile -Path (Join-Path $tempRoot 'evidence\input\brief.md') -Text '# 근거 대기 PRD'
         $evidenceFile = New-MarkdownFile -Path (Join-Path $tempRoot 'evidence-source\proof.md') -Text "# 검증 근거`n`n보존 기간은 30일입니다."
         $sourceHash = (Get-FileHash -LiteralPath $evidenceFile -Algorithm SHA256).Hash

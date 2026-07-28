@@ -80,9 +80,10 @@ function Invoke-DuoForgeResumeLiveInternal {
     }
 
     $directory = [string]$run.runDirectory
+    $providerStageCommand = Get-Command -Name 'Invoke-DuoForgeLiveProviderStage' -CommandType Function -ErrorAction Stop
     $callback = {
         param($step, $prompt, $graph)
-        Invoke-DuoForgeLiveProviderStage -RunDirectory $directory -Graph $graph -Step $step -Prompt $prompt -LiveConsent $true -ProgressObserver $ProgressObserver
+        & $providerStageCommand -RunDirectory $directory -Graph $graph -Step $step -Prompt $prompt -LiveConsent $true -ProgressObserver $ProgressObserver
     }.GetNewClosure()
     return Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback -ProgressObserver $ProgressObserver
 }

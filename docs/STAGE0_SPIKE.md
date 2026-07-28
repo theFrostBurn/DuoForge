@@ -49,6 +49,22 @@
 - 3A OS 격리 스파이크: 범위 밖 표식 읽기와 중첩 `cmd.exe` 실행은 종료 코드 0으로 성공했고, 쓰기만 접근 거부와 전후 SHA-256 동일을 확인해 3A 게이트를 계속 닫음
 - 3A 상세 근거: [3A_ISOLATION_SPIKE.md](3A_ISOLATION_SPIKE.md)
 
+## workflow-v2 실제 공급자 E2E
+
+검증일: 2026-07-28
+모델: Codex `gpt-5.6-sol/high`, Claude `opus/high`
+
+- 중립 A/B 픽스처와 메타데이터 전용 검증기를 사용했다. 검증 출력에는 원문 공급자 출력, stdout·stderr, 프롬프트·문서·컨텍스트 내용, 생성 중 텍스트와 비밀값을 포함하지 않았다.
+- `run-20260728-033711-fad8f8`: `workflow-v2 shared-document`, 13/13 단계, Codex 7회·Claude 6회, `AWAITING_USER`, 강화 검증 통과
+- `run-20260728-040441-2cb68c`: `workflow-v2 document-merge`, 13/13 단계, Codex 7회·Claude 6회, `AWAITING_USER`, 강화 검증 통과
+- `run-20260728-043711-14a4b7`: `workflow-v2 dual-document`, 14/14 단계, Codex 7회·Claude 7회. 입력·스냅샷 해시, 단계 계약, A/B 최종 파일과 비노출 검사는 통과했지만 상태 의미 검증은 `WAITING_STATUS_WITHOUT_BLOCKING_ISSUE`로 실패
+- `run-20260728-095906-127f6d`: 수정 후 `workflow-v2 dual-document`, 14/14 단계, Codex 7회·Claude 7회, `AWAITING_USER`, Critical/Major 사용자 결정 차단 4건과 상태가 일치해 강화 검증 통과
+- 공통 안전 결과: 통과·감사 실행 합계 호출 시작 55회, 완료·단계 커밋 54회. 초기 스키마 호환성 결함 실행의 1회만 커밋되지 않았고 공급자 실패 이벤트는 0건이다. 원본 SHA-256 불변, 스냅샷 1/4/4/4개 검증, 금지 이벤트·데이터 키·문서 카나리·`provider-work` 잔여 각 0건을 확인했다.
+- 라이브 과정에서 수정한 결함: 모듈 클로저가 private 공급자 함수를 해석하지 못한 문제, Codex 구조화 출력과 호환되지 않는 `uniqueItems` 키워드
+- 모드 3 후속 분석에서 Minor `NEEDS_EVIDENCE` 쟁점이 이전 질문의 `blocking=true`를 유지하는 의미 결함을 확인했다. 모든 병합 뒤 중앙 심각도 규칙으로 차단 여부를 재계산하고 Minor 근거 대기가 완료 게이트를 막지 않는 회귀를 기존 68개 테스트에 추가했다.
+- 수정 코드를 저장 결과에 쓰지 않고 14개 커밋 결과에 재계산한 예상 상태는 `AWAITING_USER`이며, 차단 근거 대기 0건·사용자 결정 대기 7건이다.
+- 수정 전 실패 실행과 결과 원장은 감사 증거로 보존하며 재작성하지 않는다. 수정 후 신규 모드 3 실행은 입력 해시 불변, 스냅샷 4개, A/B 최종 파일 6개, 금지 이벤트·키·문서 카나리·공급자 작업 잔여 0건을 통과했다.
+
 ## 공식 기준
 
 - [OpenAI Codex CLI 명령 참조](https://developers.openai.com/codex/cli/reference)

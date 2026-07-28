@@ -23,8 +23,7 @@
     "targetDocumentId": { "type": ["string", "null"], "enum": ["A", "B", "merged", null] },
     "sourceDocumentIds": {
       "type": "array",
-      "items": { "type": "string", "enum": ["brief", "A", "B", "merged"] },
-      "uniqueItems": true
+      "items": { "type": "string", "enum": ["brief", "A", "B", "merged"] }
     },
     "summary": { "type": "string" },
     "document": { "type": ["string", "null"] },
