@@ -8,13 +8,13 @@ function Get-DuoForgeStageInstruction {
         'cross-review' = '현재까지의 문서들을 교차 검토하고, 근거가 있는 쟁점만 issues에 기록하세요. 문서를 직접 수정하지 마세요.'
         'author-response' = '검토 쟁점 각각에 작성자 입장으로 응답하세요. 수용 여부와 근거를 issueResponses에 기록하세요.'
         'joint-document-review' = '직전 공동 문서를 재검토하고 새로 남은 쟁점만 issues에 기록하세요.'
-        'review-response' = '재검토 쟁점 각각에 응답하고 disposition과 근거를 issueResponses에 기록하세요.'
+        'review-response' = '검토 쟁점 각각을 평가해 disposition과 근거를 issueResponses에 기록하세요. 이 단계는 문서를 편집하거나 채택을 결정하지 않으므로 adoptions는 비워 두세요.'
         'synthesis' = '초안, 검토, 응답을 종합해 완성된 공동 문서를 document에 작성하세요. 미해결 사항을 숨기지 마세요.'
         'final-validation' = '최종 공동 문서가 필수 요구와 안전 경계를 충족하는지 검증하세요. 충족하면 finalApproved=true, 아니면 false와 issues를 반환하세요.'
         'owner-response' = '상대 검토에 문서 소유자 입장으로 응답하세요. 상대 제안 채택 내역은 adoptions에도 기록하세요.'
         'owned-document-revision' = '자신이 소유한 문서를 검토 응답에 따라 개정해 document에 완성본을 작성하고 채택 내역을 adoptions에 기록하세요.'
         'document-review' = '문서 A와 B를 모두 검토하고 각 쟁점을 targetDocumentId A 또는 B로 구분하세요. 문서를 직접 수정하지 마세요.'
-        'document-revision' = 'targetDocumentId로 지정된 문서를 양쪽 검토와 응답에 따라 개정하세요. performedBy는 작업 할당일 뿐 소유권이 아닙니다.'
+        'document-revision' = 'targetDocumentId로 지정된 문서를 양쪽 검토와 응답에 따라 개정하고 실제 편집 판단을 adoptions에 기록하세요. performedBy는 작업 할당일 뿐 소유권이 아닙니다.'
         'document-validation' = 'targetDocumentId 문서의 최종 개정본이 요구사항과 안전 경계를 충족하는지 검증하세요. 충족하면 finalApproved=true를 반환하세요.'
         'context-batch-analysis' = '이 문맥 배치의 사실, 요구사항, 제약과 중요한 쟁점을 빠짐없이 구조화된 summary와 issues로 정리하세요. 문서 완성본은 작성하지 마세요.'
     }
@@ -190,9 +190,6 @@ function New-DuoForgeStagePrompt {
         stepKey = [string]$Step.stepKey
         stage = [string]$Step.stage
         provider = [string]$Step.provider
-        performedBy = [string](Get-DuoForgeObjectValue -Object $Step -Name 'performedBy' -Default ([string]$Step.provider))
-        targetDocumentId = Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId'
-        sourceDocumentIds = @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @())
         task = Get-DuoForgeStageInstruction -Stage ([string]$Step.stage)
         documents = @(
             if ([string]$Step.stage -eq 'context-batch-analysis') {
@@ -238,16 +235,46 @@ function New-DuoForgeStagePrompt {
             }
         })
     }
+    if ($workflowVersion -eq 'workflow-v2') {
+        $payload.performedBy = [string](Get-DuoForgeObjectValue -Object $Step -Name 'performedBy' -Default ([string]$Step.provider))
+        $payload.targetDocumentId = Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId'
+        $payload.sourceDocumentIds = @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @())
+        $lineagePolicy = Get-DuoForgeStageLineagePolicyInternal `
+            -Stage ([string]$Step.stage) `
+            -TargetDocumentId (Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId') `
+            -SourceDocumentIds @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @())
+        $payload.allowedIssueTargetDocumentIds = @($lineagePolicy.issueTargetDocumentIds)
+        $payload.allowedEvidenceSourceDocumentIds = @($lineagePolicy.evidenceSourceDocumentIds)
+        $payload.allowedAdoptionTargetDocumentIds = @($lineagePolicy.adoptionTargetDocumentIds)
+        $payload.allowedAdoptionSourceDocumentIds = @($lineagePolicy.adoptionSourceDocumentIds)
+    }
     $payloadJson = $payload | ConvertTo-Json -Depth 100 -Compress
     $workflowContract = if ($workflowVersion -eq 'workflow-v2') {
         @'
 - performedBy는 공급자 작업 할당이며 문서 소유권이 아닙니다. targetDocumentId와 sourceDocumentIds를 DATA의 단계 할당대로 지키세요.
 - issues의 targetDocumentId는 A, B 또는 merged 중 하나여야 합니다. 근거에는 sourceDocumentId, proposedByProvider, path, location, excerptHash를 서로 분리해 기록하세요.
 - adoptions에는 sourceDocumentId, proposedByProvider, targetDocumentId, disposition, rationale, locations를 기록하세요.
+- review-response는 검토자 평가만 issueResponses에 기록하고 adoptions는 []로 반환하세요. 실제 편집 판단과 채택은 document-revision 또는 synthesis의 adoptions에 기록하세요.
+- ACCEPTED 또는 PARTIALLY_ACCEPTED 채택에는 실제 반영 위치를 locations에 하나 이상 기록하세요.
 '@
     }
     else {
         '- workflow-v1의 기존 issues.target, sourceProvider와 target 필드 계약을 그대로 지키세요.'
+    }
+    $issueTargetToken = [string](Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId' -Default '')
+    if ([string]::IsNullOrWhiteSpace($issueTargetToken)) {
+        $stepSources = @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @())
+        $issueTargetToken = if ('A' -in $stepSources -and 'B' -in $stepSources) { 'AB' } elseif ('brief' -in $stepSources) { 'MERGED' } else { 'NONE' }
+    }
+    $issueKeyExample = '{0}-R{1:D2}-{2}-{3}-001' -f $Step.provider.ToUpperInvariant(), [int]$Step.round, $Step.stage.ToUpperInvariant(), $issueTargetToken.ToUpperInvariant()
+    $issueReferenceContract = if ($workflowVersion -eq 'workflow-v2') {
+        @"
+- 새 쟁점 issueKey는 공급자, 라운드, 단계와 대상이 포함된 '$issueKeyExample' 형식으로 실행 전체에서 고유하게 부여하고, 근거 없는 주장은 만들지 마세요.
+- issueResponses, adoptions와 openQuestions는 priorArtifacts 또는 같은 출력의 issues에 실제로 정의된 issueKey만 참조하세요. dangling 참조나 다른 A/B 대상의 키를 재사용하지 마세요.
+"@
+    }
+    else {
+        "- 쟁점 issueKey는 공급자와 라운드가 포함된 '$($Step.provider.ToUpperInvariant())-R$('{0:D2}' -f [int]$Step.round)-001' 형식으로 고유하게 부여하고, 근거 없는 주장은 만들지 마세요."
     }
     $prompt = @"
 당신은 DuoForge의 제한된 문서 토론 단계 실행자입니다.
@@ -260,7 +287,7 @@ function New-DuoForgeStagePrompt {
 - stage는 '$($Step.stage)', provider는 '$($Step.provider)', schemaVersion은 $stageResultSchemaVersion 이어야 합니다.
 $workflowContract
 - 해당 없는 document는 null, finalApproved는 null, 해당 없는 배열은 []로 반환하세요.
-- 쟁점 issueKey는 공급자와 라운드가 포함된 '$($Step.provider.ToUpperInvariant())-R$('{0:D2}' -f [int]$Step.round)-001' 형식으로 고유하게 부여하고, 근거 없는 주장은 만들지 마세요.
+$issueReferenceContract
 - userDecisions가 있으면 이를 구속력 있는 사용자 결정으로 반영하세요. 안전하거나 논리적으로 불가능하면 조용히 무시하지 말고 새 Critical 쟁점을 제기하세요.
 - userEvidence가 있으면 연결된 근거 스냅샷을 해당 쟁점의 새 근거로 평가하고, issueId 또는 externalKeys 중 하나를 issueResponses.issueKey에 사용해 충분성 여부와 반영 결과를 기록하세요.
 - openQuestions를 만들 때는 reasonNow, plainExplanation, codexOpinion, claudeOpinion, impactIfDeferred, estimatedCost, reversibility, confidence, safeDefault, experimentPossible을 가능한 한 구체적으로 채우세요.

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "description": "Sanitized workflow-v1 dual-document resume fixture",
+  "mode": "dual-document",
+  "maxRounds": 2,
+  "precommittedStepCount": 2,
+  "expectedPromptTemplateVersion": "duoforge-stage-v2",
+  "expectedFinalFiles": [
+    "codex-final.md",
+    "claude-final.md",
+    "comparison.md",
+    "adoption-log.md",
+    "OPEN_QUESTIONS.md"
+  ]
+}

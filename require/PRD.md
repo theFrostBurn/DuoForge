@@ -712,12 +712,15 @@ Minor 쟁점만 남으면 경고와 함께 최종 산출물에 기록하고 완�
 - 쟁점 ID는 실행이 끝날 때까지 변경하지 않는다.
 - 의미상 같은 쟁점은 삭제하지 않고 대표 쟁점에 연결한다.
 - 상태 변경 이력을 덮어쓰지 않고 이벤트로 추가한다.
+- workflow-v2의 새 `issueKey`는 공급자·라운드·단계·대상을 포함한 안정적인 형식으로 실행 전체에서 고유해야 한다. `issueResponses`, `adoptions`, `openQuestions`는 같은 결과 또는 확정된 선행 산출물에 존재하는 키만 참조하고, 참조 대상 문서가 원래 쟁점의 A/B 대상과 다르면 저장 전에 실패 폐쇄한다.
+- workflow-v2의 내부 issues/evidence/adoptions는 단계별 대상·출처 허용 행렬을 따르며 각 항목의 `targetDocumentId`와 `sourceDocumentId`는 단계 결과 상위의 `targetDocumentId`와 `sourceDocumentIds` 범위를 벗어날 수 없다.
 - `editorialDecisions`는 대상 문서별 편집 판단이며 `performedBy`는 해당 단계의 작업자를 나타낼 뿐 소유권을 뜻하지 않는다.
 - `reviewerVerdicts`는 편집 판단을 평가할 뿐 채택 여부를 대신 결정하지 않는다.
 - 한 쟁점이 A/B에 서로 다르게 반영되면 대상별 `editorialDecisions`, `reviewerVerdicts`와 `adoptions`를 각각 보존한다.
 - `sourceDocumentId`와 `proposedByProvider`를 분리하여 문서 출처와 제안 작업자를 혼동하지 않는다.
 - `REJECTED` 판단에는 구체적인 이유 또는 근거가 있어야 한다.
 - `ACCEPTED`와 `PARTIALLY_ACCEPTED` 판단에는 대상 문서, 실제 반영 위치와 라운드가 있어야 한다.
+- workflow-v2 원장은 `reviewerVerdicts`, `editorialDecisions`, `adoptions`의 출처 단계와 라운드, 대상, 판단, 이유와 위치 타입을 저장 전에 검증하며 레거시 `ownerDecisions`를 섞지 않는다.
 - `workflow-v1`의 `ownerDecisions`는 레거시 스키마로 그대로 읽고 저장 원본을 `editorialDecisions`로 재작성하지 않는다.
 - 모델은 `blockingProposals`에 차단 여부와 이유를 제안할 수 있지만 최종 `blocking` 값은 오케스트레이터만 계산한다.
 - 모든 Critical 쟁점은 오케스트레이터가 항상 `blocking=true`로 강제한다. 모델이 `false`를 제안하거나 잘못 출력해도 완화하지 않는다.
@@ -1236,7 +1239,7 @@ claude -p `
 | FR-COM-010 | 단계당 자동 재시도는 최대 1회다. | P0 |
 | FR-COM-011 | 한쪽 실패를 숨기고 완전한 토론 결과처럼 완료하지 않는다. | P0 |
 | FR-COM-012 | 각 호출의 공급자, 역할, 상태, 종료 코드, 시작·종료 시각을 기록한다. | P0 |
-| FR-COM-013 | 각 단계 뒤 상태를 원자적으로 저장한다. | P0 |
+| FR-COM-013 | 각 단계와 추가 근거 갱신 뒤 상태를 원자적으로 저장한다. 추가 근거의 snapshot, inventory, manifest, issue ledger, pending request, steps, history, state와 event 중 하나라도 실패하거나 준비된 트랜잭션에서 프로세스가 중단되면 전체를 이전 체크포인트로 복구하고 고아 스냅샷을 남기지 않는다. | P0 |
 | FR-COM-014 | 마지막 완료 체크포인트에서 멱등적으로 재개한다. | P0 |
 | FR-COM-015 | 실패한 단계만 재실행하고 성공한 상대 단계를 중복 호출하지 않는다. | P0 |
 | FR-COM-016 | 안정적인 쟁점 ID와 JSON 스키마 기반 원장을 유지한다. | P0 |
@@ -1343,6 +1346,8 @@ claude -p `
 - 단계 그래프 생성, 추가 라운드, 사용자 결정 변경에 따른 무효화와 선택 재실행은 `workflowVersion`으로 분기한다.
 - 기존 `duoforge-stage-v2` 프롬프트 계약 실행은 같은 계약으로 재개한다. 신규 실행은 `duoforge-stage-v3`처럼 구분된 계약을 사용하고 기존 실행을 일괄 승격하지 않는다.
 - 구조화 결과 스키마도 워크플로 버전별로 선택한다. 레거시 스키마를 신규 필드 의미로 묵시적으로 해석하지 않는다.
+- 신규 저장 세대는 `manifest` schema 4, `state` schema 2, `inventory` schema 2, `issue ledger` schema 2와 `steps` schema 2를 하나의 `duoforge-run-v2` 계약으로 묶는다. 어느 한 파일만 다른 세대이면 공급자 호출 전에 실패 폐쇄한다.
+- 기존 `workflow-v1` 저장 세대와 초기 `workflow-v2` manifest schema 3 세대는 각자의 state/inventory/ledger/steps 버전 조합으로만 읽고 신규 세대로 부분 승격하거나 재작성하지 않는다.
 
 ### 17.2 실행 상태
 
@@ -1402,6 +1407,7 @@ claude -p `
 - 출력이 손상되었거나 설정이 달라졌으면 조용히 계속하지 않고 사용자에게 새 실행 또는 해당 단계 재시작을 안내한다.
 - 실행 중 원본이 바뀌어도 기존 실행은 시작 시점 스냅샷으로 분석을 재개할 수 있지만, 모드 4 종료 무결성 검사에서 차이가 확인되면 `SOURCE_DRIFT`로 표시하고 현재 원본에 대한 완료 결과로 취급하지 않는다.
 - 재개는 매니페스트의 `workflowVersion`과 프롬프트 계약을 먼저 확인한다. 이를 알 수 없거나 저장 산출물과 모순되면 신규 의미로 추정하지 않고 실패 폐쇄한다.
+- 재개는 manifest/state/inventory/issue ledger/steps의 저장 세대, workflowVersion과 역할·주 입력 스냅샷 참조가 서로 일치하는지도 공급자 호출 전에 확인한다.
 - 사용자가 최신 원본을 반영하려면 새 실행을 만들어야 한다.
 - `Ctrl+C` 또는 명시적 일시정지는 현재 자식 프로세스의 종료를 요청하고 마지막 완료 체크포인트를 보존한다.
 - 실행 취소도 감사 아티팩트를 보존하며 실행 데이터 삭제는 v1 범위에 포함하지 않는다.
@@ -1461,6 +1467,8 @@ claude -p `
 - 포함·제외 규칙
 - 예상 및 실제 호출 수
 - 사용자 결정 목록
+
+신규 매니페스트 schema 4는 `storageContractVersion`, state/inventory/issue ledger/단계 그래프/단계 결과의 명시적 버전을 기록한다. `inputs.documentA/documentB` 또는 공동 문서 입력은 원본 절대 경로나 본문이 아니라 `snapshotName`과 `sha256`의 안전한 참조로 저장하며, `roles`는 `inputs/inventory.json`의 역할과 정확히 일치해야 한다.
 
 신규 매니페스트에는 `inputs.documentA/documentB`와 정규 필드만 기록한다. 인증 토큰, 비밀값, 원문 공급자 응답과 문서 본문은 기록하지 않는다. 레거시 별칭으로 시작했더라도 `CodexDocument/ClaudeDocument`나 공급자 소유 문서 필드를 신규 매니페스트에 쓰지 않는다.
 
@@ -1729,6 +1737,7 @@ claude -p `
 - `workflowVersion`, 프롬프트 계약과 단계 결과 스키마 버전을 기록한다.
 - `workflow-v1` 인벤토리·단계 그래프·파일명을 그대로 읽고 재개하는 경로를 보존한다.
 - 기존 실행을 `workflow-v2` 의미로 묵시적으로 재구성하지 않는 회귀 테스트를 추가한다.
+- 직렬화된 workflow-v1 저장 fixture로 누락 그래프의 v1 복원, v2 전용 프롬프트 필드 비노출, 확정 단계 미호출, v1 최종 파일과 원장 유지 및 fixture 해시 불변을 검증한다.
 
 ### 단계 4: 모드 2 `document-merge`
 

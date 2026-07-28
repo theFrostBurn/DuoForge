@@ -255,7 +255,10 @@ function Get-DuoForgeProgressBarriersInternal {
 
 function Get-DuoForgeProgressArtifactRecordInternal {
     [CmdletBinding()]
-    param([Parameter(Mandatory)]$Step)
+    param(
+        [Parameter(Mandatory)]$Step,
+        [Parameter(Mandatory)][ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion
+    )
 
     if ([string]$Step.status -ne 'COMMITTED' -or [string]::IsNullOrWhiteSpace([string]$Step.artifactPath)) { return $null }
     if (-not (Test-Path -LiteralPath ([string]$Step.artifactPath) -PathType Leaf)) { return $null }
@@ -265,8 +268,7 @@ function Get-DuoForgeProgressArtifactRecordInternal {
         $artifact = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path ([string]$Step.artifactPath))
         $result = Get-DuoForgeObjectValue -Object $artifact -Name 'result'
         if ($null -eq $result) { return $null }
-        $workflowVersion = if ([int](Get-DuoForgeObjectValue -Object $result -Name 'schemaVersion' -Default 1) -eq 2) { 'workflow-v2' } else { 'workflow-v1' }
-        $null = Test-DuoForgeStageResultInternal -Result $result -ExpectedStage ([string]$Step.stage) -ExpectedProvider ([string]$Step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @()) -ThrowOnError
+        $null = Test-DuoForgeStageResultInternal -Result $result -ExpectedStage ([string]$Step.stage) -ExpectedProvider ([string]$Step.provider) -WorkflowVersion $WorkflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @()) -ThrowOnError
     }
     catch { return $null }
 
@@ -317,12 +319,14 @@ function Get-DuoForgeProgressSnapshotInternal {
         $firstSynthesizer = if ([string]::IsNullOrWhiteSpace([string]$manifest.firstSynthesizer)) { 'alternate' } else { [string]$manifest.firstSynthesizer }
         $contextPlanPath = Join-Path $RunDirectory 'inputs\context-plan.json'
         $contextBatchCount = if (Test-Path -LiteralPath $contextPlanPath -PathType Leaf) { @((Read-DuoForgeJson -Path $contextPlanPath).batches).Count } else { 0 }
-        $graph = New-DuoForgeStageGraph -Mode ([string]$manifest.mode) -MaxRounds ([int]$manifest.maxRounds) -FirstSynthesizer $firstSynthesizer -ContextBatchCount $contextBatchCount
+        $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
+        $graph = New-DuoForgeStageGraph -Mode ([string]$manifest.mode) -MaxRounds ([int]$manifest.maxRounds) -FirstSynthesizer $firstSynthesizer -ContextBatchCount $contextBatchCount -WorkflowVersion $workflowVersion
     }
 
+    $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
     $artifactRecords = [System.Collections.Generic.List[object]]::new()
     foreach ($step in @($graph.steps)) {
-        $record = Get-DuoForgeProgressArtifactRecordInternal -Step $step
+        $record = Get-DuoForgeProgressArtifactRecordInternal -Step $step -WorkflowVersion $workflowVersion
         if ($null -ne $record) { $artifactRecords.Add($record) }
     }
     $lastStepKey = if ($null -ne $LastEvent -and $LastEvent.Contains('data')) { [string](Get-DuoForgeObjectValue -Object $LastEvent.data -Name 'stepKey') } else { '' }

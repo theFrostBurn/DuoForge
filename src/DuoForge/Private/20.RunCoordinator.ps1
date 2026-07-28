@@ -28,7 +28,10 @@ function Get-DuoForgeRemainingCallBudget {
     }
     else {
         $firstSynthesizer = if ([string]::IsNullOrWhiteSpace([string]$manifest.firstSynthesizer)) { 'alternate' } else { [string]$manifest.firstSynthesizer }
-        $graph = New-DuoForgeStageGraph -Mode ([string]$manifest.mode) -MaxRounds ([int]$manifest.maxRounds) -FirstSynthesizer $firstSynthesizer
+        $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
+        $contextPlanPath = Join-Path $RunDirectory 'inputs\context-plan.json'
+        $contextBatchCount = if (Test-Path -LiteralPath $contextPlanPath -PathType Leaf) { @((Read-DuoForgeJson -Path $contextPlanPath).batches).Count } else { 0 }
+        $graph = New-DuoForgeStageGraph -Mode ([string]$manifest.mode) -MaxRounds ([int]$manifest.maxRounds) -FirstSynthesizer $firstSynthesizer -ContextBatchCount $contextBatchCount -WorkflowVersion $workflowVersion
     }
 
     $providers = [ordered]@{}
@@ -37,7 +40,9 @@ function Get-DuoForgeRemainingCallBudget {
         $completed = @($graph.steps | Where-Object { $_.provider -eq $provider -and $_.status -eq 'COMMITTED' }).Count
         $attempted = 0
         foreach ($step in @($graph.steps | Where-Object { $_.provider -eq $provider })) { $attempted += [int]$step.attemptCount }
-        $maximum = [int]$manifest.executionPlan.providers[$provider].maximumCalls
+        $providerPlans = Get-DuoForgeObjectValue -Object $manifest.executionPlan -Name 'providers'
+        $providerPlan = Get-DuoForgeObjectValue -Object $providerPlans -Name $provider
+        $maximum = [int](Get-DuoForgeObjectValue -Object $providerPlan -Name 'maximumCalls' -Default 0)
         $providers[$provider] = [ordered]@{
             plannedRemaining = [Math]::Max(0, $planned - $completed)
             maximumAdditionalCalls = [Math]::Max(0, $maximum - $attempted)
@@ -60,6 +65,10 @@ function Invoke-DuoForgeResumeLiveInternal {
         throw (New-DuoForgeException -Code 'DF-LIVE-CONSENT' -Message '라이브 공급자 호출 동의가 없습니다.')
     }
     $run = Get-DuoForgeRunInternal -RunId $RunId -ResultsRoot $ResultsRoot
+    $directory = [string]$run.runDirectory
+    $null = Invoke-WithDuoForgeRunLock -RunDirectory $directory -ScriptBlock { $true }
+    $run = Get-DuoForgeRunInternal -RunId $RunId -ResultsRoot $ResultsRoot
+    $null = Assert-DuoForgeRunStorageContractInternal -RunDirectory $directory
     if ([string]$run.manifest.mode -eq 'dual-project-audit') {
         throw (New-DuoForgeException -Code 'DF-MODE-3A-DISABLED' -Message '3A는 현재 Windows 격리 후보가 범위 밖 읽기와 자식 프로세스 차단에 실패하여 비활성화되어 있습니다.')
     }
@@ -79,7 +88,6 @@ function Invoke-DuoForgeResumeLiveInternal {
         throw (New-DuoForgeException -Code 'DF-DOCTOR-BLOCKED' -Message '현재 환경 진단이 문서 모드 라이브 실행을 허용하지 않습니다.')
     }
 
-    $directory = [string]$run.runDirectory
     $providerStageCommand = Get-Command -Name 'Invoke-DuoForgeLiveProviderStage' -CommandType Function -ErrorAction Stop
     $callback = {
         param($step, $prompt, $graph)

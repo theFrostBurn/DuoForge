@@ -235,7 +235,8 @@ function Repair-DuoForgeCorruptedStageArtifactsInternal {
         else {
             try {
                 $wrapper = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $path)
-                $null = Test-DuoForgeStageResultInternal -Result $wrapper.result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -ThrowOnError
+                $knownIssueTargets = if ($workflowVersion -eq 'workflow-v2') { Get-DuoForgeKnownIssueTargetsInternal -RunDirectory $RunDirectory -Graph $Graph -ExcludeStepKey ([string]$step.stepKey) } else { $null }
+                $null = Test-DuoForgeStageResultInternal -Result $wrapper.result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -KnownIssueTargets $knownIssueTargets -ThrowOnError
             }
             catch { $valid = $false }
         }
@@ -341,6 +342,7 @@ function Invoke-DuoForgeStageEngine {
     )
 
     return Invoke-WithDuoForgeRunLock -RunDirectory $RunDirectory -ScriptBlock {
+        $null = Assert-DuoForgeRunStorageContractInternal -RunDirectory $RunDirectory
         $manifest = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json')
         $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
         $null = Assert-DuoForgeStagePromptPolicyInternal -Manifest $manifest
@@ -452,7 +454,8 @@ function Invoke-DuoForgeStageEngine {
                         round = [int]$step.round
                         attempt = [int]$step.attemptCount
                     })
-                    $null = Test-DuoForgeStageResultInternal -Result $result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -ThrowOnError
+                    $knownIssueTargets = if ($workflowVersion -eq 'workflow-v2') { Get-DuoForgeKnownIssueTargetsInternal -RunDirectory $RunDirectory -Graph $graph -ExcludeStepKey ([string]$step.stepKey) } else { $null }
+                    $null = Test-DuoForgeStageResultInternal -Result $result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -KnownIssueTargets $knownIssueTargets -ThrowOnError
                     $artifactDirectory = Join-Path $RunDirectory ("rounds\round-{0:D2}\raw-redacted" -f [int]$step.round)
                     [System.IO.Directory]::CreateDirectory($artifactDirectory) | Out-Null
                     $artifactPath = Join-Path $artifactDirectory ($step.stepKey + '.json')

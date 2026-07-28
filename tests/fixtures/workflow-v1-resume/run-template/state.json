@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "runId": "fixture-workflow-v1-resume",
+  "mode": "dual-document",
+  "documentType": "custom",
+  "round": 1,
+  "maxRounds": 2,
+  "status": "RESUMABLE_ERROR",
+  "lastCompletedStage": "r01-codex-cross-review",
+  "openIssues": [],
+  "blockingIssues": [],
+  "answeredIssues": [],
+  "coverage": { "filePercent": 100.0, "bytePercent": 100.0, "completionStatus": "COMPLETED" },
+  "runtimeSeconds": 0.0,
+  "createdAt": "2026-07-01T00:00:00Z",
+  "updatedAt": "2026-07-01T00:00:00Z"
+}

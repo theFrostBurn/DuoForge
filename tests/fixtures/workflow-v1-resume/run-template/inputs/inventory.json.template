@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-01T00:00:00Z",
+  "mode": "dual-document",
+  "sourceFiles": [],
+  "snapshots": [
+    {
+      "sourcePath": "fixture://document-a",
+      "sourceHash": "__SNAPSHOT_A_HASH__",
+      "snapshotName": "S000001.md",
+      "snapshotPath": "__SNAPSHOT_A_PATH__",
+      "snapshotHash": "__SNAPSHOT_A_HASH__",
+      "bytes": 80
+    },
+    {
+      "sourcePath": "fixture://document-b",
+      "sourceHash": "__SNAPSHOT_B_HASH__",
+      "snapshotName": "S000002.md",
+      "snapshotPath": "__SNAPSHOT_B_PATH__",
+      "snapshotHash": "__SNAPSHOT_B_HASH__",
+      "bytes": 80
+    }
+  ],
+  "roles": {
+    "codex": { "primary": "S000001.md", "context": [] },
+    "claude": { "primary": "S000002.md", "context": [] }
+  }
+}

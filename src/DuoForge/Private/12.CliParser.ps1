@@ -37,6 +37,20 @@ function Get-DuoForgeCliOption {
     return $Default
 }
 
+function Assert-DuoForgeCliOptionsInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Parsed,
+        [AllowEmptyCollection()][Parameter(Mandatory)][string[]]$AllowedNames
+    )
+
+    $unknown = @($Parsed.options.Keys | ForEach-Object { [string]$_ } | Where-Object { $_ -notin $AllowedNames } | Sort-Object -Unique)
+    if ($unknown.Count -gt 0) {
+        throw (New-DuoForgeException -Code 'DF-CLI-OPTION' -Message ('알 수 없는 옵션입니다: ' + @($unknown | ForEach-Object { "--$_" }) -join ', '))
+    }
+    return $true
+}
+
 function ConvertTo-DuoForgeIntOption {
     [CmdletBinding()]
     param(

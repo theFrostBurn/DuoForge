@@ -105,8 +105,12 @@ function New-TestStartRequest {
         [string]$Brief,
         [string]$DocumentA,
         [string]$DocumentB,
+        [string]$DocumentAContext,
+        [string]$DocumentBContext,
         [string]$CodexDocument,
         [string]$ClaudeDocument,
+        [string]$CodexContext,
+        [string]$ClaudeContext,
         [string]$CodexProject,
         [string]$ClaudeProject,
         [string]$Requirements,
@@ -457,6 +461,36 @@ try {
         }
     }
 
+    Test-Case '정규·레거시 컨텍스트 별칭은 A/B로 정규화되고 충돌과 unknown CLI 옵션을 차단한다' {
+        $documentA = New-MarkdownFile -Path (Join-Path $tempRoot 'context-alias\A\main.md')
+        $documentB = New-MarkdownFile -Path (Join-Path $tempRoot 'context-alias\B\main.md')
+        $contextA = Join-Path $tempRoot 'context-alias\A-extra'
+        $contextB = Join-Path $tempRoot 'context-alias\B-extra'
+        $extraA = New-MarkdownFile -Path (Join-Path $contextA 'nested\extra-a.md')
+        $extraB = New-MarkdownFile -Path (Join-Path $contextB 'nested\extra-b.md')
+        $workspace = Join-Path $tempRoot 'context-alias-results'
+        $request = New-TestStartRequest -Mode document-merge -DocumentA $documentA -DocumentB $documentB -CodexContext $contextA -ClaudeContext $contextB -Workspace $workspace
+        Assert-Equal $request.inputs.documentAContext $contextA
+        Assert-Equal $request.inputs.documentBContext $contextB
+        Assert-False $request.inputs.Contains('codexContext')
+        Assert-False $request.inputs.Contains('claudeContext')
+        Assert-Equal @($request.compatibilityWarnings | Where-Object { $_.code -eq 'DF-DEPRECATED-CONTEXT-ALIASES' }).Count 1
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        Assert-True ([bool]$validation.valid) ($validation.errors | ConvertTo-Json -Depth 20 -Compress)
+        Assert-True ([System.IO.Path]::GetFullPath($extraA) -in @($validation.inputs.documents.A.context.files.path))
+        Assert-True ([System.IO.Path]::GetFullPath($extraB) -in @($validation.inputs.documents.B.context.files.path))
+
+        Assert-ThrowsCode -ExpectedCode 'DF-INPUT-CONTEXT-ALIAS-CONFLICT' -Body {
+            New-TestStartRequest -Mode dual-document -DocumentA $documentA -DocumentB $documentB -DocumentAContext $contextA -CodexContext $contextB -DocumentBContext $contextB -Workspace $workspace
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-CLI-OPTION' -Body {
+            & $module {
+                $parsed = ConvertFrom-DuoForgeCliArguments -Arguments @('start', 'document-merge', '--document-a', 'A.md', '--typo-option', 'x')
+                Assert-DuoForgeCliOptionsInternal -Parsed $parsed -AllowedNames @('document-a')
+            }
+        }
+    }
+
     Test-Case '워크플로 버전이 없는 실행은 v1이며 명시된 v2만 신규 의미를 사용한다' {
         $versions = & $module {
             [ordered]@{
@@ -481,6 +515,23 @@ try {
         $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         Assert-False ([bool]$validation.valid)
         Assert-Equal @($validation.errors | Where-Object { $_.code -eq 'DF-WORKFLOW-NEW-RUN' }).Count 1
+        Assert-False (Test-Path -LiteralPath $workspace)
+    }
+
+    Test-Case '공개 요청 검증은 직접 만든 사전의 미지 필드와 레거시 충돌 및 경고 주입을 차단한다' {
+        $a = New-MarkdownFile -Path (Join-Path $tempRoot 'request-boundary\A\main.md')
+        $b = New-MarkdownFile -Path (Join-Path $tempRoot 'request-boundary\B\main.md')
+        $workspace = Join-Path $tempRoot 'request-boundary-results'
+        $request = New-TestStartRequest -Mode document-merge -DocumentA $a -DocumentB $b -Workspace $workspace
+        $request['unexpectedRoot'] = 'ignored-before'
+        $request.inputs['codexDocument'] = Join-Path $tempRoot 'different-a.md'
+        $request.providerSelections.codex['unexpectedProviderField'] = 'ignored-before'
+        $request.compatibilityWarnings = @([ordered]@{ code = 'INJECTED'; message = '임의 경고 원문' })
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        Assert-False ([bool]$validation.valid)
+        Assert-True (@($validation.errors | Where-Object { $_.code -eq 'DF-REQUEST-FIELD' }).Count -ge 3)
+        Assert-True (@($validation.errors | Where-Object { $_.code -eq 'DF-REQUEST-WARNING' }).Count -eq 1)
+        Assert-Equal @($validation.warnings).Count 0
         Assert-False (Test-Path -LiteralPath $workspace)
     }
 
@@ -534,6 +585,210 @@ try {
         Assert-True ('document-validation' -in @($plans.current.providers.codex.calls.stage))
         Assert-Equal $plans.legacy.workflowVersion 'workflow-v1'
         Assert-Equal $plans.current.workflowVersion 'workflow-v2'
+    }
+
+    Test-Case '정제된 workflow-v1 fixture는 기존 단계와 프롬프트 의미를 보존하며 전체 재개된다' {
+        $fixtureRoot = Join-Path $PSScriptRoot 'fixtures\workflow-v1-resume'
+        $fixture = Get-Content -LiteralPath (Join-Path $fixtureRoot 'fixture.json') -Raw | ConvertFrom-Json -Depth 20
+        $fixtureHashesBefore = @{}
+        foreach ($file in @(Get-ChildItem -LiteralPath $fixtureRoot -File -Recurse)) {
+            $fixtureHashesBefore[$file.FullName] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+        }
+
+        $workspace = Join-Path $tempRoot 'workflow-v1-resume-results'
+        $request = New-TestStartRequest `
+            -Mode ([string]$fixture.mode) `
+            -DocumentA (Join-Path $fixtureRoot 'document-a\source.md') `
+            -DocumentB (Join-Path $fixtureRoot 'document-b\source.md') `
+            -Workspace $workspace `
+            -MaxRounds ([int]$fixture.maxRounds)
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        Assert-True ([bool]$validation.valid)
+        $run = New-DuoForgeRun -ValidationResult $validation
+
+        $manifestPath = Join-Path $run.runDirectory 'manifest.json'
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+        foreach ($field in @('workflowVersion', 'storageContractVersion', 'stateSchemaVersion', 'inventorySchemaVersion', 'issueLedgerSchemaVersion', 'stageGraphSchemaVersion', 'stageResultSchemaVersion', 'inputs', 'roles')) { $manifest.Remove($field) }
+        $manifest.schemaVersion = 2
+        $manifest.promptTemplateVersion = [string]$fixture.expectedPromptTemplateVersion
+        $manifest.executionPlan = Get-DuoForgeExecutionPlan -Mode dual-document -MaxRounds ([int]$fixture.maxRounds) -WorkflowVersion workflow-v1
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $manifestPath $manifest
+
+        $statePath = Join-Path $run.runDirectory 'state.json'
+        $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+        $state.schemaVersion = 1
+        $state.Remove('workflowVersion')
+        $state.Remove('promptContractVersion')
+        $state.status = 'RESUMABLE_ERROR'
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $statePath $state
+
+        $inventoryPath = Join-Path $run.runDirectory 'inputs\inventory.json'
+        $inventory = Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+        $inventory.schemaVersion = 1
+        $inventory.Remove('workflowVersion')
+        $documentRoles = $inventory.roles.documents
+        $inventory.roles = [ordered]@{
+            codex = $documentRoles.A
+            claude = $documentRoles.B
+        }
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $inventoryPath $inventory
+
+        $ledgerPath = Join-Path $run.runDirectory 'issues.json'
+        $ledger = [ordered]@{ schemaVersion = 1; issues = @() }
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $ledgerPath $ledger
+
+        $missingGraphBudget = & $module { param($directory) Get-DuoForgeRemainingCallBudget -RunDirectory $directory } $run.runDirectory
+        $missingGraphProgress = & $module { param($directory) Get-DuoForgeProgressSnapshotInternal -RunDirectory $directory } $run.runDirectory
+        Assert-True ('owner-response' -in @($missingGraphProgress.steps.stage))
+        Assert-False ('document-review' -in @($missingGraphProgress.steps.stage))
+        Assert-Equal $missingGraphBudget.providers.codex.plannedRemaining 6
+        Assert-Equal $missingGraphBudget.providers.claude.plannedRemaining 6
+
+        $graph = & $module { param($directory) Initialize-DuoForgeStageGraph -RunDirectory $directory } $run.runDirectory
+        Assert-Equal $graph.schemaVersion 1
+        Assert-Equal @($graph.steps).Count 12
+        $precommitted = @($graph.steps | Select-Object -First ([int]$fixture.precommittedStepCount))
+        foreach ($step in $precommitted) {
+            $artifactDirectory = Join-Path $run.runDirectory ("rounds\round-{0:D2}\raw-redacted" -f [int]$step.round)
+            [System.IO.Directory]::CreateDirectory($artifactDirectory) | Out-Null
+            $artifactPath = Join-Path $artifactDirectory ($step.stepKey + '.json')
+            $result = & $module { param($currentStep) New-DuoForgeFakeStageResult -Step $currentStep } $step
+            $wrapper = [ordered]@{ schemaVersion = 1; stepKey = $step.stepKey; provider = $step.provider; stage = $step.stage; round = $step.round; result = $result }
+            & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $artifactPath $wrapper
+            $step.status = 'COMMITTED'
+            $step.attemptCount = 1
+            $step.artifactPath = $artifactPath
+            $step.artifactHash = & $module { param($path) Get-DuoForgeSha256 -Path $path } $artifactPath
+        }
+        $stepsPath = Join-Path $run.runDirectory 'steps.json'
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $stepsPath $graph
+        $state.lastCompletedStage = [string]$precommitted[-1].stepKey
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $statePath $state
+        Assert-True (& $module { param($directory) Assert-DuoForgeRunStorageContractInternal -RunDirectory $directory } $run.runDirectory)
+        $state.workflowVersion = 'workflow-v2'
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $statePath $state
+        Assert-ThrowsCode -ExpectedCode 'DF-RUN-STORAGE-CONTRACT' -Body {
+            & $module { param($directory) Assert-DuoForgeRunStorageContractInternal -RunDirectory $directory } $run.runDirectory
+        }
+        $state.Remove('workflowVersion')
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $statePath $state
+
+        $nextStep = @(& $module { param($value) Get-DuoForgeReadySteps -Graph $value } $graph | Select-Object -First 1)[0]
+        $prompt = & $module { param($directory, $value, $step) New-DuoForgeStagePrompt -RunDirectory $directory -Graph $value -Step $step } $run.runDirectory $graph $nextStep
+        Assert-NotContainsText $prompt.text '"performedBy":'
+        Assert-NotContainsText $prompt.text '"targetDocumentId":'
+        Assert-NotContainsText $prompt.text '"sourceDocumentIds":'
+        Assert-NotContainsText $prompt.text '"allowedIssueTargetDocumentIds":'
+        Assert-ContainsText $prompt.text '-R01-001'
+        Assert-ContainsText $prompt.text '공급자와 라운드가 포함된'
+
+        $calledSteps = [System.Collections.Generic.List[string]]::new()
+        $result = & $module {
+            param($directory, $calls)
+            $callback = { param($step) $calls.Add([string]$step.stepKey); return New-DuoForgeFakeStageResult -Step $step }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory $calledSteps
+        Assert-Equal $result.status 'COMPLETED' ($result | ConvertTo-Json -Depth 20 -Compress)
+        Assert-Equal $result.invoked (@($graph.steps).Count - $precommitted.Count)
+        foreach ($step in $precommitted) { Assert-False ([string]$step.stepKey -in @($calledSteps)) }
+        foreach ($name in @($fixture.expectedFinalFiles)) { Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory "final\$name") -PathType Leaf) }
+        $finalLedger = Get-Content -LiteralPath $ledgerPath -Raw | ConvertFrom-Json -Depth 100
+        Assert-Equal $finalLedger.schemaVersion 1
+        Assert-True ($null -eq $finalLedger.workflowVersion)
+        foreach ($path in $fixtureHashesBefore.Keys) {
+            Assert-Equal (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash $fixtureHashesBefore[$path]
+        }
+    }
+
+    Test-Case '직렬화된 workflow-v1 저장 fixture는 STARTED 체크포인트부터 원본 불변으로 재개된다' {
+        $fixtureRoot = Join-Path $PSScriptRoot 'fixtures\workflow-v1-resume\run-template'
+        $fixtureHashesBefore = @{}
+        foreach ($file in @(Get-ChildItem -LiteralPath $fixtureRoot -File -Recurse)) {
+            $fixtureHashesBefore[$file.FullName] = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+        }
+        $runDirectory = Join-Path $tempRoot 'serialized-v1-results\fixture-workflow-v1-resume'
+        [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($runDirectory)) | Out-Null
+        Copy-Item -LiteralPath $fixtureRoot -Destination $runDirectory -Recurse
+
+        $snapshotAPath = Join-Path $runDirectory 'inputs\snapshots\S000001.md'
+        $snapshotBPath = Join-Path $runDirectory 'inputs\snapshots\S000002.md'
+        $artifactPath = Join-Path $runDirectory 'rounds\round-01\raw-redacted\r01-codex-cross-review.json'
+        $snapshotAHash = & $module { param($path) Get-DuoForgeSha256 -Path $path } $snapshotAPath
+        $snapshotBHash = & $module { param($path) Get-DuoForgeSha256 -Path $path } $snapshotBPath
+        $artifactHash = & $module { param($path) Get-DuoForgeSha256 -Path $path } $artifactPath
+        $escapeJsonPath = { param([string]$path) $path.Replace('\', '\\') }
+        $replacements = [ordered]@{
+            '__RESULTS_ROOT__' = & $escapeJsonPath ([System.IO.Path]::GetDirectoryName($runDirectory))
+            '__RUN_DIRECTORY__' = & $escapeJsonPath $runDirectory
+            '__SNAPSHOT_A_PATH__' = & $escapeJsonPath $snapshotAPath
+            '__SNAPSHOT_B_PATH__' = & $escapeJsonPath $snapshotBPath
+            '__COMMITTED_ARTIFACT_PATH__' = & $escapeJsonPath $artifactPath
+            '__SNAPSHOT_A_HASH__' = $snapshotAHash
+            '__SNAPSHOT_B_HASH__' = $snapshotBHash
+            '__COMMITTED_ARTIFACT_HASH__' = $artifactHash
+        }
+        foreach ($templateName in @('manifest.json.template', 'inputs\inventory.json.template', 'steps.json.template')) {
+            $templatePath = Join-Path $runDirectory $templateName
+            $text = [System.IO.File]::ReadAllText($templatePath, [System.Text.UTF8Encoding]::new($false, $true))
+            foreach ($token in $replacements.Keys) { $text = $text.Replace($token, [string]$replacements[$token]) }
+            $outputPath = $templatePath.Substring(0, $templatePath.Length - '.template'.Length)
+            [System.IO.File]::WriteAllText($outputPath, $text, [System.Text.UTF8Encoding]::new($false))
+            Remove-Item -LiteralPath $templatePath -Force
+        }
+
+        Assert-True (& $module { param($directory) Assert-DuoForgeRunStorageContractInternal -RunDirectory $directory } $runDirectory)
+        $immutableRunHashesBefore = @{}
+        foreach ($path in @(
+            (Join-Path $runDirectory 'manifest.json'),
+            (Join-Path $runDirectory 'inputs\inventory.json'),
+            $snapshotAPath,
+            $snapshotBPath,
+            $artifactPath
+        )) {
+            $immutableRunHashesBefore[$path] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        }
+        $manifestPath = Join-Path $runDirectory 'manifest.json'
+        $manifestBytes = [System.IO.File]::ReadAllBytes($manifestPath)
+        try {
+            $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -AsHashtable -Depth 50
+            $manifest.schemaVersion = 99
+            & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $manifestPath $manifest
+            Assert-ThrowsCode -ExpectedCode 'DF-RUN-STORAGE-CONTRACT' -Body {
+                & $module { param($directory) Assert-DuoForgeRunStorageContractInternal -RunDirectory $directory } $runDirectory
+            }
+        }
+        finally { [System.IO.File]::WriteAllBytes($manifestPath, $manifestBytes) }
+
+        $graph = & $module { param($directory) ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $directory 'steps.json')) } $runDirectory
+        $interruptedStep = @($graph.steps | Where-Object { $_.status -eq 'STARTED' })[0]
+        $prompt = & $module { param($directory, $value, $step) New-DuoForgeStagePrompt -RunDirectory $directory -Graph $value -Step $step } $runDirectory $graph $interruptedStep
+        Assert-ContainsText $prompt.text 'CLAUDE-R01-001'
+        Assert-NotContainsText $prompt.text '"targetDocumentId":'
+        $progress = & $module { param($directory) Get-DuoForgeProgressSnapshotInternal -RunDirectory $directory } $runDirectory
+        Assert-Equal $progress.committedSteps 1
+
+        $calledSteps = [System.Collections.Generic.List[string]]::new()
+        $result = & $module {
+            param($directory, $calls)
+            $callback = { param($step) $calls.Add([string]$step.stepKey); return New-DuoForgeFakeStageResult -Step $step }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $runDirectory $calledSteps
+        Assert-Equal $result.status 'COMPLETED' ($result | ConvertTo-Json -Depth 20 -Compress)
+        Assert-Equal $result.invoked 11
+        Assert-False ('r01-codex-cross-review' -in @($calledSteps))
+        Assert-True ('r01-claude-cross-review' -in @($calledSteps))
+        Assert-True ('r02-claude-owned-document-revision' -in @($calledSteps))
+        foreach ($name in @('codex-final.md', 'claude-final.md', 'comparison.md', 'adoption-log.md', 'OPEN_QUESTIONS.md')) {
+            Assert-True (Test-Path -LiteralPath (Join-Path $runDirectory "final\$name") -PathType Leaf)
+        }
+        $events = @(Get-Content -LiteralPath (Join-Path $runDirectory 'events.jsonl') | ForEach-Object { $_ | ConvertFrom-Json -Depth 30 })
+        Assert-True (@($events | Where-Object type -eq 'STAGE_INTERRUPTED_RECOVERED').Count -eq 1)
+        foreach ($path in $fixtureHashesBefore.Keys) {
+            Assert-Equal (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash $fixtureHashesBefore[$path]
+        }
+        foreach ($path in $immutableRunHashesBefore.Keys) {
+            Assert-Equal (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash $immutableRunHashesBefore[$path]
+        }
     }
 
     Test-Case '공동 문서 요청은 입력 폴더 안의 결과 루트를 차단한다' {
@@ -608,9 +863,21 @@ try {
         $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         Assert-True ([bool]$validation.valid) ($validation.errors | ConvertTo-Json -Depth 10 -Compress)
         $run = New-DuoForgeRun -ValidationResult $validation
+        Assert-Equal $run.manifest.schemaVersion 4
         Assert-Equal $run.manifest.workflowVersion 'workflow-v2'
+        Assert-Equal $run.manifest.storageContractVersion 'duoforge-run-v2'
         Assert-Equal $run.manifest.promptTemplateVersion 'duoforge-stage-v3'
         $inventory = Get-Content -LiteralPath (Join-Path $run.runDirectory 'inputs\inventory.json') -Raw | ConvertFrom-Json -Depth 50
+        $state = Get-Content -LiteralPath (Join-Path $run.runDirectory 'state.json') -Raw | ConvertFrom-Json -Depth 50
+        $ledger = Get-Content -LiteralPath (Join-Path $run.runDirectory 'issues.json') -Raw | ConvertFrom-Json -Depth 50
+        Assert-Equal $state.schemaVersion 2
+        Assert-Equal $state.workflowVersion 'workflow-v2'
+        Assert-Equal $state.promptContractVersion 'duoforge-stage-v3'
+        Assert-Equal $inventory.schemaVersion 2
+        Assert-Equal $inventory.workflowVersion 'workflow-v2'
+        Assert-Equal $ledger.schemaVersion 2
+        Assert-Equal $ledger.workflowVersion 'workflow-v2'
+        Assert-Equal $ledger.issueSchemaVersion 2
         Assert-True ($null -ne $inventory.roles.documents.A)
         Assert-True ($null -ne $inventory.roles.documents.B)
         Assert-True ($null -eq $inventory.roles.codex)
@@ -618,6 +885,115 @@ try {
         $manifestText = Get-Content -LiteralPath (Join-Path $run.runDirectory 'manifest.json') -Raw
         Assert-NotContainsText $manifestText 'codexDocument'
         Assert-NotContainsText $manifestText 'claudeDocument'
+        Assert-NotContainsText $manifestText 'sourcePath'
+        Assert-NotContainsText $manifestText 'snapshotPath'
+        Assert-Equal $run.manifest.inputs.documentA.snapshotName $inventory.roles.documents.A.primary
+        Assert-Equal $run.manifest.inputs.documentB.snapshotName $inventory.roles.documents.B.primary
+        Assert-Equal $run.manifest.roles.documents.A.primary $inventory.roles.documents.A.primary
+        Assert-True (& $module { param($directory) Assert-DuoForgeRunStorageContractInternal -RunDirectory $directory } $run.runDirectory)
+    }
+
+    Test-Case '저장 세대 계약은 manifest/state/inventory/ledger/steps 혼합을 공급자 호출 전에 차단한다' {
+        $a = New-MarkdownFile -Path (Join-Path $tempRoot 'storage-contract\A\main.md')
+        $b = New-MarkdownFile -Path (Join-Path $tempRoot 'storage-contract\B\main.md')
+        $workspace = Join-Path $tempRoot 'storage-contract-results'
+        $request = New-TestStartRequest -Mode dual-document -DocumentA $a -DocumentB $b -Workspace $workspace
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $null = & $module { param($directory) Initialize-DuoForgeStageGraph -RunDirectory $directory } $run.runDirectory
+        $mutations = @(
+            [ordered]@{ path = 'manifest.json'; mutate = { param($value) $value.storageContractVersion = 'broken' } },
+            [ordered]@{ path = 'manifest.json'; mutate = { param($value) $value.stageResultSchemaVersion = 1 } },
+            [ordered]@{ path = 'state.json'; mutate = { param($value) $value.schemaVersion = 1 } },
+            [ordered]@{ path = 'inputs\inventory.json'; mutate = { param($value) $value.workflowVersion = 'workflow-v1' } },
+            [ordered]@{ path = 'issues.json'; mutate = { param($value) $value.issueSchemaVersion = 1 } },
+            [ordered]@{ path = 'steps.json'; mutate = { param($value) $value.schemaVersion = 1 } },
+            [ordered]@{ path = 'steps.json'; mutate = { param($value) $value.steps = @($value.steps | Select-Object -SkipLast 1) } },
+            [ordered]@{ path = 'steps.json'; mutate = { param($value) (@($value.steps | Where-Object targetDocumentId -eq 'A' | Select-Object -First 1)[0]).targetDocumentId = 'B' } },
+            [ordered]@{ path = 'steps.json'; mutate = { param($value) $value.steps[0].sourceDocumentIds = @('A') } },
+            [ordered]@{ path = 'steps.json'; mutate = { param($value) $value.steps[0] | Add-Member -NotePropertyName contextBatchId -NotePropertyValue 'batch-999' } }
+        )
+        foreach ($mutation in $mutations) {
+            $path = Join-Path $run.runDirectory $mutation.path
+            $original = [System.IO.File]::ReadAllBytes($path)
+            try {
+                $value = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -Depth 100
+                & $mutation.mutate $value
+                $value | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $path -Encoding utf8NoBOM
+                Assert-ThrowsCode -ExpectedCode 'DF-RUN-STORAGE-CONTRACT' -Body {
+                    & $module { param($directory) Assert-DuoForgeRunStorageContractInternal -RunDirectory $directory } $run.runDirectory
+                }
+            }
+            finally { [System.IO.File]::WriteAllBytes($path, $original) }
+        }
+
+        $statePath = Join-Path $run.runDirectory 'state.json'
+        $stateBytes = [System.IO.File]::ReadAllBytes($statePath)
+        try {
+            $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json -Depth 100
+            $state.schemaVersion = 1
+            $state | ConvertTo-Json -Depth 100 | Set-Content -LiteralPath $statePath -Encoding utf8NoBOM
+            $providerCalls = [System.Collections.Generic.List[string]]::new()
+            Assert-ThrowsCode -ExpectedCode 'DF-RUN-STORAGE-CONTRACT' -Body {
+                & $module { param($directory, $calls) Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker { param($step, $prompt, $graph) $calls.Add([string]$step.stepKey); throw '호출되면 안 됩니다.' }.GetNewClosure() } $run.runDirectory $providerCalls
+            }
+            Assert-Equal $providerCalls.Count 0
+        }
+        finally { [System.IO.File]::WriteAllBytes($statePath, $stateBytes) }
+
+        $transactionDirectory = Join-Path $run.runDirectory 'control\transactions\prepared-recovery-test'
+        [System.IO.Directory]::CreateDirectory($transactionDirectory) | Out-Null
+        $backupPath = Join-Path $transactionDirectory 'file-0000.bin'
+        [System.IO.File]::WriteAllBytes($backupPath, $stateBytes)
+        $inventoryPathForRecovery = Join-Path $run.runDirectory 'inputs\inventory.json'
+        [System.IO.File]::Copy($inventoryPathForRecovery, (Join-Path $transactionDirectory 'file-0001.bin'), $false)
+        $orphanRelativePath = 'inputs\snapshots\E999999.md'
+        $orphanPath = Join-Path $run.runDirectory $orphanRelativePath
+        $stateTempPath = "$statePath.$([Guid]::NewGuid().ToString('N')).tmp"
+        $inventoryTempPath = "$(Join-Path $run.runDirectory 'inputs\inventory.json').$([Guid]::NewGuid().ToString('N')).tmp"
+        $metadataLessDirectory = Join-Path $run.runDirectory 'control\transactions\metadata-less-test'
+        [System.IO.Directory]::CreateDirectory($metadataLessDirectory) | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $metadataLessDirectory 'file-0000.bin'), 'backup-before-metadata')
+        [System.IO.File]::WriteAllText($statePath, '{"partial":true}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($orphanPath, '# orphan', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($stateTempPath, '{"partial-temp":true}', [System.Text.UTF8Encoding]::new($false))
+        [System.IO.File]::WriteAllText($inventoryTempPath, '{"partial-temp":true}', [System.Text.UTF8Encoding]::new($false))
+        $transactionMetadata = [ordered]@{
+            schemaVersion = 1; status = 'PREPARED'; createdAt = '2026-07-01T00:00:00Z'
+            files = @(
+                [ordered]@{ relativePath = 'state.json'; existed = $true; backupName = 'file-0000.bin' },
+                [ordered]@{ relativePath = 'inputs\inventory.json'; existed = $true; backupName = 'file-0001.bin' },
+                [ordered]@{ relativePath = $orphanRelativePath; existed = $false; backupName = $null }
+            )
+            directories = @()
+        }
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } (Join-Path $transactionDirectory 'transaction.json') $transactionMetadata
+        $null = & $module { param($directory) Invoke-WithDuoForgeRunLock -RunDirectory $directory -ScriptBlock { 'recovered' } } $run.runDirectory
+        Assert-True ([System.Linq.Enumerable]::SequenceEqual([byte[]][System.IO.File]::ReadAllBytes($statePath), [byte[]]$stateBytes))
+        Assert-False (Test-Path -LiteralPath $orphanPath)
+        Assert-False (Test-Path -LiteralPath $stateTempPath)
+        Assert-False (Test-Path -LiteralPath $inventoryTempPath)
+        Assert-False (Test-Path -LiteralPath $transactionDirectory)
+        Assert-False (Test-Path -LiteralPath $metadataLessDirectory)
+
+        $completedState = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+        $completedState.status = 'COMPLETED'
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $statePath $completedState
+        $completedStateBytes = [System.IO.File]::ReadAllBytes($statePath)
+        $resumeRecoveryDirectory = Join-Path $run.runDirectory 'control\transactions\public-resume-recovery-test'
+        [System.IO.Directory]::CreateDirectory($resumeRecoveryDirectory) | Out-Null
+        [System.IO.File]::WriteAllBytes((Join-Path $resumeRecoveryDirectory 'file-0000.bin'), $completedStateBytes)
+        [System.IO.File]::WriteAllText($statePath, '{"schemaVersion":1,"status":"READY"}', [System.Text.UTF8Encoding]::new($false))
+        $resumeMetadata = [ordered]@{
+            schemaVersion = 1; status = 'PREPARED'; createdAt = '2026-07-01T00:00:00Z'
+            files = @([ordered]@{ relativePath = 'state.json'; existed = $true; backupName = 'file-0000.bin' })
+            directories = @()
+        }
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } (Join-Path $resumeRecoveryDirectory 'transaction.json') $resumeMetadata
+        $resumeResult = & $module { param($id, $root) Invoke-DuoForgeResumeLiveInternal -RunId $id -ResultsRoot $root -LiveConsent $true } $run.runId $workspace
+        Assert-Equal $resumeResult.status 'COMPLETED'
+        Assert-Equal $resumeResult.invoked 0
+        Assert-False (Test-Path -LiteralPath $resumeRecoveryDirectory)
     }
 
     Test-Case '호출 계획은 라운드와 재시도를 포함해 강제 상한 안에 있다' {
@@ -902,7 +1278,7 @@ try {
         Assert-Equal $run.status 'SNAPSHOTTED'
         Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'manifest.json') -PathType Leaf)
         Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'inputs\snapshots\S000001.md') -PathType Leaf)
-        Assert-Equal $run.manifest.schemaVersion 3
+        Assert-Equal $run.manifest.schemaVersion 4
         Assert-Equal $run.manifest.workflowVersion 'workflow-v2'
         Assert-Equal $run.manifest.promptTemplateVersion 'duoforge-stage-v3'
         Assert-Equal $run.manifest.artifactVisibilityPolicy 'transitive-dependencies-v1'
@@ -1333,6 +1709,186 @@ try {
         }
     }
 
+    Test-Case 'workflow-v2 내부 계보는 단계별 대상과 출처 허용 행렬을 벗어나면 실패 폐쇄한다' {
+        $revisionStep = [ordered]@{
+            stepKey = 'r01-codex-document-a-revision'; provider = 'codex'; performedBy = 'codex'
+            targetDocumentId = 'A'; sourceDocumentIds = @('A', 'B'); stage = 'document-revision'; round = 1
+        }
+        $validationStep = [ordered]@{
+            stepKey = 'r02-claude-document-a-validation'; provider = 'claude'; performedBy = 'claude'
+            targetDocumentId = 'A'; sourceDocumentIds = @('A'); stage = 'document-validation'; round = 2
+        }
+        $reviewStep = [ordered]@{
+            stepKey = 'r01-codex-document-review'; provider = 'codex'; performedBy = 'codex'
+            targetDocumentId = $null; sourceDocumentIds = @('A', 'B'); stage = 'document-review'; round = 1
+        }
+        $responseStep = [ordered]@{
+            stepKey = 'r01-claude-review-response'; provider = 'claude'; performedBy = 'claude'
+            targetDocumentId = $null; sourceDocumentIds = @('A', 'B'); stage = 'review-response'; round = 1
+        }
+
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+            & $module {
+                param($step)
+                $result = New-DuoForgeFakeStageResult -Step $step
+                $result.issues = @([ordered]@{
+                    issueKey = 'CODEX-R01-DOCUMENT-REVISION-B-001'; targetDocumentId = 'B'; category = 'lineage'; severity = 'minor'
+                    claim = '잘못된 대상'; evidence = @(); proposal = '차단'; requiresUser = $false; blockingProposal = $false
+                })
+                Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -ThrowOnError
+            } $revisionStep
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+            & $module {
+                param($step)
+                $result = New-DuoForgeFakeStageResult -Step $step
+                $result.issues = @([ordered]@{
+                    issueKey = 'CLAUDE-R02-DOCUMENT-VALIDATION-A-001'; targetDocumentId = 'A'; category = 'lineage'; severity = 'minor'
+                    claim = '허용되지 않은 출처'; proposal = '차단'; requiresUser = $false; blockingProposal = $false
+                    evidence = @([ordered]@{ sourceDocumentId = 'B'; proposedByProvider = 'claude'; path = 'S000002.md'; location = '본문'; excerptHash = 'sha256:test' })
+                })
+                Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -ThrowOnError
+            } $validationStep
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+            & $module {
+                param($step)
+                $result = New-DuoForgeFakeStageResult -Step $step
+                $result.adoptions = @([ordered]@{
+                    issueKey = 'KNOWN-A'; sourceDocumentId = 'B'; proposedByProvider = 'claude'; targetDocumentId = 'B'
+                    disposition = 'ACCEPTED'; rationale = '잘못된 대상'; locations = @('본문')
+                })
+                Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -ThrowOnError
+            } $revisionStep
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+            & $module {
+                param($step)
+                $result = New-DuoForgeFakeStageResult -Step $step
+                $result.adoptions = @([ordered]@{
+                    issueKey = 'KNOWN-A'; sourceDocumentId = 'brief'; proposedByProvider = 'claude'; targetDocumentId = 'A'
+                    disposition = 'REJECTED'; rationale = '허용되지 않은 출처'; locations = @()
+                })
+                Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -ThrowOnError
+            } $revisionStep
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+            & $module {
+                param($step)
+                $result = New-DuoForgeFakeStageResult -Step $step
+                $result.issues = @([ordered]@{
+                    issueKey = 'CODEX-R01-DOCUMENT-REVIEW-MERGED-001'; targetDocumentId = 'merged'; category = 'lineage'; severity = 'minor'
+                    claim = '검토 단계의 잘못된 대상'; evidence = @(); proposal = '차단'; requiresUser = $false; blockingProposal = $false
+                })
+                Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedSourceDocumentIds $step.sourceDocumentIds -ThrowOnError
+            } $reviewStep
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+            & $module {
+                param($step)
+                $result = New-DuoForgeFakeStageResult -Step $step
+                $result.adoptions = @([ordered]@{
+                    issueKey = 'KNOWN-A'; sourceDocumentId = 'B'; proposedByProvider = 'codex'; targetDocumentId = 'A'
+                    disposition = 'ACCEPTED'; rationale = '검토 단계에서 채택하면 안 됩니다.'; locations = @('본문')
+                })
+                Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedSourceDocumentIds $step.sourceDocumentIds -ThrowOnError
+            } $responseStep
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+            & $module {
+                param($step)
+                $result = New-DuoForgeFakeStageResult -Step $step
+                $result.adoptions = @([ordered]@{
+                    issueKey = 'KNOWN-A'; sourceDocumentId = 'A'; proposedByProvider = 'codex'; targetDocumentId = 'A'
+                    disposition = 'ACCEPTED'; rationale = '검증 단계의 허위 반영'; locations = @('본문')
+                })
+                Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -KnownIssueTargets ([ordered]@{ 'KNOWN-A' = 'A' }) -ThrowOnError
+            } $validationStep
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+            & $module {
+                param($step)
+                $result = New-DuoForgeFakeStageResult -Step $step
+                $result.issueResponses = @([ordered]@{ issueKey = 'KNOWN-A'; disposition = 'ACCEPTED'; rationale = '편집 단계에서 응답으로 우회'; locations = @('본문') })
+                Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -KnownIssueTargets ([ordered]@{ 'KNOWN-A' = 'A' }) -ThrowOnError
+            } $revisionStep
+        }
+    }
+
+    Test-Case 'workflow-v2 issueKey는 중복과 dangling 및 A/B 대상 충돌을 저장 전에 차단한다' {
+        $reviewStep = [ordered]@{
+            stepKey = 'r01-codex-document-review'; provider = 'codex'; performedBy = 'codex'
+            targetDocumentId = $null; sourceDocumentIds = @('A', 'B'); stage = 'document-review'; round = 1
+        }
+        $revisionStep = [ordered]@{
+            stepKey = 'r01-codex-document-a-revision'; provider = 'codex'; performedBy = 'codex'
+            targetDocumentId = 'A'; sourceDocumentIds = @('A', 'B'); stage = 'document-revision'; round = 1
+        }
+        $knownTargets = [ordered]@{ 'KNOWN-A' = 'A' }
+
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+            & $module {
+                param($step)
+                $result = New-DuoForgeFakeStageResult -Step $step
+                $result.issues = @(
+                    [ordered]@{ issueKey = 'DUPLICATE-R01'; targetDocumentId = 'A'; category = 'key'; severity = 'minor'; claim = 'A 쟁점'; evidence = @(); proposal = 'A'; requiresUser = $false; blockingProposal = $false },
+                    [ordered]@{ issueKey = 'DUPLICATE-R01'; targetDocumentId = 'B'; category = 'key'; severity = 'minor'; claim = 'B 쟁점'; evidence = @(); proposal = 'B'; requiresUser = $false; blockingProposal = $false }
+                )
+                Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedSourceDocumentIds $step.sourceDocumentIds -KnownIssueTargets ([ordered]@{}) -ThrowOnError
+            } $reviewStep
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+            & $module {
+                param($step, $known)
+                $result = New-DuoForgeFakeStageResult -Step $step
+                $result.issueResponses = @([ordered]@{ issueKey = 'MISSING'; disposition = 'REJECTED'; rationale = '없는 쟁점'; locations = @() })
+                Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -KnownIssueTargets $known -ThrowOnError
+            } $revisionStep $knownTargets
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+            & $module {
+                param($step, $known)
+                $result = New-DuoForgeFakeStageResult -Step $step
+                $result.adoptions = @([ordered]@{
+                    issueKey = 'KNOWN-A'; sourceDocumentId = 'B'; proposedByProvider = 'claude'; targetDocumentId = 'B'
+                    disposition = 'ACCEPTED'; rationale = '잘못 연결'; locations = @('본문')
+                })
+                Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -KnownIssueTargets $known -ThrowOnError
+            } $revisionStep $knownTargets
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+            & $module {
+                param($step, $known)
+                $result = New-DuoForgeFakeStageResult -Step $step
+                $result.openQuestions = @([ordered]@{
+                    issueKey = 'MISSING'; title = '없는 질문'; question = '없는 쟁점입니까?'; options = @('예', '아니요'); recommendedOption = '아니요'
+                    reasonNow = '검증'; plainExplanation = '검증'; codexOpinion = '없음'; claudeOpinion = '없음'; impactIfDeferred = '없음'; estimatedCost = '없음'
+                    reversibility = 'easy'; confidence = 'high'; safeDefault = '아니요'; experimentPossible = $false
+                })
+                Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -KnownIssueTargets $known -ThrowOnError
+            } $revisionStep $knownTargets
+        }
+
+        Assert-ThrowsCode -ExpectedCode 'DF-ISSUE-REFERENCE-INTEGRITY' -Body {
+            & $module {
+                $records = @(
+                    [ordered]@{ stepKey = 'review-a'; provider = 'codex'; performedBy = 'codex'; stage = 'document-review'; round = 1; targetDocumentId = $null; sourceDocumentIds = @('A', 'B'); result = [ordered]@{ issues = @([ordered]@{ issueKey = 'SAME'; targetDocumentId = 'A'; category = 'key'; severity = 'minor'; claim = 'A'; evidence = @(); proposal = 'A'; requiresUser = $false; blockingProposal = $false }); issueResponses = @(); adoptions = @(); openQuestions = @() } },
+                    [ordered]@{ stepKey = 'review-b'; provider = 'claude'; performedBy = 'claude'; stage = 'document-review'; round = 1; targetDocumentId = $null; sourceDocumentIds = @('A', 'B'); result = [ordered]@{ issues = @([ordered]@{ issueKey = 'SAME'; targetDocumentId = 'B'; category = 'key'; severity = 'minor'; claim = 'B'; evidence = @(); proposal = 'B'; requiresUser = $false; blockingProposal = $false }); issueResponses = @(); adoptions = @(); openQuestions = @() } }
+                )
+                Merge-DuoForgeStageIssues -StageResults $records -WorkflowVersion workflow-v2
+            }
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-ISSUE-REFERENCE-INTEGRITY' -Body {
+            & $module {
+                $record = [ordered]@{
+                    stepKey = 'dangling'; provider = 'claude'; performedBy = 'claude'; stage = 'review-response'; round = 1; targetDocumentId = $null; sourceDocumentIds = @('A', 'B')
+                    result = [ordered]@{ issues = @(); issueResponses = @([ordered]@{ issueKey = 'MISSING'; disposition = 'REJECTED'; rationale = '없음'; locations = @() }); adoptions = @(); openQuestions = @() }
+                }
+                Merge-DuoForgeStageIssues -StageResults @($record) -WorkflowVersion workflow-v2
+            }
+        }
+    }
+
     Test-Case '문서별 최종 검증 거부는 대상 계보의 Critical 쟁점으로 실패 폐쇄한다' {
         $merged = & $module {
             $step = [ordered]@{
@@ -1352,6 +1908,128 @@ try {
         Assert-Equal $merged.issues[0].targetDocumentId 'A'
         Assert-True ($null -eq $merged.issues[0].PSObject.Properties['target'])
         Assert-False ([bool](Test-DuoForgeCompletionAllowed -Issues @($merged.issues)).allowed)
+    }
+
+    Test-Case '검토자 평가는 실제 편집 판단과 분리되고 채택 전에는 쟁점을 해결하지 않는다' {
+        $reviewOnly = & $module {
+            $issue = [ordered]@{
+                issueKey = 'CODEX-R01-DOCUMENT-REVIEW-A-001'; targetDocumentId = 'A'; category = 'clarity'; severity = 'minor'
+                claim = '문서 A의 용어를 명확히 해야 합니다.'; evidence = @(); proposal = '용어 정의를 추가하세요.'
+                requiresUser = $false; blockingProposal = $false
+            }
+            $records = @(
+                [ordered]@{
+                    stepKey = 'r01-codex-document-review'; provider = 'codex'; performedBy = 'codex'; targetDocumentId = $null; sourceDocumentIds = @('A', 'B')
+                    stage = 'document-review'; round = 1
+                    result = [ordered]@{ issues = @($issue); issueResponses = @(); adoptions = @(); openQuestions = @() }
+                },
+                [ordered]@{
+                    stepKey = 'r01-claude-review-response'; provider = 'claude'; performedBy = 'claude'; targetDocumentId = $null; sourceDocumentIds = @('A', 'B')
+                    stage = 'review-response'; round = 1
+                    result = [ordered]@{
+                        issues = @();
+                        issueResponses = @([ordered]@{ issueKey = $issue.issueKey; disposition = 'ACCEPTED'; rationale = '제안이 타당합니다.'; locations = @('용어 섹션') })
+                        adoptions = @(); openQuestions = @()
+                    }
+                }
+            )
+            Merge-DuoForgeStageIssues -StageResults $records -WorkflowVersion workflow-v2
+        }
+        Assert-Equal @($reviewOnly.issues).Count 1
+        Assert-Equal @($reviewOnly.issues[0].reviewerVerdicts).Count 1
+        Assert-Equal $reviewOnly.issues[0].reviewerVerdicts[0].verdict 'AGREES'
+        Assert-Equal $reviewOnly.issues[0].reviewerVerdicts[0].reviewer 'claude'
+        Assert-Equal $reviewOnly.issues[0].reviewerVerdicts[0].targetDocumentId 'A'
+        Assert-Equal @($reviewOnly.issues[0].editorialDecisions).Count 0
+        Assert-Equal @($reviewOnly.issues[0].adoptions).Count 0
+        Assert-Equal $reviewOnly.issues[0].resolutionStatus 'OPEN'
+
+        $afterRevision = & $module {
+            param($reviewedIssue)
+            $issueKey = [string]$reviewedIssue.externalKeys[0]
+            $records = @(
+                [ordered]@{
+                    stepKey = 'r01-codex-document-review'; provider = 'codex'; performedBy = 'codex'; targetDocumentId = $null; sourceDocumentIds = @('A', 'B')
+                    stage = 'document-review'; round = 1
+                    result = [ordered]@{
+                        issues = @([ordered]@{
+                            issueKey = $issueKey; targetDocumentId = 'A'; category = 'clarity'; severity = 'minor'
+                            claim = '문서 A의 용어를 명확히 해야 합니다.'; evidence = @(); proposal = '용어 정의를 추가하세요.'
+                            requiresUser = $false; blockingProposal = $false
+                        }); issueResponses = @(); adoptions = @(); openQuestions = @()
+                    }
+                },
+                [ordered]@{
+                    stepKey = 'r01-claude-review-response'; provider = 'claude'; performedBy = 'claude'; targetDocumentId = $null; sourceDocumentIds = @('A', 'B')
+                    stage = 'review-response'; round = 1
+                    result = [ordered]@{
+                        issues = @(); issueResponses = @([ordered]@{ issueKey = $issueKey; disposition = 'ACCEPTED'; rationale = '제안이 타당합니다.'; locations = @('용어 섹션') }); adoptions = @(); openQuestions = @()
+                    }
+                },
+                [ordered]@{
+                    stepKey = 'r01-codex-document-a-revision'; provider = 'codex'; performedBy = 'codex'; targetDocumentId = 'A'; sourceDocumentIds = @('A', 'B')
+                    stage = 'document-revision'; round = 1
+                    result = [ordered]@{
+                        issues = @(); issueResponses = @();
+                        adoptions = @([ordered]@{
+                            issueKey = $issueKey; sourceDocumentId = 'B'; proposedByProvider = 'claude'; targetDocumentId = 'A'
+                            disposition = 'ACCEPTED'; rationale = '용어 정의를 실제 반영했습니다.'; locations = @('용어 섹션')
+                        }); openQuestions = @()
+                    }
+                }
+            )
+            Merge-DuoForgeStageIssues -StageResults $records -WorkflowVersion workflow-v2
+        } $reviewOnly.issues[0]
+        Assert-Equal @($afterRevision.issues[0].reviewerVerdicts).Count 1
+        Assert-Equal @($afterRevision.issues[0].editorialDecisions).Count 1
+        Assert-Equal @($afterRevision.issues[0].adoptions).Count 1
+        Assert-Equal $afterRevision.issues[0].editorialDecisions[0].performedBy 'codex'
+        Assert-Equal $afterRevision.issues[0].editorialDecisions[0].targetDocumentId 'A'
+        Assert-Equal $afterRevision.issues[0].resolutionStatus 'RESOLVED'
+        Assert-True (& $module { param($issues) Assert-DuoForgeIssueLedgerV2Internal -Issues @($issues) } $afterRevision.issues)
+        Assert-ThrowsCode -ExpectedCode 'DF-ISSUE-LEDGER-CONTRACT' -Body {
+            & $module {
+                param($source)
+                $issue = ConvertTo-DuoForgeHashtable -InputObject (($source | ConvertTo-Json -Depth 50) | ConvertFrom-Json -Depth 50)
+                $issue.ownerDecisions = @()
+                Assert-DuoForgeIssueLedgerV2Internal -Issues @($issue)
+            } $afterRevision.issues[0]
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-ISSUE-LEDGER-CONTRACT' -Body {
+            & $module {
+                param($source)
+                $issue = ConvertTo-DuoForgeHashtable -InputObject (($source | ConvertTo-Json -Depth 50) | ConvertFrom-Json -Depth 50)
+                $issue.editorialDecisions = @()
+                Assert-DuoForgeIssueLedgerV2Internal -Issues @($issue)
+            } $afterRevision.issues[0]
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-ISSUE-LEDGER-CONTRACT' -Body {
+            & $module {
+                param($source)
+                $issue = ConvertTo-DuoForgeHashtable -InputObject (($source | ConvertTo-Json -Depth 50) | ConvertFrom-Json -Depth 50)
+                $issue.resolutionStatus = 'NOT_A_STATUS'
+                Assert-DuoForgeIssueLedgerV2Internal -Issues @($issue)
+            } $afterRevision.issues[0]
+        }
+        foreach ($mutation in @('string-location', 'missing-location', 'nested-round', 'root-round-string', 'numeric-string-field')) {
+            Assert-ThrowsCode -ExpectedCode 'DF-ISSUE-LEDGER-CONTRACT' -Body {
+                & $module {
+                    param($source, $mutation)
+                    $issue = ConvertTo-DuoForgeHashtable -InputObject (($source | ConvertTo-Json -Depth 50) | ConvertFrom-Json -Depth 50)
+                    switch ($mutation) {
+                        'string-location' { $issue.editorialDecisions[0].locations = '본문' }
+                        'missing-location' { $issue.adoptions[0].Remove('locations') }
+                        'nested-round' { $issue.reviewerVerdicts[0].round = 99 }
+                        'root-round-string' { $issue.round = '1' }
+                        'numeric-string-field' {
+                            $issue.category = 7
+                            $issue.externalKeys = @(10)
+                        }
+                    }
+                    Assert-DuoForgeIssueLedgerV2Internal -Issues @($issue)
+                } $afterRevision.issues[0] $mutation
+            }
+        }
     }
 
     Test-Case '비밀 제거 후 빈 구조화 배열은 두 번째 정규화에서도 배열로 유지된다' {
@@ -2066,8 +2744,11 @@ try {
                 param($step)
                 $stageResult = New-DuoForgeFakeStageResult -Step $step
                 if ([string]$step.stage -eq 'synthesis') {
-                    $stageResult.issueResponses = @([ordered]@{
+                    $stageResult.adoptions = @([ordered]@{
                         issueKey = $issueId
+                        sourceDocumentId = 'brief'
+                        proposedByProvider = [string]$step.provider
+                        targetDocumentId = 'merged'
                         disposition = 'ACCEPTED'
                         rationale = '추가 근거에서 30일 보존 기간을 확인해 문서에 반영했습니다.'
                         locations = @('보존 정책 섹션')
@@ -2084,6 +2765,105 @@ try {
         Assert-Equal $finalIssue.resolutionStatus 'RESOLVED'
         Assert-Equal @($finalIssue.history | Where-Object { $_.event -eq 'USER_EVIDENCE_ADDED' }).Count 1
         Assert-Equal @($finalIssue.evidence | Where-Object { $_.source -eq 'E000001.md' -and $_.addedBy -eq 'user' }).Count 1
+    }
+
+    Test-Case '모드 2와 3의 추가 근거는 A/B 역할에 연결되고 실패 뒤 원자적으로 재시도된다' {
+        foreach ($mode in @('document-merge', 'dual-document')) {
+            $caseRoot = Join-Path $tempRoot ("evidence-atomic-{0}" -f $mode)
+            $documentA = New-MarkdownFile -Path (Join-Path $caseRoot 'A\main.md') -Text '# 문서 A'
+            $documentB = New-MarkdownFile -Path (Join-Path $caseRoot 'B\main.md') -Text '# 문서 B'
+            $evidenceFile = New-MarkdownFile -Path (Join-Path $caseRoot 'evidence\proof.md') -Text '# 추가 근거'
+            $workspace = Join-Path $caseRoot 'results'
+            $request = New-TestStartRequest -Mode $mode -DocumentA $documentA -DocumentB $documentB -Workspace $workspace -DocumentType prd
+            $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+            Assert-True ([bool]$validation.valid) ($validation.errors | ConvertTo-Json -Depth 20 -Compress)
+            $run = New-DuoForgeRun -ValidationResult $validation
+
+            $waiting = & $module {
+                param($directory)
+                $callback = {
+                    param($step)
+                    $result = New-DuoForgeFakeStageResult -Step $step
+                    $isWaitingStage = [string]$step.stage -eq 'final-validation' -or `
+                        ([string]$step.stage -eq 'document-validation' -and [string]$step.targetDocumentId -eq 'A')
+                    if ($isWaitingStage) {
+                        $target = if ([string]$step.stage -eq 'final-validation') { 'merged' } else { 'A' }
+                        $key = if ([string]$step.stage -eq 'final-validation') { 'MERGED-FINAL-VALIDATION-EVIDENCE-001' } else { 'A-DOCUMENT-VALIDATION-EVIDENCE-001' }
+                        $result.finalApproved = $false
+                        $result.issues = @([ordered]@{
+                            issueKey = $key; targetDocumentId = $target; category = 'evidence'; severity = 'major'
+                            claim = '추가 근거가 필요합니다.'; evidence = @(); proposal = '근거를 추가하세요.'
+                            requiresUser = $false; blockingProposal = $true
+                        })
+                        $result.issueResponses = @([ordered]@{
+                            issueKey = $key; disposition = 'NEEDS_EVIDENCE'; rationale = '현재 근거가 부족합니다.'; locations = @()
+                        })
+                    }
+                    return $result
+                }
+                Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+            } $run.runDirectory
+            Assert-Equal $waiting.status 'AWAITING_EVIDENCE' ($waiting | ConvertTo-Json -Depth 20 -Compress)
+
+            $ledgerPath = Join-Path $run.runDirectory 'issues.json'
+            $issue = @((Get-Content -Raw -LiteralPath $ledgerPath | ConvertFrom-Json -Depth 50).issues | Where-Object { $_.resolutionStatus -eq 'AWAITING_EVIDENCE' })[0]
+            Assert-True ($null -ne $issue) "$mode 추가 근거 대기 쟁점을 찾지 못했습니다."
+            $trackedRelativePaths = @('state.json', 'manifest.json', 'issues.json', 'inputs\inventory.json', 'decisions\pending.json', 'steps.json', 'events.jsonl')
+            $beforeHashes = [ordered]@{}
+            foreach ($relativePath in $trackedRelativePaths) {
+                $path = Join-Path $run.runDirectory $relativePath
+                $beforeHashes[$relativePath] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            }
+            $historyDirectory = Join-Path $run.runDirectory 'history\decisions'
+            $historyBefore = if (Test-Path -LiteralPath $historyDirectory) { @(Get-ChildItem -LiteralPath $historyDirectory -File).Count } else { 0 }
+            $statePath = Join-Path $run.runDirectory 'state.json'
+            $stateLock = [System.IO.FileStream]::new($statePath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::Read)
+            try {
+                $failed = $false
+                try {
+                    Add-DuoForgeIssueEvidence -RunId $run.runId -IssueId ([string]$issue.issueId) -File $evidenceFile -ResultsRoot $workspace
+                }
+                catch { $failed = $true }
+                Assert-True $failed "$mode 원자성 실패 주입이 예외를 발생시키지 않았습니다."
+            }
+            finally {
+                $stateLock.Dispose()
+            }
+
+            foreach ($relativePath in $trackedRelativePaths) {
+                $path = Join-Path $run.runDirectory $relativePath
+                Assert-Equal (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash $beforeHashes[$relativePath] "$mode 실패 뒤 $relativePath 바이트가 달라졌습니다."
+            }
+            Assert-Equal @(Get-ChildItem -LiteralPath (Join-Path $run.runDirectory 'inputs\snapshots') -File -Filter 'E*.md').Count 0 "$mode 실패 뒤 고아 근거 스냅샷이 남았습니다."
+            Assert-False (Test-Path -LiteralPath (Join-Path $run.runDirectory 'decisions\user-evidence.jsonl')) "$mode 실패 뒤 근거 원장 조각이 남았습니다."
+            $historyAfter = if (Test-Path -LiteralPath $historyDirectory) { @(Get-ChildItem -LiteralPath $historyDirectory -File).Count } else { 0 }
+            Assert-Equal $historyAfter $historyBefore "$mode 실패 뒤 무효화 이력이 남았습니다."
+
+            $preparedDirectory = Join-Path $run.runDirectory 'control\transactions\public-evidence-recovery-test'
+            [System.IO.Directory]::CreateDirectory($preparedDirectory) | Out-Null
+            $manifestPath = Join-Path $run.runDirectory 'manifest.json'
+            $inventoryPath = Join-Path $run.runDirectory 'inputs\inventory.json'
+            [System.IO.File]::Copy($manifestPath, (Join-Path $preparedDirectory 'file-0000.bin'), $false)
+            [System.IO.File]::Copy($inventoryPath, (Join-Path $preparedDirectory 'file-0001.bin'), $false)
+            $corruptInventory = Get-Content -LiteralPath $inventoryPath -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+            $corruptInventory.roles.documents.A.primary = 'S999999.md'
+            & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $inventoryPath $corruptInventory
+            $preparedMetadata = [ordered]@{
+                schemaVersion = 1; status = 'PREPARED'; createdAt = '2026-07-01T00:00:00Z'
+                files = @(
+                    [ordered]@{ relativePath = 'manifest.json'; existed = $true; backupName = 'file-0000.bin' },
+                    [ordered]@{ relativePath = 'inputs\inventory.json'; existed = $true; backupName = 'file-0001.bin' }
+                )
+                directories = @()
+            }
+            & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } (Join-Path $preparedDirectory 'transaction.json') $preparedMetadata
+            $added = Add-DuoForgeIssueEvidence -RunId $run.runId -IssueId ([string]$issue.issueId) -File $evidenceFile -ResultsRoot $workspace
+            Assert-Equal $added.snapshotName 'E000001.md'
+            Assert-False (Test-Path -LiteralPath $preparedDirectory) "$mode 공개 근거 경로가 PREPARED 트랜잭션을 정리하지 않았습니다."
+            $inventory = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'inputs\inventory.json') | ConvertFrom-Json -Depth 50
+            Assert-True ('E000001.md' -in @($inventory.roles.documents.A.context)) "$mode 근거가 문서 A 역할에 없습니다."
+            Assert-True ('E000001.md' -in @($inventory.roles.documents.B.context)) "$mode 근거가 문서 B 역할에 없습니다."
+        }
     }
 
     Test-Case '인증 실패 행렬은 메뉴와 CLI에서 같은 실패 폐쇄 게이트를 사용한다' {

@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "stepKey": "r01-codex-cross-review",
+  "provider": "codex",
+  "stage": "cross-review",
+  "round": 1,
+  "result": {
+    "schemaVersion": 1,
+    "stage": "cross-review",
+    "provider": "codex",
+    "summary": "정제된 레거시 확정 단계",
+    "document": null,
+    "issues": [],
+    "issueResponses": [],
+    "adoptions": [],
+    "openQuestions": [],
+    "finalApproved": null
+  }
+}

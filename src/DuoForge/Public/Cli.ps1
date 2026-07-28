@@ -200,6 +200,12 @@ function Invoke-DuoForgeCli {
         }
         'start' {
             if ($parsed.positionals.Count -lt 2) { throw (New-DuoForgeException -Code 'DF-CLI-MODE' -Message 'start에는 모드가 필요합니다.') }
+            $null = Assert-DuoForgeCliOptionsInternal -Parsed $parsed -AllowedNames @(
+                'brief', 'document-a', 'document-b', 'document-a-context', 'document-b-context',
+                'codex', 'claude', 'codex-context', 'claude-context', 'codex-project', 'claude-project', 'requirements',
+                'codex-model', 'codex-effort', 'claude-model', 'claude-effort', 'type', 'max-rounds', 'workspace',
+                'first-synthesizer', 'pause-after-round', 'allow-partial', 'name', 'plan-only'
+            )
             $mode = [string]$parsed.positionals[1]
             $rounds = ConvertTo-DuoForgeIntOption -Value (Get-DuoForgeCliOption -Parsed $parsed -Name 'max-rounds' -Default 2) -Name 'max-rounds' -Default 2
             $providerSelections = [ordered]@{
@@ -222,8 +228,12 @@ function Invoke-DuoForgeCli {
                 -Brief ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'brief' -Default '')) `
                 -DocumentA ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'document-a' -Default '')) `
                 -DocumentB ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'document-b' -Default '')) `
+                -DocumentAContext ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'document-a-context' -Default '')) `
+                -DocumentBContext ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'document-b-context' -Default '')) `
                 -CodexDocument ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'codex' -Default '')) `
                 -ClaudeDocument ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'claude' -Default '')) `
+                -CodexContext ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'codex-context' -Default '')) `
+                -ClaudeContext ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'claude-context' -Default '')) `
                 -CodexProject ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'codex-project' -Default '')) `
                 -ClaudeProject ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'claude-project' -Default '')) `
                 -Requirements ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'requirements' -Default '')) `

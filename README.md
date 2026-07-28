@@ -67,11 +67,15 @@ DuoForge는 Codex와 Claude가 불변 입력 스냅샷을 검토하고 토론하
   --type "prd" --max-rounds 2 --plan-only
 ```
 
-모드 2·3은 문서 A/B의 폴더가 같거나 중첩되면 보조 Markdown 문맥이 섞이지 않도록 시작 전에 차단한다. 기존 `--codex`와 `--claude` 문서 옵션은 A/B로 변환하고 사용 중단 예정 경고를 남기지만, 신규 실행 기록에는 `documentA/documentB`만 저장한다.
+모드 2·3은 문서 A/B의 폴더가 같거나 중첩되면 보조 Markdown 문맥이 섞이지 않도록 시작 전에 차단한다. 정규 보조 문맥 옵션은 `--document-a-context`와 `--document-b-context`다. 기존 `--codex`/`--claude`, `--codex-context`/`--claude-context`는 각각 A/B로 변환하고 사용 중단 예정 경고를 남기지만, 신규 실행 기록에는 정규 `documentA/documentB`, `documentAContext/documentBContext` 의미만 사용한다. 정규 옵션과 별칭이 서로 다른 경로를 지정하거나 알 수 없는 CLI 옵션이 들어오면 시작 전에 실패 폐쇄한다.
 
 `--plan-only`는 모델을 호출하거나 확정 실행을 만들지 않고 선택한 모델·추론 정도, 검증·전송 범위와 최악 호출 수만 보여준다. 네 선택 옵션은 생략할 수 없으며, 인수 없이 여는 대화형 메뉴에서는 각 항목을 번호로 반드시 선택한다.
 
 신규 실행은 `workflow-v2`와 문서 계보 A/B, 단계 작업자 `performedBy`를 분리해 기록한다. `workflowVersion`이 없는 기존 실행은 `workflow-v1`로 읽으며 기존 단계 그래프, `owner-response`/`owned-document-revision`, 파일명과 프롬프트 의미를 묵시적으로 바꾸거나 재작성하지 않는다.
+
+신규 저장 세대는 `manifest.json` schema 4와 `state.json`, `inputs/inventory.json`, `issues.json` schema 2를 `duoforge-run-v2` 계약으로 묶는다. manifest의 입력은 문서 본문이나 원본 경로가 아니라 스냅샷 이름과 SHA-256만 기록하며, 역할은 inventory의 `roles.documents.A/B`와 일치해야 한다. 저장 파일의 버전·역할이나 manifest에서 계산한 단계 그래프의 작업자·대상·출처·의존성이 섞이면 공급자 호출 전에 `DF-RUN-STORAGE-CONTRACT`으로 차단한다. 기존 workflow-v1과 초기 workflow-v2 저장 세대는 해당 세대 그대로 읽고 재작성하지 않는다.
+
+workflow-v2 쟁점은 검토자의 평가 `reviewerVerdicts`, 실제 편집 판단 `editorialDecisions`, 반영 기록 `adoptions`를 분리한다. 검토 동의만으로 쟁점을 해결하지 않으며, 수용 판단은 실제 반영 위치가 있어야 하고 거부 판단도 구체적인 편집 판단과 이유가 있어야 `RESOLVED`가 될 수 있다. 단계별 대상·출처 허용 행렬과 전역 고유 `issueKey` 계약은 A/B 계보 충돌, 중복 정의와 dangling 참조를 저장 전에 차단한다.
 
 완료 산출물은 실행 폴더의 `final` 아래에 생성된다.
 
@@ -161,6 +165,8 @@ Windows Terminal 또는 VS Code 통합 터미널에서 VT 지원, 입출력 비�
 기존 공급자별 라이브 스모크와 2라운드 전체 단계 E2E는 `workflow-v1 shared-document/dual-document`의 역사적 증거이며 신규 모드 완료로 재해석하지 않는다. 2026-07-28에는 별도 `workflow-v2` 실제 공급자 E2E를 실행해 모드 1 `13/13`, 모드 2 `13/13`, 모드 3 `14/14` 단계와 입력 해시 불변·A/B 계보·최종 파일·이벤트/로그 비노출을 확인했다. 세 모드 모두 `AWAITING_USER` 체크포인트로 강화 검증을 통과했다. 이는 질문 카드와 사용자 게이트가 정상 작동한 E2E 성공 상태이며, 테스트 픽스처의 결정을 임의로 답해 `COMPLETED`로 바꾸는 추가 공급자 호출은 완료 조건이 아니다. 모드 3 최초 실행에서 발견한 Minor 근거 대기의 잘못된 차단 상태는 중앙 차단 규칙 재계산으로 수정한 뒤 신규 실제 공급자 실행으로 재검증했다. 실행 ID와 판정 근거는 [docs/STAGE0_SPIKE.md](docs/STAGE0_SPIKE.md)에 기록한다.
 
 ## 테스트
+
+2026-07-28 기준 오프라인 회귀는 87개다. 여기에는 추가 근거 저장의 원자적 롤백과 중단 트랜잭션 복구, 쟁점 계보·키 계약, 공개 요청/CLI 우회 차단, 저장 세대 혼합 차단과 직렬화된 workflow-v1 전체 재개 fixture가 포함된다.
 
 실제 공급자 E2E의 테스트 전용 Claude 선택은 `tests\workflow-v2-live-settings.json`에서 관리하며 현재 `sonnet/low`로 고정한다. 신규 workflow-v2와 레거시 라이브 E2E 실행기 모두 이 설정과 정확한 `LIVE` 동의를 요구한다. 일반 실행의 모델 선택 화면과 이미 저장된 실행의 선택값은 바꾸지 않으며, `opus/high`가 저장된 기존 E2E 실행은 재호출하지 않는다.
 

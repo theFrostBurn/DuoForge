@@ -103,7 +103,8 @@ function Apply-DuoForgeUserDecisionRecordsInternal {
 
         $history = [System.Collections.Generic.List[object]]::new()
         foreach ($entry in @($issue.history)) { $history.Add($entry) }
-        if ([string]::IsNullOrWhiteSpace($decisionId) -or $decisionId -notin @($history | ForEach-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'decisionId' -Default '') })) {
+        $appliedDecisionIds = @($history | Where-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'event' -Default '') -eq 'USER_DECISION_APPLIED' } | ForEach-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'decisionId' -Default '') })
+        if ([string]::IsNullOrWhiteSpace($decisionId) -or $decisionId -notin $appliedDecisionIds) {
             $history.Add([ordered]@{
                 at = [string](Get-DuoForgeObjectValue -Object $decision -Name 'recordedAt' -Default (Get-DuoForgeUtcNow))
                 event = 'USER_DECISION_APPLIED'
@@ -131,6 +132,7 @@ function Merge-DuoForgeStageIssues {
     $issues = [System.Collections.Generic.List[object]]::new()
     $byFingerprint = @{}
     $byExternalKey = @{}
+    $definedExternalKeys = @{}
     $questions = [System.Collections.Generic.List[object]]::new()
 
     foreach ($preserved in @($PreservedIssues | Where-Object { $null -ne $_ })) {
@@ -158,6 +160,15 @@ function Merge-DuoForgeStageIssues {
             $claim = [string]$modelIssue.claim
             $fingerprint = Get-DuoForgeIssueFingerprint -Target $target -Category $category -Claim $claim
             $externalKey = [string]$modelIssue.issueKey
+            if ($WorkflowVersion -eq 'workflow-v2') {
+                if ($definedExternalKeys.ContainsKey($externalKey)) {
+                    throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "단계 결과에 중복 issueKey 정의가 있습니다: $externalKey")
+                }
+                $definedExternalKeys[$externalKey] = $fingerprint
+                if ($byExternalKey.ContainsKey($externalKey) -and [string]$byExternalKey[$externalKey].fingerprint -cne $fingerprint) {
+                    throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "issueKey가 서로 다른 A/B 쟁점에 연결됩니다: $externalKey")
+                }
+            }
             if ($byFingerprint.ContainsKey($fingerprint)) {
                 $issue = $byFingerprint[$fingerprint]
                 if ($externalKey -notin @($issue.externalKeys)) { $issue.externalKeys = @($issue.externalKeys) + @($externalKey) }
@@ -237,7 +248,37 @@ function Merge-DuoForgeStageIssues {
         foreach ($response in @($stageRecord.result.issueResponses)) {
             $key = [string]$response.issueKey
             $issue = if ($byExternalKey.ContainsKey($key)) { $byExternalKey[$key] } else { $null }
-            if ($null -eq $issue) { continue }
+            if ($null -eq $issue) {
+                if ($WorkflowVersion -eq 'workflow-v2') {
+                    throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "issueResponses가 정의되지 않은 issueKey를 참조합니다: $key")
+                }
+                continue
+            }
+            if ($WorkflowVersion -eq 'workflow-v2' -and [string]$stageRecord.stage -in @('author-response', 'review-response', 'final-validation', 'document-validation')) {
+                $verdict = switch ([string]$response.disposition) {
+                    'ACCEPTED' { 'AGREES' }
+                    'PARTIALLY_ACCEPTED' { 'PARTIALLY_AGREES' }
+                    'REJECTED' { 'DISAGREES' }
+                    default { 'UNVERIFIABLE' }
+                }
+                $verdictRecord = [ordered]@{
+                    at = Get-DuoForgeUtcNow
+                    reviewer = [string](Get-DuoForgeObjectValue -Object $stageRecord -Name 'performedBy' -Default ([string]$stageRecord.provider))
+                    sourceStep = [string]$stageRecord.stepKey
+                    round = [int]$stageRecord.round
+                    targetDocumentId = [string](Get-DuoForgeObjectValue -Object $issue -Name 'targetDocumentId' -Default '')
+                    verdict = $verdict
+                    rationale = [string]$response.rationale
+                }
+                $issue.reviewerVerdicts = @($issue.reviewerVerdicts) + @($verdictRecord)
+                switch ([string]$response.disposition) {
+                    'NEEDS_EVIDENCE' { $issue.resolutionStatus = 'AWAITING_EVIDENCE' }
+                    'ASK_USER' { $issue.resolutionStatus = 'AWAITING_USER' }
+                    'DEFERRED' { $issue.resolutionStatus = 'AWAITING_USER' }
+                }
+                continue
+            }
+
             $decision = [ordered]@{
                 at = Get-DuoForgeUtcNow
                 actor = [string]$stageRecord.provider
@@ -247,6 +288,9 @@ function Merge-DuoForgeStageIssues {
                 locations = @($response.locations)
             }
             if ($WorkflowVersion -eq 'workflow-v2') {
+                $decision.performedBy = [string](Get-DuoForgeObjectValue -Object $stageRecord -Name 'performedBy' -Default ([string]$stageRecord.provider))
+                $decision.targetDocumentId = [string](Get-DuoForgeObjectValue -Object $issue -Name 'targetDocumentId' -Default '')
+                $decision.round = [int]$stageRecord.round
                 $issue.editorialDecisions = @($issue.editorialDecisions) + @($decision)
             }
             else {
@@ -267,10 +311,16 @@ function Merge-DuoForgeStageIssues {
             }
         }
 
+        if ($WorkflowVersion -eq 'workflow-v2' -and @($stageRecord.result.adoptions).Count -gt 0 -and [string]$stageRecord.stage -notin @('synthesis', 'document-revision')) {
+            throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "비편집 단계에는 adoptions를 기록할 수 없습니다: $($stageRecord.stage)")
+        }
         foreach ($adoption in @($stageRecord.result.adoptions)) {
             $key = [string]$adoption.issueKey
             if ($byExternalKey.ContainsKey($key)) {
                 $issue = $byExternalKey[$key]
+                if ($WorkflowVersion -eq 'workflow-v2' -and [string](Get-DuoForgeObjectValue -Object $adoption -Name 'targetDocumentId' -Default '') -cne [string](Get-DuoForgeObjectValue -Object $issue -Name 'targetDocumentId' -Default '')) {
+                    throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "adoption 대상이 참조 쟁점의 대상과 다릅니다: $key")
+                }
                 $adoptionRecord = [ordered]@{
                     at = Get-DuoForgeUtcNow
                     actor = [string]$stageRecord.provider
@@ -284,12 +334,25 @@ function Merge-DuoForgeStageIssues {
                     $adoptionRecord.sourceDocumentId = [string](Get-DuoForgeObjectValue -Object $adoption -Name 'sourceDocumentId' -Default '')
                     $adoptionRecord.proposedByProvider = [string](Get-DuoForgeObjectValue -Object $adoption -Name 'proposedByProvider' -Default ([string]$stageRecord.provider))
                     $adoptionRecord.targetDocumentId = [string](Get-DuoForgeObjectValue -Object $adoption -Name 'targetDocumentId' -Default '')
+                    $adoptionRecord.performedBy = [string](Get-DuoForgeObjectValue -Object $stageRecord -Name 'performedBy' -Default ([string]$stageRecord.provider))
                 }
                 else {
                     $adoptionRecord.sourceProvider = [string]$adoption.sourceProvider
                     $adoptionRecord.target = [string]$adoption.target
                 }
                 $issue.adoptions = @($issue.adoptions) + @($adoptionRecord)
+                if ($WorkflowVersion -eq 'workflow-v2' -and [string]$stageRecord.stage -in @('document-revision', 'synthesis')) {
+                    $issue.editorialDecisions = @($issue.editorialDecisions) + @([ordered]@{
+                        at = [string]$adoptionRecord.at
+                        sourceStep = [string]$adoptionRecord.sourceStep
+                        round = [int]$adoptionRecord.round
+                        targetDocumentId = [string]$adoptionRecord.targetDocumentId
+                        performedBy = [string]$adoptionRecord.performedBy
+                        disposition = [string]$adoptionRecord.disposition
+                        rationale = [string]$adoptionRecord.rationale
+                        locations = @($adoptionRecord.locations)
+                    })
+                }
                 if ([string]$issue.severity -eq 'critical') {
                     $issue.resolutionStatus = 'AWAITING_USER'
                 }
@@ -301,6 +364,9 @@ function Merge-DuoForgeStageIssues {
                         'DEFERRED' { $issue.resolutionStatus = 'AWAITING_USER' }
                     }
                 }
+            }
+            elseif ($WorkflowVersion -eq 'workflow-v2') {
+                throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "adoptions가 정의되지 않은 issueKey를 참조합니다: $key")
             }
         }
 
@@ -332,6 +398,9 @@ function Merge-DuoForgeStageIssues {
                 $issue.requiresUser = $true
                 $issue.blocking = $true
                 $issue.resolutionStatus = 'AWAITING_USER'
+            }
+            elseif ($WorkflowVersion -eq 'workflow-v2') {
+                throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "openQuestions가 정의되지 않은 issueKey를 참조합니다: $key")
             }
         }
     }
@@ -471,10 +540,16 @@ function New-DuoForgeDecisionsMarkdown {
         $lines.Add("- 상태: $($issue.resolutionStatus)")
         $decisionItems = if ($issue.Contains('editorialDecisions')) { @($issue.editorialDecisions) } else { @($issue.ownerDecisions) }
         foreach ($decision in $decisionItems) {
-            $decisionActor = [string](Get-DuoForgeObjectValue -Object $decision -Name 'actor' -Default 'unknown')
+            $decisionActor = [string](Get-DuoForgeObjectValue -Object $decision -Name 'performedBy' -Default (Get-DuoForgeObjectValue -Object $decision -Name 'actor' -Default 'unknown'))
             $decisionDisposition = [string](Get-DuoForgeObjectValue -Object $decision -Name 'disposition' -Default 'UNKNOWN')
             $decisionRationale = [string](Get-DuoForgeObjectValue -Object $decision -Name 'rationale' -Default '')
-            $lines.Add("- ${decisionActor}: $decisionDisposition — $decisionRationale")
+            $lines.Add("- 편집 판단 / ${decisionActor}: $decisionDisposition — $decisionRationale")
+        }
+        foreach ($verdict in @(Get-DuoForgeObjectValue -Object $issue -Name 'reviewerVerdicts' -Default @())) {
+            $reviewer = [string](Get-DuoForgeObjectValue -Object $verdict -Name 'reviewer' -Default 'unknown')
+            $verdictValue = [string](Get-DuoForgeObjectValue -Object $verdict -Name 'verdict' -Default 'UNVERIFIABLE')
+            $verdictRationale = [string](Get-DuoForgeObjectValue -Object $verdict -Name 'rationale' -Default '')
+            $lines.Add("- 검토자 평가 / ${reviewer}: $verdictValue — $verdictRationale")
         }
         $lines.Add('')
     }
@@ -541,7 +616,16 @@ function Render-DuoForgeFinalArtifacts {
     $decisionIssueIds = @($userDecisionRecords | Where-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'action' -Default '') -eq 'ANSWER' } | ForEach-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'issueId' -Default '') })
     $preservedIssues = @($existingLedger.issues | Where-Object { [string]$_.issueId -in $evidenceIssueIds -or [string]$_.issueId -in $decisionIssueIds })
     $merged = Merge-DuoForgeStageIssues -StageResults $stageResults -UserEvidenceRecords $userEvidence -UserDecisionRecords $userDecisionRecords -PreservedIssues $preservedIssues -WorkflowVersion $workflowVersion
-    Write-DuoForgeJsonAtomic -Path (Join-Path $RunDirectory 'issues.json') -Value ([ordered]@{ schemaVersion = 1; issues = @($merged.issues) })
+    $ledger = if ($workflowVersion -eq 'workflow-v2' -and [int]$manifest.schemaVersion -ge 4) {
+        [ordered]@{ schemaVersion = 2; workflowVersion = 'workflow-v2'; issueSchemaVersion = 2; issues = @($merged.issues) }
+    }
+    else {
+        [ordered]@{ schemaVersion = 1; issues = @($merged.issues) }
+    }
+    if ($workflowVersion -eq 'workflow-v2' -and [int]$manifest.schemaVersion -ge 4) {
+        $null = Assert-DuoForgeIssueLedgerV2Internal -Issues @($merged.issues)
+    }
+    Write-DuoForgeJsonAtomic -Path (Join-Path $RunDirectory 'issues.json') -Value $ledger
     Write-DuoForgeJsonAtomic -Path (Join-Path $RunDirectory 'decisions\pending.json') -Value ([ordered]@{ schemaVersion = 1; questions = @($merged.questions) })
 
     $finalDirectory = Join-Path $RunDirectory 'final'

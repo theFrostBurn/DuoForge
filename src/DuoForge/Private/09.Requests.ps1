@@ -34,6 +34,76 @@ function Resolve-DuoForgeDocumentInputAliasesInternal {
     }
 }
 
+function Resolve-DuoForgeContextInputAliasesInternal {
+    [CmdletBinding()]
+    param(
+        [string]$DocumentAContext,
+        [string]$DocumentBContext,
+        [string]$CodexContext,
+        [string]$ClaudeContext
+    )
+
+    $hasDocumentAContext = -not [string]::IsNullOrWhiteSpace($DocumentAContext)
+    $hasDocumentBContext = -not [string]::IsNullOrWhiteSpace($DocumentBContext)
+    $hasLegacyAContext = -not [string]::IsNullOrWhiteSpace($CodexContext)
+    $hasLegacyBContext = -not [string]::IsNullOrWhiteSpace($ClaudeContext)
+    if ($hasDocumentAContext -and $hasLegacyAContext -and -not [string]::Equals($DocumentAContext, $CodexContext, [StringComparison]::OrdinalIgnoreCase)) {
+        throw (New-DuoForgeException -Code 'DF-INPUT-CONTEXT-ALIAS-CONFLICT' -Message '문서 A 컨텍스트의 정규 입력과 레거시 --codex-context 입력이 서로 다릅니다.')
+    }
+    if ($hasDocumentBContext -and $hasLegacyBContext -and -not [string]::Equals($DocumentBContext, $ClaudeContext, [StringComparison]::OrdinalIgnoreCase)) {
+        throw (New-DuoForgeException -Code 'DF-INPUT-CONTEXT-ALIAS-CONFLICT' -Message '문서 B 컨텍스트의 정규 입력과 레거시 --claude-context 입력이 서로 다릅니다.')
+    }
+    $warnings = [System.Collections.Generic.List[object]]::new()
+    if ($hasLegacyAContext -or $hasLegacyBContext) {
+        $warnings.Add([ordered]@{
+            code = 'DF-DEPRECATED-CONTEXT-ALIASES'
+            message = '--codex-context와 --claude-context는 사용 중단 예정입니다. --document-a-context와 --document-b-context를 사용해 주세요.'
+        })
+    }
+    return [ordered]@{
+        documentAContext = if ($hasDocumentAContext) { $DocumentAContext } else { $CodexContext }
+        documentBContext = if ($hasDocumentBContext) { $DocumentBContext } else { $ClaudeContext }
+        warnings = @($warnings)
+    }
+}
+
+function Merge-DuoForgeMarkdownInventoriesInternal {
+    [CmdletBinding()]
+    param([AllowEmptyCollection()][Parameter(Mandatory)][object[]]$Inventories)
+
+    $byPath = [ordered]@{}
+    $roots = [System.Collections.Generic.List[string]]::new()
+    foreach ($inventory in @($Inventories | Where-Object { $null -ne $_ })) {
+        $root = [string](Get-DuoForgeObjectValue -Object $inventory -Name 'root' -Default '')
+        if (-not [string]::IsNullOrWhiteSpace($root) -and $root -notin @($roots)) { $roots.Add($root) }
+        foreach ($item in @(Get-DuoForgeObjectValue -Object $inventory -Name 'files' -Default @())) {
+            $path = [string](Get-DuoForgeObjectValue -Object $item -Name 'path' -Default '')
+            if (-not [string]::IsNullOrWhiteSpace($path) -and -not $byPath.Contains($path)) {
+                $byPath[$path] = ConvertTo-DuoForgeHashtable -InputObject $item
+            }
+        }
+    }
+    $files = @($byPath.Values)
+    $included = @($files | Where-Object { [bool]$_.included })
+    $excluded = @($files | Where-Object { -not [bool]$_.included })
+    [long]$includedBytes = 0
+    [long]$totalBytes = 0
+    foreach ($item in $files) {
+        $totalBytes += [long]$item.bytes
+        if ([bool]$item.included) { $includedBytes += [long]$item.bytes }
+    }
+    return [ordered]@{
+        root = if ($roots.Count -gt 0) { $roots[0] } else { '' }
+        roots = @($roots)
+        generatedAt = Get-DuoForgeUtcNow
+        files = $files
+        includedFiles = $included.Count
+        excludedFiles = $excluded.Count
+        includedBytes = $includedBytes
+        totalBytes = $totalBytes
+    }
+}
+
 function New-DuoForgeStartRequestInternal {
     [CmdletBinding()]
     param(
@@ -44,8 +114,12 @@ function New-DuoForgeStartRequestInternal {
         [string]$Brief,
         [string]$DocumentA,
         [string]$DocumentB,
+        [string]$DocumentAContext,
+        [string]$DocumentBContext,
         [string]$CodexDocument,
         [string]$ClaudeDocument,
+        [string]$CodexContext,
+        [string]$ClaudeContext,
         [string]$CodexProject,
         [string]$ClaudeProject,
         [string]$Requirements,
@@ -70,6 +144,11 @@ function New-DuoForgeStartRequestInternal {
         -DocumentB $DocumentB `
         -CodexDocument $CodexDocument `
         -ClaudeDocument $ClaudeDocument
+    $contextInputs = Resolve-DuoForgeContextInputAliasesInternal `
+        -DocumentAContext $DocumentAContext `
+        -DocumentBContext $DocumentBContext `
+        -CodexContext $CodexContext `
+        -ClaudeContext $ClaudeContext
 
     return [ordered]@{
         schemaVersion = 2
@@ -82,7 +161,7 @@ function New-DuoForgeStartRequestInternal {
         pauseAfterRound = $PauseAfterRound
         allowPartial = $AllowPartial
         workspace = $Workspace
-        compatibilityWarnings = @($documentInputs.warnings)
+        compatibilityWarnings = @($documentInputs.warnings) + @($contextInputs.warnings)
         providerSelections = [ordered]@{
             codex = [ordered]@{
                 model = ([string]$CodexModel).Trim()
@@ -97,6 +176,8 @@ function New-DuoForgeStartRequestInternal {
             brief = $Brief
             documentA = [string]$documentInputs.documentA
             documentB = [string]$documentInputs.documentB
+            documentAContext = [string]$contextInputs.documentAContext
+            documentBContext = [string]$contextInputs.documentBContext
             codexProject = $CodexProject
             claudeProject = $ClaudeProject
             requirements = $Requirements
@@ -119,6 +200,17 @@ function Get-DuoForgeExceptionCode {
     return 'DF-VALIDATION'
 }
 
+function Get-DuoForgeUnknownRequestFieldsInternal {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]$Value,
+        [Parameter(Mandatory)][string[]]$AllowedFields
+    )
+
+    if ($Value -isnot [System.Collections.IDictionary]) { return @() }
+    return @($Value.Keys | ForEach-Object { [string]$_ } | Where-Object { $_ -notin $AllowedFields } | Sort-Object -Unique)
+}
+
 function Test-DuoForgeStartRequestInternal {
     [CmdletBinding()]
     param(
@@ -135,6 +227,64 @@ function Test-DuoForgeStartRequestInternal {
 
     $errors = [System.Collections.Generic.List[object]]::new()
     $warnings = [System.Collections.Generic.List[object]]::new()
+    $rootFields = @('schemaVersion', 'workflowVersion', 'mode', 'name', 'documentType', 'maxRounds', 'firstSynthesizer', 'pauseAfterRound', 'allowPartial', 'workspace', 'compatibilityWarnings', 'providerSelections', 'inputs')
+    foreach ($field in @(Get-DuoForgeUnknownRequestFieldsInternal -Value $Request -AllowedFields $rootFields)) {
+        $errors.Add([ordered]@{ code = 'DF-REQUEST-FIELD'; message = "신규 실행 요청에 허용되지 않은 필드가 있습니다: $field" })
+    }
+    $requestInputs = Get-DuoForgeObjectValue -Object $Request -Name 'inputs'
+    if ($requestInputs -isnot [System.Collections.IDictionary]) {
+        $errors.Add([ordered]@{ code = 'DF-REQUEST-FIELD'; message = '신규 실행 요청의 inputs는 객체여야 합니다.' })
+        $requestInputs = [ordered]@{}
+    }
+    foreach ($field in @(Get-DuoForgeUnknownRequestFieldsInternal -Value $requestInputs -AllowedFields @('brief', 'documentA', 'documentB', 'documentAContext', 'documentBContext', 'codexProject', 'claudeProject', 'requirements'))) {
+        $errors.Add([ordered]@{ code = 'DF-REQUEST-FIELD'; message = "신규 실행 요청 inputs에 허용되지 않은 필드가 있습니다: $field" })
+    }
+    $requestSelections = Get-DuoForgeObjectValue -Object $Request -Name 'providerSelections'
+    if ($requestSelections -isnot [System.Collections.IDictionary]) {
+        $errors.Add([ordered]@{ code = 'DF-REQUEST-FIELD'; message = '신규 실행 요청의 providerSelections는 객체여야 합니다.' })
+        $requestSelections = [ordered]@{}
+    }
+    foreach ($field in @(Get-DuoForgeUnknownRequestFieldsInternal -Value $requestSelections -AllowedFields @('codex', 'claude'))) {
+        $errors.Add([ordered]@{ code = 'DF-REQUEST-FIELD'; message = "providerSelections에 허용되지 않은 필드가 있습니다: $field" })
+    }
+    foreach ($provider in @('codex', 'claude')) {
+        $selection = Get-DuoForgeObjectValue -Object $requestSelections -Name $provider
+        foreach ($field in @(Get-DuoForgeUnknownRequestFieldsInternal -Value $selection -AllowedFields @('model', 'reasoningEffort'))) {
+            $errors.Add([ordered]@{ code = 'DF-REQUEST-FIELD'; message = "$provider 공급자 선택에 허용되지 않은 필드가 있습니다: $field" })
+        }
+    }
+    if ([int](Get-DuoForgeObjectValue -Object $Request -Name 'schemaVersion' -Default 0) -ne 2) {
+        $errors.Add([ordered]@{ code = 'DF-REQUEST-SCHEMA'; message = '신규 실행 요청 schemaVersion은 2여야 합니다.' })
+    }
+    $safeWarnings = [System.Collections.Generic.List[object]]::new()
+    $deprecatedWarningMessage = '--codex와 --claude 문서 옵션은 사용 중단 예정입니다. --document-a와 --document-b를 사용해 주세요.'
+    $deprecatedContextWarningMessage = '--codex-context와 --claude-context는 사용 중단 예정입니다. --document-a-context와 --document-b-context를 사용해 주세요.'
+    foreach ($warning in @(Get-DuoForgeObjectValue -Object $Request -Name 'compatibilityWarnings' -Default @())) {
+        $warningCode = [string](Get-DuoForgeObjectValue -Object $warning -Name 'code' -Default '')
+        $warningMessage = [string](Get-DuoForgeObjectValue -Object $warning -Name 'message' -Default '')
+        $validWarning = ($warningCode -eq 'DF-DEPRECATED-DOCUMENT-ALIASES' -and $warningMessage -eq $deprecatedWarningMessage) -or `
+            ($warningCode -eq 'DF-DEPRECATED-CONTEXT-ALIASES' -and $warningMessage -eq $deprecatedContextWarningMessage)
+        if (-not $validWarning) {
+            $errors.Add([ordered]@{ code = 'DF-REQUEST-WARNING'; message = '신규 실행 요청에 검증되지 않은 호환성 경고가 포함되었습니다.' })
+            continue
+        }
+        $safeWarnings.Add([ordered]@{ code = $warningCode; message = $warningMessage })
+    }
+    $Request = [ordered]@{
+        schemaVersion = Get-DuoForgeObjectValue -Object $Request -Name 'schemaVersion' -Default 0
+        workflowVersion = Get-DuoForgeObjectValue -Object $Request -Name 'workflowVersion' -Default ''
+        mode = Get-DuoForgeObjectValue -Object $Request -Name 'mode' -Default ''
+        name = Get-DuoForgeObjectValue -Object $Request -Name 'name'
+        documentType = Get-DuoForgeObjectValue -Object $Request -Name 'documentType' -Default 'custom'
+        maxRounds = Get-DuoForgeObjectValue -Object $Request -Name 'maxRounds' -Default 0
+        firstSynthesizer = Get-DuoForgeObjectValue -Object $Request -Name 'firstSynthesizer' -Default 'alternate'
+        pauseAfterRound = [bool](Get-DuoForgeObjectValue -Object $Request -Name 'pauseAfterRound' -Default $false)
+        allowPartial = [bool](Get-DuoForgeObjectValue -Object $Request -Name 'allowPartial' -Default $false)
+        workspace = Get-DuoForgeObjectValue -Object $Request -Name 'workspace'
+        compatibilityWarnings = @($safeWarnings)
+        providerSelections = ConvertTo-DuoForgeHashtable -InputObject $requestSelections
+        inputs = ConvertTo-DuoForgeHashtable -InputObject $requestInputs
+    }
     $inputs = [ordered]@{}
     $mode = [string]$Request.mode
     $requestWorkflowVersion = [string](Get-DuoForgeObjectValue -Object $Request -Name 'workflowVersion' -Default '')
@@ -188,18 +338,30 @@ function Test-DuoForgeStartRequestInternal {
             $documentBPrimary = Assert-DuoForgeMarkdownFile -Path ([string]$Request.inputs.documentB) -MaximumBytes ([long]$Config.limits.documentBytes)
             $documentAParent = [System.IO.Path]::GetDirectoryName($documentAPrimary.path)
             $documentBParent = [System.IO.Path]::GetDirectoryName($documentBPrimary.path)
-            Assert-DuoForgeDisjointPaths -PathA $documentAParent -PathB $documentBParent -Code 'DF-PATH-DUAL-DOCUMENT-OVERLAP' -LabelA '문서 A 폴더' -LabelB '문서 B 폴더'
-            if ($errors.Count -eq 0) {
-                Assert-DuoForgeOutputBoundary -ResultsRoot $resultsRoot -InputBoundaries @($documentAParent, $documentBParent)
+            $documentAContextPath = if ([string]::IsNullOrWhiteSpace([string]$Request.inputs.documentAContext)) { $null } else { Resolve-DuoForgePathInternal -Path ([string]$Request.inputs.documentAContext) -ExpectedType Directory }
+            $documentBContextPath = if ([string]::IsNullOrWhiteSpace([string]$Request.inputs.documentBContext)) { $null } else { Resolve-DuoForgePathInternal -Path ([string]$Request.inputs.documentBContext) -ExpectedType Directory }
+            $documentABoundaries = @($documentAParent) + @(if ($null -ne $documentAContextPath) { $documentAContextPath })
+            $documentBBoundaries = @($documentBParent) + @(if ($null -ne $documentBContextPath) { $documentBContextPath })
+            foreach ($aBoundary in @($documentABoundaries | Sort-Object -Unique)) {
+                foreach ($bBoundary in @($documentBBoundaries | Sort-Object -Unique)) {
+                    Assert-DuoForgeDisjointPaths -PathA $aBoundary -PathB $bBoundary -Code 'DF-PATH-DUAL-DOCUMENT-OVERLAP' -LabelA '문서 A 입력 범위' -LabelB '문서 B 입력 범위'
+                }
             }
+            if ($errors.Count -eq 0) {
+                Assert-DuoForgeOutputBoundary -ResultsRoot $resultsRoot -InputBoundaries @($documentABoundaries + $documentBBoundaries | Sort-Object -Unique)
+            }
+            $documentAInventories = @((Get-DuoForgeMarkdownInventoryInternal -Directory $documentAParent -MaximumFileBytes ([long]$Config.limits.documentBytes)))
+            if ($null -ne $documentAContextPath) { $documentAInventories += @(Get-DuoForgeMarkdownInventoryInternal -Directory $documentAContextPath -MaximumFileBytes ([long]$Config.limits.documentBytes) -Recurse) }
+            $documentBInventories = @((Get-DuoForgeMarkdownInventoryInternal -Directory $documentBParent -MaximumFileBytes ([long]$Config.limits.documentBytes)))
+            if ($null -ne $documentBContextPath) { $documentBInventories += @(Get-DuoForgeMarkdownInventoryInternal -Directory $documentBContextPath -MaximumFileBytes ([long]$Config.limits.documentBytes) -Recurse) }
             $inputs['documents'] = [ordered]@{
                 A = [ordered]@{
                     primary = $documentAPrimary
-                    context = Get-DuoForgeMarkdownInventoryInternal -Directory $documentAParent -MaximumFileBytes ([long]$Config.limits.documentBytes)
+                    context = Merge-DuoForgeMarkdownInventoriesInternal -Inventories $documentAInventories
                 }
                 B = [ordered]@{
                     primary = $documentBPrimary
-                    context = Get-DuoForgeMarkdownInventoryInternal -Directory $documentBParent -MaximumFileBytes ([long]$Config.limits.documentBytes)
+                    context = Merge-DuoForgeMarkdownInventoriesInternal -Inventories $documentBInventories
                 }
             }
         }

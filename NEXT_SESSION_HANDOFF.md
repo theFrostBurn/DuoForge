@@ -1,156 +1,161 @@
 # DuoForge 다음 세션 인계
 
-## 작업 공간과 기준점
+## 작업 공간과 현재 기준점
 
 - 작업 공간: `D:\Coding\APP-windows\DuoForge`
 - 브랜치: `main`
-- 문서 모델 확정 커밋: `666d58e865f789a06abc3b7db028e7c2dd30b3dc`
-- 모드 확장 구현 커밋: `db5b62ae929a107fd501d5ffea85f697b6aefb2d`
-- workflow-v2 실제 공급자 검증 기준 커밋: `42bc6ef`
-- 이후 종료 정리 커밋은 `git log -2 --oneline`을 현재 기준으로 확인한다.
-- 기준 문서: PRD v1.6, `docs\IMPLEMENTATION_PLAN.md`
-- 2026-07-28 마지막 오프라인 검증: PowerShell 7 회귀 `통과 68, 실패 0`
-- 2026-07-28 workflow-v2 실제 공급자 E2E: 모드 1 `13/13`, 모드 2 `13/13`, 모드 3 `14/14` 단계 커밋
-- 종료 판정: 세 실행의 `AWAITING_USER`는 질문 카드 사용자 게이트까지 정상 도달한 실제 E2E 성공 체크포인트이며 추가 공급자 호출 없이 문서 모드 확장 Beta 검증을 완료한다.
-- 다음 세션의 새 목표: Codex·Claude 최초 로그인, 상태 진단과 로그인 후 재검사 경로를 안정화한다.
-- 2026-07-28 인증 검토는 읽기 전용으로 수행했으며 로그인·로그아웃·브라우저 실행·모델 호출은 없었다.
+- 현재 HEAD: `bcd9d89 공급자 인증 흐름과 환경 진단을 안정화함`
+- 작업 트리: 이 handoff 갱신 전 깨끗했고 `main...origin/main` 동기화 상태였다.
+- 기준 문서: `require\PRD.md`, `docs\IMPLEMENTATION_PLAN.md`, `README.md`
+- 현재 모듈 버전: `0.8.0`
+- 2026-07-28 마지막 전체 오프라인 회귀: `통과 78, 실패 0`
+- 이번 인계의 목표: Codex/Claude 문서 소유 모델에서 A/B 문서 계보 모델로 바꾼 마이그레이션의 남은 결함과 계약 공백을 테스트 우선으로 수정한다.
+
+인증 안정화와 일반 `doctor`/최초 로그인 `$Validation` 예외 수정은 `bcd9d89`에서 완료됐다. 이번 세션은 인증을 다시 설계하는 작업이 아니라 A/B 마이그레이션 정합성 보강이 중심이다.
 
 ## 먼저 읽을 파일
 
 1. `NEXT_SESSION_HANDOFF.md`
-2. `require\PRD.md`
+2. `require\PRD.md` — 특히 10.4~10.5, FR-COM-067~073, 17.1, 출시·완료 게이트
 3. `docs\IMPLEMENTATION_PLAN.md`
 4. `README.md`
-5. `src\DuoForge\Private\13.CliView.ps1` — 일반 `doctor` 출력의 확정 버그
-6. `src\DuoForge\Private\08.Providers.ps1` — 인증 상태 파서, 공급자 진단과 인증 게이트
-7. `src\DuoForge\Private\07.Process.ps1` — CLI 실행 파일 선택과 자식 프로세스 환경
-8. `src\DuoForge\Private\14.Interactive.ps1` — 안내형 로그인과 로그인 후 재검사
-9. `src\DuoForge\Private\18.ProviderAdapters.ps1` — 실제 공급자 호출 환경 허용 목록
-10. `src\DuoForge\Private\08.ModelSelection.ps1` — Codex 모델 조회의 사용자 프로필 해석
-11. `tests\Run-Tests.ps1` — 현재 인증 회귀와 새 테스트 추가 위치
+5. `src\DuoForge\Private\09.Requests.ps1` — A/B 입력과 레거시 별칭 경계
+6. `src\DuoForge\Private\10.StateStore.ps1` — 매니페스트·상태·인벤토리 역할
+7. `src\DuoForge\Private\15.StageEngine.ps1` — v1/v2 그래프와 편집자 교대
+8. `src\DuoForge\Private\16.StageContract.ps1` — 단계 결과·내부 계보 검증
+9. `src\DuoForge\Private\17.PromptBuilder.ps1` — v1/v2 프롬프트와 `issueKey`
+10. `src\DuoForge\Private\19.ArtifactRenderer.ps1` — 쟁점·판단·채택 병합과 최종 파일
+11. `src\DuoForge\Private\20.RunCoordinator.ps1`, `13.ProgressView.ps1` — v1 재개 전 그래프 복원
+12. `src\DuoForge\Private\24.Evidence.ps1` — A/B 추가 근거 확정 결함
+13. `schemas\stage-result-v2.schema.json`, `schemas\issue.schema.json`
+14. `tests\Run-Tests.ps1`, `tests\Test-WorkflowV2LiveRun.ps1`
 
-## 확정 제품 모델
-
-| 화면 모드 | 내부 ID | 입력 | 결과 | 현재 상태 |
-|---|---|---|---|---|
-| 1. 컨셉으로 공동 문서 만들기 | `shared-document` | brief 또는 컨셉 C | 공동 문서 C' | 실제 공급자 13/13, 사용자 결정 대기 |
-| 2. 두 문서를 하나로 합의하기 | `document-merge` | 문서 A/B | 합의 문서 C와 출처 추적표 | 실제 공급자 13/13, 사용자 결정 대기 |
-| 3. 두 문서를 각각 개선하기 | `dual-document` | 문서 A/B | A'/B'와 문서별 채택 기록 | 수정 후 실제 공급자 14/14, 사용자 결정 대기 |
-| 4. 두 프로젝트 비교하기 | `dual-project-audit` | 프로젝트 A/B | 비교 결과 | 격리 게이트 폐쇄 |
+## 확정 제품 모델과 보존 경계
 
 - A/B는 공급자나 최초 작성자가 아니라 실행 안의 안정적인 문서 계보다.
 - Codex와 Claude는 교체 가능한 검토자·응답자·편집자·합성자·검증자다.
 - `performedBy`는 감사용 단계 작업자이며 문서 소유권이 아니다.
-- 기존 실행을 새 의미로 묵시적으로 재해석하거나 저장된 단계·산출물을 다시 쓰지 않는다.
+- 신규 실행은 `workflow-v2`로 만들고, 버전이 없는 저장 실행은 `workflow-v1`로 해석한다.
+- v1의 `roles.codex/claude`, `owner-response`, `owned-document-revision`, `ownerDecisions`, `codex-final.md`, `claude-final.md` 의미와 저장 원본을 v2로 묵시 승격하거나 재작성하지 않는다.
+- v2는 A/B 계보, `targetDocumentId`, `sourceDocumentIds`, `performedBy`, `editorialDecisions`, `reviewerVerdicts`, `adoptions`를 서로 다른 축으로 보존해야 한다.
+- 모드 4 `dual-project-audit`의 `DF-PREFLIGHT-3A-ISOLATION` 게이트는 계속 닫아 둔다.
 
-## 새 세션의 현재 목표와 인증 검토 결과
+## 이번 세션에서 완료한 읽기 전용 검토
 
-쿠키님은 최초 Codex·Claude 로그인 과정, 특히 Codex 인증이 샌드박스 안팎에서 다르게 감지되던 문제를 안정화하도록 요청했다. 아직 코드는 수정하지 않았다.
+- 구현·PRD·handoff·스키마·테스트와 저장 실행 메타데이터를 대조했다.
+- PowerShell 7 전체 회귀를 다시 실행해 `통과 78, 실패 0`을 확인했다.
+- 저장된 workflow-v2 세 실행을 현재 강화 검증기로 다시 검사했다.
+  - `run-20260728-033711-fad8f8`: `shared-document`, `13/13`, `AWAITING_USER`
+  - `run-20260728-040441-2cb68c`: `document-merge`, `13/13`, `AWAITING_USER`
+  - `run-20260728-095906-127f6d`: `dual-document`, `14/14`, `AWAITING_USER`
+- 세 실행 모두 입력·스냅샷 해시, 상위 단계의 provider/performedBy/target/sources, 최종 파일과 이벤트·로그 비노출 검증을 통과했다.
+- 최신 `dual-document` 저장 그래프는 R1 `Codex→A / Claude→B`, R2 `Claude→A / Codex→B`, 마지막 편집자의 반대 공급자 검증으로 실제 작업자·계보 분리를 확인했다.
+- 기존 v1 완료 실행 `run-20260727-155148-7617d3`은 12/12 단계, 공급자 역할, 레거시 단계와 `codex-final.md`/`claude-final.md`를 그대로 유지한다.
+- 저장된 v2 쟁점 원장에는 레거시 `ownerDecisions`가 없지만, 세 실행 모두 `reviewerVerdicts` 항목 수가 0이었다.
+- 파일 수정, 실제 공급자 호출, 저장 실행 재개, 사용자 질문 답변은 하지 않았다.
 
-### 확정 재현
+## 확정 결함 — 먼저 수정
 
-- 일반 호스트 PowerShell 7에서는 `codex login status`가 종료 코드 0으로 ChatGPT 구독 로그인을 확인했다.
-- 같은 호스트의 `claude auth status`도 종료 코드 0이며 `claude.ai` 구독 로그인으로 확인됐다.
-- 호스트에서 `duoforge doctor --json`은 두 공급자를 모두 구독 인증으로 판정하고 `readyForDocumentModes=true`를 반환했다.
-- Codex 샌드박스에서는 `USERPROFILE=C:\Users\user`지만 .NET 사용자 프로필이 `C:\Users\CodexSandboxOffline`로 해석되고 `CODEX_HOME`은 비어 있었다. 이 상태의 `codex login status`는 종료 코드 1, DuoForge는 Codex를 미로그인으로 오판했다.
-- 샌드박스 자식 프로세스에 `CODEX_HOME=C:\Users\user\.codex`를 임시 지정하면 상태 조회는 성공하지만 `.codex\tmp` 쓰기 제한 경고가 발생했다. 따라서 인증 파일이 보인다는 이유만으로 샌드박스 내 실제 모델 호출까지 준비됐다고 판정하지 않는다.
+### P0 — A/B 문서 모드의 추가 근거 연결 실패와 고아 파일
 
-### 확정 결함과 테스트 공백
+- `10.StateStore.ps1`은 모드 2·3 인벤토리를 `roles.documents.A/B`로 만든다.
+- `24.Evidence.ps1:65-71`은 비공동 문서 실행에서 여전히 `roles.codex/claude.context`를 갱신한다.
+- StrictMode에서 없는 역할의 `.context` 대입이 실패한다.
+- 근거 스냅샷을 먼저 복사하므로 실패 뒤 인벤토리에 없는 `E000001.md`가 남고, 재시도는 `DF-EVIDENCE-SNAPSHOT-EXISTS`로 막힐 수 있다.
+- 현재 근거 추가 회귀는 `shared-document`만 다룬다.
+- 수정은 파일 복사·인벤토리·매니페스트·쟁점·단계 무효화를 하나의 실패 원자적 흐름으로 만들고, 모드 2·3 각각 성공·실패·재시도·고아 0건을 검증해야 한다.
 
-1. **P0 — 최초 로그인 화면과 일반 `doctor` 출력 중단**
-   - `src\DuoForge\Private\13.CliView.ps1:52-55`의 `Write-DuoForgeDoctorReport`가 매개변수에 없는 `$Validation.contextPlan`을 참조한다.
-   - 모듈의 `StrictMode Latest` 때문에 `duoforge doctor`는 `The variable '$Validation' cannot be retrieved because it has not been set.`으로 종료 코드 1을 반환했다.
-   - 로그인이 준비되지 않은 최초 설정 화면은 로그인 선택지를 출력하기 전에 같은 렌더러에서 중단될 수 있다.
-   - JSON 진단은 이 렌더러를 거치지 않아 동작한다.
-2. **High — 인증 실행 컨텍스트 불일치**
-   - 상태 진단은 `Resolve-DuoForgeCommandInvocation`이 Application인 `codex.cmd`를 우선한다.
-   - 안내형 로그인은 `& codex login`을 직접 호출해 현재 PowerShell에서는 `codex.ps1`이 선택될 수 있다.
-   - doctor, 안내형 로그인, 모델 조회와 실제 공급자 호출이 동일한 CLI 해석·인증 홈 계약을 공유하지 않는다.
-3. **High — 상태 실패 원인 손실**
-   - Codex 상태 실패, 타임아웃, 접근 거부와 샌드박스 프로필 불일치가 모두 단순 미로그인으로 접혀 재로그인만 권한다.
-   - 샌드박스나 비대화형 환경에서는 브라우저 로그인을 시작하지 말고 인증 컨텍스트를 확인할 수 없는 상태와 실제 미로그인을 구분해야 한다.
-4. **회귀 테스트 공백**
-   - 현재 68개 테스트는 인증 성공 파싱, 개인정보 제거, 일부 API 환경 변수 차단, 가짜 인증 게이트를 검증한다.
-   - 일반 doctor 렌더링, 최초 로그인 메뉴, 로그인 후 재검사, `USERPROFILE`/`.NET UserProfile`/`CODEX_HOME` 불일치, 동일 실행 파일 사용과 접근 거부 분류는 검증하지 않는다.
+### P0 — 검토자 평가와 실제 편집 판단이 섞임
 
-### 안전한 수정 방향
+- v2 그래프의 `review-response`는 A/B 전체 검토에 대한 응답이고, 실제 문서 편집은 뒤의 `document-revision`이 담당한다.
+- `19.ArtifactRenderer.ps1:236-266`은 모든 v2 `issueResponses`를 `editorialDecisions`로 기록하고 해결 상태까지 바꾼다.
+- `reviewerVerdicts`는 초기화만 되고 채우는 경로가 없다.
+- 편집 판단 레코드에는 문서 대상과 `performedBy`가 충분히 남지 않는다.
+- `review-response`는 검토자 평가 축으로, 대상 문서의 실제 채택·편집 판단은 `document-revision`/`adoptions` 축으로 분리하고, 실제 반영 없이 `RESOLVED`가 되지 않도록 테스트한다.
 
-- `Write-DuoForgeDoctorReport`에서 잘못 들어간 문맥 배치 블록을 제거하고, 필요하면 `Write-DuoForgeExecutionPlan`으로 옮긴다.
-- 인증 상태 조회와 안내형 로그인에 사용할 CLI 실행 파일·인증 홈·자식 환경을 하나의 공통 계약으로 만든다. 명시적인 `CODEX_HOME`은 존중하고 부모 프로세스 환경을 전역 변경하지 않는다.
-- 일반 호스트 PowerShell과 Codex 샌드박스를 구분한다. 샌드박스에서는 인증 파일 조회 성공만으로 라이브 실행을 허용하지 말고, 안전한 호스트 PowerShell 7에서 다시 실행할 명령을 안내한다.
-- 실제 브라우저 로그인 없이 process runner 또는 상태 결과를 주입할 수 있게 하여 성공·취소·상태 미확인·한쪽만 성공·재검사 흐름을 오프라인 테스트한다.
-- Codex/Claude 상태 파서의 미로그인·API 방식·형식 변경·비영 종료 코드·손상 JSON 행렬과 여섯 API 우선 환경 변수 전체를 회귀로 고정한다.
-- 진단과 테스트에서는 이메일, 조직 ID, 토큰, API 키, 인증 파일 내용과 원문 상태 JSON을 출력하거나 저장하지 않는다.
+### P0 — 내부 A/B 계보와 상위 단계 계약의 교차 검증 누락
 
-## 완료된 작업
+- `16.StageContract.ps1`은 상위 `performedBy`, `targetDocumentId`, `sourceDocumentIds`를 예상 단계와 대조한다.
+- 내부 `issues.targetDocumentId`, 증거의 `sourceDocumentId`, `adoptions.targetDocumentId/sourceDocumentId`는 전역 enum만 확인한다.
+- 문서 A 개정 단계에 B 또는 `merged` 대상의 쟁점·채택, 허용 출처 밖 근거를 넣어도 수동 검증을 통과할 수 있다.
+- 단계별 허용 행렬을 정의하고 검증한다. 예: `document-review`의 쟁점 대상은 A/B, `document-revision(target=A)`의 편집·채택 대상은 A, `document-validation(target=A)`의 신규 쟁점 대상도 A다.
 
-- PRD, 구현 계획, README와 UI 용어를 네 화면 모드 및 A/B 계보로 정렬했다.
-- 신규 실행은 `workflow-v2`, `DocumentA/DocumentB`, 정규 `inputs.documentA/documentB`만 저장한다.
-- 레거시 `CodexDocument/ClaudeDocument`, `--codex/--claude` 입력은 A/B로 변환하고 경고하며, 정규 입력과 충돌하면 실패 폐쇄한다.
-- `workflowVersion`이 없는 실행은 `workflow-v1`로 읽고 기존 단계 그래프, 프롬프트, 파일 의미와 저장 원본을 보존한다.
-- 모드 2는 독립 병합 후보, 교차 검토·응답, 합성·검증을 거쳐 합의 문서와 `source-trace.md`를 만든다.
-- 모드 3은 두 공급자가 A/B 모두를 검토하고 라운드별 편집자를 교대하며 A'/B' 및 문서별 채택 기록을 만든다.
-- v2 결과는 `performedBy`, 대상 문서, 출처 문서 집합, 증거 위치·해시와 채택 판단을 엄격히 검증한다.
-- 진행 이벤트는 메타데이터만 싣고 원문 공급자 출력, 프롬프트·문서·컨텍스트 내용과 비밀값을 싣지 않는 회귀를 고정했다.
-- 모드 4는 `DF-PREFLIGHT-3A-ISOLATION`으로 모델 호출 전에 계속 차단한다.
-- 중립 A/B 라이브 픽스처, 정확한 `LIVE` 동의 실행기와 메타데이터 전용 검증기를 추가했다.
-- workflow-v2 실제 공급자 E2E에서 모드 1은 Codex 7회·Claude 6회, 모드 2는 7회·6회, 모드 3은 7회·7회로 계획과 일치했다.
-- 세 실행 모두 입력 SHA-256 불변, 스냅샷 해시, 단계 스키마·계보, 최종 파일, 이벤트·로그 비노출과 빈 `provider-work`를 통과했다.
-- 라이브에서 발견한 모듈 클로저의 private 함수 해석 문제와 Codex 구조화 출력 스키마의 `uniqueItems` 호환성 문제를 수정하고 68개 회귀를 다시 통과했다.
-- 모드 3 실제 결과에서 Minor 근거 대기 쟁점이 잘못 차단 상태로 남는 의미 결함을 발견했다. 렌더러가 모든 병합 뒤 중앙 심각도 규칙으로 차단 여부를 다시 계산하도록 수정하고, 강화 검증기가 수정 전 실행을 거부하는 회귀를 추가했다.
-- 수정 코드를 기존 14개 커밋 결과에 비변경 재계산한 예상 상태는 `AWAITING_USER`이며, 차단 근거 대기 0건·사용자 결정 대기 7건이다.
-- 수정 후 신규 실행 `run-20260728-095906-127f6d`는 14/14 단계, Codex 7회·Claude 7회, `AWAITING_USER`로 강화 검증을 통과했다. 입력 해시·스냅샷 4개·A/B 최종 파일·비노출 경계가 모두 유효하고 Critical/Major 사용자 결정 차단 4건과 상태가 일치한다.
-- 세 통과 실행의 질문은 테스트 픽스처가 사용자 게이트를 검증하며 생성한 결과다. 임의의 권장 답변으로 `COMPLETED`를 만들지 않고 `AWAITING_USER`를 성공 증거로 보존하기로 확정했다.
-- 모드 2 최종 C는 공통 문서 유형 파일명 계약을 사용한다. PRD 입력의 안정 동작은 `final\PRD.md`이며 PRD의 `merged-final.md` 표기를 이 계약에 맞췄다.
-- 모든 실제 공급자 E2E 실행기는 테스트 전용 Claude 설정 `sonnet/low`와 정확한 `LIVE` 동의를 요구하도록 통일했다.
+### P0 — `issueKey` 참조 무결성과 충돌 방지 누락
 
-## 현재 경계와 주의사항
+- 프롬프트의 권장 키는 공급자·라운드만 포함하고 단계·문서 대상이 없다.
+- 원장 병합은 `issueKey` 전역 문자열만으로 응답·채택·질문을 연결한다.
+- 같은 키의 A/B 쟁점을 합성하면 한 문서의 응답이 다른 문서 쟁점에 연결되는 현상을 오프라인으로 재현했다.
+- 키 생성에 단계/대상 또는 실행 내 안정 식별자를 포함하고, 중복 키·dangling 참조·대상 불일치를 저장 전에 실패 폐쇄하는 테스트를 추가한다.
 
-- 모드 1~3의 2라운드 가짜 공급자 E2E, 실제 공급자 전체 단계 E2E와 전체 오프라인 회귀는 완료됐다.
-- 기존 라이브 결과는 `workflow-v1 shared-document/dual-document`의 역사적 증거일 뿐이다. 신규 `document-merge`나 `workflow-v2 dual-document`의 라이브 완료로 간주하지 않는다.
-- 신규 라이브 통과 증거는 `run-20260728-033711-fad8f8`(`shared-document`, `AWAITING_USER`), `run-20260728-040441-2cb68c`(`document-merge`, `AWAITING_USER`), `run-20260728-095906-127f6d`(`dual-document`, `AWAITING_USER`)이다. 수정 전 `run-20260728-043711-14a4b7`은 상태 의미 검증 실패 감사 증거로만 보존한다. 어느 실행도 `COMPLETED` 증거로 과장하지 않는다.
-- 세 통과 실행에는 Claude `opus/high`가 저장되어 있다. 이 선택 계보와 결과는 재작성하지 않으며, 해당 실행을 추가 공급자 호출로 재개하지 않는다.
-- `AWAITING_USER` 질문 33개는 감사 결과로 보존하되 제품 검증을 위해 임의로 답하지 않는다. 그중 차단 질문이 있다는 사실은 사용자 게이트가 의도대로 작동했다는 증거이며 미완료 구현을 뜻하지 않는다.
-- 이후 실제 공급자 E2E가 새 코드 변경 때문에 다시 필요할 때는 기존 실행 재개가 아니라 새 실행을 만들고 `tests\workflow-v2-live-settings.json`의 Claude `sonnet/low`를 사용한다.
-- 실제 공급자 호출은 사용자가 새 호출 범위와 예상 호출 수를 확인하고 다시 정확히 `LIVE`라고 동의한 뒤에만 시작한다. 현재 종료 정리에는 새 공급자 호출이 필요하지 않다.
-- 제품의 일반 모델 선택 화면과 이미 저장된 실행의 선택값은 변경하지 않는다.
-- 실패한 사전 실행 `run-20260728-033334-e6eb4a`, `run-20260728-033532-b5bde7`은 각각 private 함수 해석과 공급자 스키마 호환성 결함의 감사 증거로 보존한다.
-- 모드 4의 기능 플래그나 격리 게이트를 열지 않는다.
-- 원문 공급자 출력, stdout·stderr, 프롬프트·문서·컨텍스트 내용, 생성 중 텍스트와 비밀값을 로그·진행 이벤트에 추가하지 않는다.
-- Git이 사용자 프로필의 전역 ignore 파일을 읽을 때 권한 경고를 낼 수 있으나 현재 저장소 검증과 커밋에는 영향을 주지 않았다.
+## 중요 계약 공백 — P0 수정 뒤 정리
 
-## 검증 명령과 마지막 결과
+1. **신규 저장 계약 불일치**
+   - PRD는 신규 매니페스트에 `inputs.documentA/documentB`, `roles.documents.A/B`, 상태에 `workflowVersion`을 요구한다.
+   - 실제 매니페스트에는 `inputs`와 `roles`가 없고, 역할은 `inputs/inventory.json`에만 있으며 `state.json`에도 버전이 없다.
+   - 원문 경로 최소 저장 원칙과 외부 소비자 계약을 함께 검토해 한 구조를 권위 계약으로 확정하고 PRD·코드·테스트를 일치시킨다.
+2. **v2 쟁점 원장 버전 부재**
+   - `schemas/issue.schema.json`은 여전히 v1의 `target` 계약이고, v2 `issues.json`도 `schemaVersion=1`이다.
+   - v2 전용 원장 스키마나 명확한 버전 표지를 도입하고 `target`/`ownerDecisions` 혼입을 차단한다.
+3. **공개 요청 검증 우회**
+   - 요청 생성기와 CLI는 정규·레거시 경로 충돌을 차단하지만, 직접 만든 `IDictionary`를 `Test-DuoForgeStartRequest`에 전달하면 레거시 충돌·미지 필드가 남을 수 있다.
+   - 공개 검증 경계에서도 재정규화하거나 허용 필드 외 입력을 실패 폐쇄한다.
+4. **컨텍스트 레거시 별칭 누락**
+   - PRD의 `--codex-context/--claude-context` 변환·경고 계약이 구현되지 않았고 현재 CLI에서 조용히 무시될 수 있다.
+   - 지원할 계약이면 A/B로 변환·경고하고, 폐기할 계약이면 PRD를 고치고 unknown 옵션을 오류 처리한다.
+5. **v1 재개 전 표시와 프롬프트 보존**
+   - `steps.json`이 없는 v1 실행에서 `20.RunCoordinator.ps1`과 `13.ProgressView.ps1`이 버전을 넘기지 않아 v2 기본 그래프를 만들 수 있다.
+   - 같은 `duoforge-stage-v2` 이름 아래 v1 프롬프트 DATA에 v2 상위 필드가 추가된 상태다.
+   - 완전한 비민감 v1 fixture로 manifest→inventory→steps→artifact→ledger→final 조회·재개·재렌더링과 저장 해시 불변을 고정한다.
+6. **버전·스키마 교차 검증**
+   - manifest/steps/stage result/ledger/state의 버전 불일치와 v2에서 버전 표지가 사라진 경우를 공급자 호출 전에 차단한다.
+7. **실제 E2E 증거 범위**
+   - 저장된 v2 세 실행은 모두 `AWAITING_USER`이며 사용자 결정 뒤 `COMPLETED`까지의 라이브 증거는 아니다.
+   - 우선 가짜 공급자 E2E로 모드 2·3의 결정→선택 무효화→재개→완료를 검증한다. 실제 호출은 별도 동의 없이는 하지 않는다.
 
-시작 전과 주요 구현·검증 슬라이스마다 다음 기준 테스트를 실행한다.
+## 권장 구현 순서
+
+1. 현재 상태와 기준 테스트 `78/78`을 재현한다.
+2. 추가 근거 P0에 대한 실패 회귀를 모드 2·3으로 먼저 만들고 최소 수정한다.
+3. 쟁점 원장의 `reviewerVerdicts`/`editorialDecisions`/`adoptions` 의미와 레코드 필드를 PRD 기준으로 확정한 뒤 실패 회귀와 구현을 추가한다.
+4. 단계별 내부 A/B 허용 행렬과 `issueKey` 참조 무결성을 실패 폐쇄한다.
+5. 공개 입력·레거시 컨텍스트 별칭·unknown 옵션 경계를 정리한다.
+6. manifest/state/inventory/ledger의 권위 저장 계약과 버전을 정렬한다.
+7. v1 전체 fixture와 v2 모드 2·3 사용자 결정 후 완료 E2E를 추가한다.
+8. 전체 회귀, 구문·JSON·diff 검사와 저장 실행 메타데이터 검증을 수행한다.
+
+## 검증 명령
+
+기준 및 각 구현 슬라이스 후:
 
 ```powershell
 & 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -File '.\tests\Run-Tests.ps1'
 ```
 
-마지막 결과:
+저장된 v2 메타데이터 재검증만 필요할 때:
 
-- 회귀 테스트: `통과 68, 실패 0` (약 30초)
-- workflow-v2 실제 공급자 실행: 호출 시작 55회, 완료·단계 커밋 54회. 초기 스키마 호환성 결함 실행의 1회만 커밋되지 않았고 공급자 실패 이벤트는 0건
-- 라이브 검증기: 모드 1·2와 수정 후 모드 3 통과, 수정 전 모드 3은 `WAITING_STATUS_WITHOUT_BLOCKING_ISSUE`로 정확히 거부
-- 공통 안전 검증: 입력 해시 불변, 스냅샷 `1/4/4/4`개 검증, 금지 이벤트·데이터 키·문서 카나리·공급자 작업 잔여 각 0건
-- `git diff --check`: 통과
-- 신규 v2 스키마 포함 JSON 파싱: 통과
-- PowerShell 구문 검사: 오류 0
-- 제품 코드 비밀 패턴 점검: 후보 0
-- 종료 정리 중 실제 공급자 추가 호출: 0회
+```powershell
+& 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -File '.\tests\Test-WorkflowV2LiveRun.ps1' -RunId 'run-20260728-033711-fad8f8' -Mode 'shared-document'
+& 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -File '.\tests\Test-WorkflowV2LiveRun.ps1' -RunId 'run-20260728-040441-2cb68c' -Mode 'document-merge'
+& 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -File '.\tests\Test-WorkflowV2LiveRun.ps1' -RunId 'run-20260728-095906-127f6d' -Mode 'dual-document'
+```
 
-## 다음 작업
+마지막 공통 검사:
 
-1. `git status --short`, `git log -3 --oneline`과 이 인계 문서를 확인한다. handoff 갱신 외 예상하지 못한 변경이 있으면 먼저 쿠키님께 알린다.
-2. 기준 테스트를 실행해 수정 전 `통과 68, 실패 0`을 재현한다.
-3. 실제 로그인·로그아웃 없이 `duoforge doctor`의 `$Validation` 예외를 재현하는 회귀 테스트를 먼저 추가하고 렌더러를 수정한다.
-4. 인증 실행 컨텍스트를 공통화하고 샌드박스 프로필 불일치와 실제 미로그인을 구분한다. 안내형 로그인은 대화형 호스트에서만 허용한다.
-5. 가짜 프로세스 결과로 로그인 성공·취소·상태 미확인·해당 공급자 재검사와 한쪽 성공 보존을 테스트한다.
-6. 전체 오프라인 회귀, 일반/JSON doctor와 PowerShell 구문 검사를 실행한다. 일반 호스트 상태 비교는 `codex login status`, `claude auth status`, `duoforge doctor --json`의 종료 코드와 정제된 필드만 사용한다.
-7. 인증 안정화에는 모델 호출이 필요하지 않다. 실제 공급자 E2E가 필요하다고 판단되면 실행하지 말고 Claude `sonnet/low`, 공급자별 예상 호출 수와 새 `LIVE` 동의를 먼저 요청한다.
-8. 기존 workflow-v2 통과 실행을 재개하거나 질문에 답하지 않고, 모드 4 격리 게이트와 모든 비노출 경계를 유지한다.
+```powershell
+git diff --check
+git status --short
+```
+
+## 작업 중 안전 경계
+
+- 실제 로그인·로그아웃·브라우저·모델 호출 없이 오프라인 회귀와 정제된 저장 메타데이터만 사용한다.
+- 이메일, 조직 ID, 인증 원문, 토큰, API 키와 인증 파일 내용을 출력하거나 저장하지 않는다.
+- 기존 `AWAITING_USER` 실행을 재개하거나 질문에 답하지 않는다.
+- 저장된 v1/v2 실행 원본을 수정하거나 마이그레이션하지 않는다. 재현은 테스트용 임시 fixture에서 수행한다.
+- 실제 공급자 호출이 정말 필요하면 실행 전에 Claude `sonnet/low`, 공급자별 예상 호출 수와 새롭고 정확한 `LIVE` 동의를 요청한다.
+- 모드 4 격리 게이트와 원문 공급자 출력·문서·프롬프트·컨텍스트 비노출 경계를 유지한다.
 
 ## 추천 스킬
 
-- 인증 안정화 구현에는 별도 스킬이 필요하지 않다. 저장소 코드, 공식 공급자 CLI 계약과 PowerShell 테스트를 기준으로 한다.
-- 작업 종료 후 다시 새 세션으로 넘길 때 `handoff` 스킬을 사용해 수정 파일, 테스트 수와 남은 위험만 갱신한다.
+- 별도의 구현 스킬은 필요하지 않다. PowerShell 코드와 PRD, 저장 형식, 테스트를 직접 대조하는 것이 가장 정확하다.
+- 다음 작업 종료 시 `handoff` 스킬로 수정 파일, 새 테스트 수, 남은 위험과 커밋 상태만 갱신한다.

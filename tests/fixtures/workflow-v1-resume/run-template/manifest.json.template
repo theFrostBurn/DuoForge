@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 2,
+  "runId": "fixture-workflow-v1-resume",
+  "name": "sanitized workflow-v1 resume",
+  "mode": "dual-document",
+  "createdAt": "2026-07-01T00:00:00Z",
+  "updatedAt": "2026-07-01T00:00:00Z",
+  "resultsRoot": "__RESULTS_ROOT__",
+  "runDirectory": "__RUN_DIRECTORY__",
+  "documentType": "custom",
+  "maxRounds": 2,
+  "firstSynthesizer": "alternate",
+  "pauseAfterRound": false,
+  "allowPartial": false,
+  "subscriptionOnly": true,
+  "promptTemplateVersion": "duoforge-stage-v2",
+  "artifactVisibilityPolicy": "transitive-dependencies-v1",
+  "providerSelections": {
+    "codex": { "model": "fixture-codex", "reasoningEffort": "low" },
+    "claude": { "model": "fixture-claude", "reasoningEffort": "low" }
+  },
+  "executionPlan": {
+    "providers": {
+      "codex": { "maximumCalls": 10 },
+      "claude": { "maximumCalls": 10 }
+    }
+  },
+  "maxWallClockMinutes": 90,
+  "inputSnapshotHashes": ["__SNAPSHOT_A_HASH__", "__SNAPSHOT_B_HASH__"]
+}

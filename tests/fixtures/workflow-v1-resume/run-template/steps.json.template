@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "mode": "dual-document",
+  "maxRounds": 2,
+  "steps": [
+    {
+      "stepKey": "r01-codex-cross-review", "provider": "codex", "round": 1, "stage": "cross-review", "dependsOn": [],
+      "status": "COMMITTED", "attemptCount": 1, "inputHash": "sha256:fixture-input", "artifactPath": "__COMMITTED_ARTIFACT_PATH__",
+      "artifactHash": "__COMMITTED_ARTIFACT_HASH__", "lastError": null, "retryMode": null, "lastPromptKind": "STAGE", "history": []
+    },
+    {
+      "stepKey": "r01-claude-cross-review", "provider": "claude", "round": 1, "stage": "cross-review", "dependsOn": [],
+      "status": "STARTED", "attemptCount": 1, "inputHash": "sha256:interrupted", "artifactPath": null,
+      "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": "STAGE", "history": []
+    },
+    {
+      "stepKey": "r01-codex-owner-response", "provider": "codex", "round": 1, "stage": "owner-response",
+      "dependsOn": ["r01-codex-cross-review", "r01-claude-cross-review"], "status": "PENDING", "attemptCount": 0,
+      "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": []
+    },
+    {
+      "stepKey": "r01-claude-owner-response", "provider": "claude", "round": 1, "stage": "owner-response",
+      "dependsOn": ["r01-codex-cross-review", "r01-claude-cross-review"], "status": "PENDING", "attemptCount": 0,
+      "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": []
+    },
+    {
+      "stepKey": "r01-codex-owned-document-revision", "provider": "codex", "round": 1, "stage": "owned-document-revision",
+      "dependsOn": ["r01-codex-owner-response", "r01-claude-owner-response"], "status": "PENDING", "attemptCount": 0,
+      "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": []
+    },
+    {
+      "stepKey": "r01-claude-owned-document-revision", "provider": "claude", "round": 1, "stage": "owned-document-revision",
+      "dependsOn": ["r01-codex-owner-response", "r01-claude-owner-response"], "status": "PENDING", "attemptCount": 0,
+      "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": []
+    },
+    {
+      "stepKey": "r02-codex-cross-review", "provider": "codex", "round": 2, "stage": "cross-review",
+      "dependsOn": ["r01-codex-owned-document-revision", "r01-claude-owned-document-revision"], "status": "PENDING", "attemptCount": 0,
+      "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": []
+    },
+    {
+      "stepKey": "r02-claude-cross-review", "provider": "claude", "round": 2, "stage": "cross-review",
+      "dependsOn": ["r01-codex-owned-document-revision", "r01-claude-owned-document-revision"], "status": "PENDING", "attemptCount": 0,
+      "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": []
+    },
+    {
+      "stepKey": "r02-codex-owner-response", "provider": "codex", "round": 2, "stage": "owner-response",
+      "dependsOn": ["r02-codex-cross-review", "r02-claude-cross-review"], "status": "PENDING", "attemptCount": 0,
+      "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": []
+    },
+    {
+      "stepKey": "r02-claude-owner-response", "provider": "claude", "round": 2, "stage": "owner-response",
+      "dependsOn": ["r02-codex-cross-review", "r02-claude-cross-review"], "status": "PENDING", "attemptCount": 0,
+      "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": []
+    },
+    {
+      "stepKey": "r02-codex-owned-document-revision", "provider": "codex", "round": 2, "stage": "owned-document-revision",
+      "dependsOn": ["r02-codex-owner-response", "r02-claude-owner-response"], "status": "PENDING", "attemptCount": 0,
+      "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": []
+    },
+    {
+      "stepKey": "r02-claude-owned-document-revision", "provider": "claude", "round": 2, "stage": "owned-document-revision",
+      "dependsOn": ["r02-codex-owner-response", "r02-claude-owner-response"], "status": "PENDING", "attemptCount": 0,
+      "inputHash": null, "artifactPath": null, "artifactHash": null, "lastError": null, "retryMode": null, "lastPromptKind": null, "history": []
+    }
+  ]
+}
