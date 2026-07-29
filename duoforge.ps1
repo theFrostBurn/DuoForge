@@ -3,7 +3,7 @@
 [CmdletBinding()]
 param(
     [Parameter(ValueFromRemainingArguments = $true)]
-    [string[]]$CliArguments
+    [string[]]$CliArguments = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,7 +11,8 @@ $modulePath = Join-Path $PSScriptRoot 'src\DuoForge\DuoForge.psd1'
 Import-Module $modulePath -Force
 
 try {
-    Invoke-DuoForgeCli -Arguments $CliArguments
+    $normalizedCliArguments = if ($null -eq $CliArguments) { @() } else { @($CliArguments) }
+    Invoke-DuoForgeCli -Arguments $normalizedCliArguments
 }
 catch {
     $code = if ($_.Exception.Data.Contains('DuoForgeCode')) { [string]$_.Exception.Data['DuoForgeCode'] } else { 'DF-UNEXPECTED' }

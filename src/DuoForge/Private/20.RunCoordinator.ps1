@@ -37,16 +37,24 @@ function Get-DuoForgeRemainingCallBudget {
 
     $providers = [ordered]@{}
     foreach ($provider in @('codex', 'claude')) {
-        $planned = @($graph.steps | Where-Object { $_.provider -eq $provider }).Count
-        $completed = @($graph.steps | Where-Object { $_.provider -eq $provider -and $_.status -eq 'COMMITTED' }).Count
+        $providerSteps = @($graph.steps | Where-Object { $_.provider -eq $provider })
+        $remainingSteps = @($providerSteps | Where-Object { $_.status -ne 'COMMITTED' })
+        $planned = $providerSteps.Count
+        $completed = $planned - $remainingSteps.Count
         $attempted = 0
-        foreach ($step in @($graph.steps | Where-Object { $_.provider -eq $provider })) { $attempted += [int]$step.attemptCount }
+        foreach ($step in $providerSteps) { $attempted += [int]$step.attemptCount }
+        $baseCallsRemaining = @($remainingSteps | Where-Object { [int]$_.attemptCount -eq 0 }).Count
+        $retryBudgetRemaining = @($remainingSteps | Where-Object { [int]$_.attemptCount -lt 2 }).Count
+        $maximumPlannedAdditionalCalls = $baseCallsRemaining + $retryBudgetRemaining
         $providerPlans = Get-DuoForgeObjectValue -Object $manifest.executionPlan -Name 'providers'
         $providerPlan = Get-DuoForgeObjectValue -Object $providerPlans -Name $provider
         $maximum = [int](Get-DuoForgeObjectValue -Object $providerPlan -Name 'maximumCalls' -Default 0)
         $providers[$provider] = [ordered]@{
             plannedRemaining = [Math]::Max(0, $planned - $completed)
             maximumAdditionalCalls = [Math]::Max(0, $maximum - $attempted)
+            baseCallsRemaining = $baseCallsRemaining
+            retryBudgetRemaining = $retryBudgetRemaining
+            maximumPlannedAdditionalCalls = $maximumPlannedAdditionalCalls
             attempted = $attempted
         }
     }

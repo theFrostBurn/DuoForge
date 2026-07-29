@@ -4,15 +4,18 @@ function Invoke-DuoForgeCliCoreInternal {
         [string[]]$Arguments = @(),
         [scriptblock]$InputReader,
         [scriptblock]$ResumeInvoker,
-        [scriptblock]$InteractiveHostProbe
+        [scriptblock]$InteractiveHostProbe,
+        [scriptblock]$InteractiveHomeInvoker
     )
 
-    $isInteractive = { if ($null -ne $InteractiveHostProbe) { return [bool](& $InteractiveHostProbe) }; return [bool](Test-DuoForgeInteractiveHost) }.GetNewClosure()
-    $readInput = { param([string]$Prompt) if ($null -ne $InputReader) { return [string](& $InputReader $Prompt) }; return [string](Read-Host $Prompt) }.GetNewClosure()
+    if ($null -eq $Arguments) { $Arguments = @() }
+    $isInteractive = { if ($null -ne $InteractiveHostProbe) { return [bool](& $InteractiveHostProbe) }; return [bool](Test-DuoForgeInteractiveHost) }
+    $readInput = { param([string]$Prompt) if ($null -ne $InputReader) { return [string](& $InputReader $Prompt) }; return [string](Read-Host $Prompt) }
 
     if ($Arguments.Count -eq 0) {
         if (& $isInteractive) {
-            Invoke-DuoForgeInteractiveHome
+            if ($null -ne $InteractiveHomeInvoker) { & $InteractiveHomeInvoker }
+            else { Invoke-DuoForgeInteractiveHome }
         }
         else {
             Write-DuoForgeHelp
@@ -185,8 +188,8 @@ function Invoke-DuoForgeCliCoreInternal {
                 elseif ([string]$run.state.status -eq 'PAUSED_QUOTA') { Write-Host '구독 한도가 회복되고 구독 로그인이 유효한 뒤 재개해 주세요. API 과금 방식으로 자동 전환하지 않습니다.' -ForegroundColor Yellow }
                 elseif ([string]$run.state.status -eq 'BLOCKED_PREFLIGHT') { Write-Host 'doctor와 공급자 구독 로그인을 다시 확인한 뒤 재개해 주세요.' -ForegroundColor Yellow }
                 elseif ([string]$run.state.status -eq 'PAUSED_USER') { Write-Host '마지막 완료 체크포인트부터 재개할 수 있습니다.' -ForegroundColor Yellow }
-                Write-Host ("Codex 남은 기본 단계 {0}, 추가 호출 최악 {1}" -f $budget.providers.codex.plannedRemaining, $budget.providers.codex.maximumAdditionalCalls)
-                Write-Host ("Claude 남은 기본 단계 {0}, 추가 호출 최악 {1}" -f $budget.providers.claude.plannedRemaining, $budget.providers.claude.maximumAdditionalCalls)
+                Write-Host (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Codex' -ProviderBudget $budget.providers.codex)
+                Write-Host (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Claude' -ProviderBudget $budget.providers.claude)
                 Write-Host '실제 구독 기반 CLI 호출을 시작하려면 --live를 추가해 다시 실행해 주세요.' -ForegroundColor Yellow
                 return
             }
@@ -199,7 +202,8 @@ function Invoke-DuoForgeCliCoreInternal {
             $selections = Get-DuoForgeRunProviderSelectionsInternal -RunDirectory ([string]$run.runDirectory)
             Write-Host '선택한 스냅샷 내용이 Codex와 Claude에 전송됩니다.' -ForegroundColor Yellow
             Write-DuoForgeProviderSelectionSummary -ProviderSelections $selections
-            Write-Host ("Codex 추가 호출 최악: {0}, Claude 추가 호출 최악: {1}" -f $budget.providers.codex.maximumAdditionalCalls, $budget.providers.claude.maximumAdditionalCalls) -ForegroundColor Yellow
+            Write-Host (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Codex' -ProviderBudget $budget.providers.codex) -ForegroundColor Yellow
+            Write-Host (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Claude' -ProviderBudget $budget.providers.claude) -ForegroundColor Yellow
             $confirmation = ([string](& $readInput '실제 공급자 호출을 시작하려면 LIVE를 입력하세요')).Trim()
             if ($confirmation -cne 'LIVE') { Write-Host '라이브 실행을 취소했습니다.'; return }
             $result = if ($null -ne $ResumeInvoker) { & $ResumeInvoker $runId $workspace $true } else { Invoke-DuoForgeResumeWithProgressInternal -RunId $runId -ResultsRoot $workspace -WaitForAcknowledgement -ReturnTarget shell }
@@ -278,6 +282,7 @@ function Invoke-DuoForgeCli {
     [CmdletBinding()]
     param([string[]]$Arguments = @())
 
+    if ($null -eq $Arguments) { $Arguments = @() }
     try {
         return Invoke-DuoForgeCliCoreInternal -Arguments $Arguments
     }

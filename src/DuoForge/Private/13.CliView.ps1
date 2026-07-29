@@ -75,6 +75,20 @@ function Write-DuoForgeProviderSelectionSummary {
     }
 }
 
+function Format-DuoForgeRemainingCallBudgetLineInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$ProviderLabel,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$ProviderBudget
+    )
+
+    return ('{0} 남은 호출: 기본 {1}회, 재시도 최대 {2}회, 총 최대 {3}회' -f `
+        $ProviderLabel,
+        [int]$ProviderBudget.baseCallsRemaining,
+        [int]$ProviderBudget.retryBudgetRemaining,
+        [int]$ProviderBudget.maximumPlannedAdditionalCalls)
+}
+
 function Write-DuoForgeExecutionPlan {
     [CmdletBinding()]
     param([Parameter(Mandatory)][System.Collections.IDictionary]$Validation)
@@ -106,7 +120,8 @@ function Write-DuoForgeExecutionPlan {
     }
     foreach ($provider in @('codex', 'claude')) {
         $providerPlan = $Validation.executionPlan.providers[$provider]
-        Write-Host ('{0} 호출: 기본 {1}, 재시도 예산 {2}, 최악 {3}/{4}' -f $provider, $providerPlan.baseCalls, $providerPlan.retryBudget, $providerPlan.maximumCalls, $providerPlan.limit)
+        $providerLabel = if ($provider -eq 'codex') { 'Codex' } else { 'Claude' }
+        Write-Host ('{0} 호출: 기본 {1}회, 재시도 최대 {2}회, 총 최대 {3}회 (한도 {4}회)' -f $providerLabel, $providerPlan.baseCalls, $providerPlan.retryBudget, $providerPlan.maximumCalls, $providerPlan.limit)
     }
     Write-Host '선택한 입력 내용은 두 모델 공급자에게 전송될 수 있습니다.' -ForegroundColor Yellow
     Write-Host 'start는 검증된 스냅샷만 만들며 모델을 호출하지 않습니다. 이후 resume --live에서 다시 확인하고 호출합니다.' -ForegroundColor Yellow
@@ -114,13 +129,35 @@ function Write-DuoForgeExecutionPlan {
 
 function Write-DuoForgeIssueList {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][object[]]$Issues)
+    param([AllowEmptyCollection()][Parameter(Mandatory)][object[]]$Issues)
 
     if ($Issues.Count -eq 0) {
         Write-Host '등록된 쟁점이 없습니다.'
         return
     }
-    $Issues | Select-Object issueId, severity, blocking, resolutionStatus, claim | Format-Table -Wrap -AutoSize | Out-Host
+
+    $rows = foreach ($issue in $Issues) {
+        if ($issue -is [System.Collections.IDictionary]) {
+            [pscustomobject][ordered]@{
+                issueId = $issue['issueId']
+                severity = $issue['severity']
+                blocking = $issue['blocking']
+                resolutionStatus = $issue['resolutionStatus']
+                claim = $issue['claim']
+            }
+        }
+        else {
+            [pscustomobject][ordered]@{
+                issueId = $issue.issueId
+                severity = $issue.severity
+                blocking = $issue.blocking
+                resolutionStatus = $issue.resolutionStatus
+                claim = $issue.claim
+            }
+        }
+    }
+
+    $rows | Format-Table -Wrap -AutoSize | Out-Host
 }
 
 function Write-DuoForgeExplanationRecords {

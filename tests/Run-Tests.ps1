@@ -666,6 +666,14 @@ try {
         Assert-True ($null -eq $missingGraphProgress.latest)
         Assert-Equal $missingGraphBudget.providers.codex.plannedRemaining 6
         Assert-Equal $missingGraphBudget.providers.claude.plannedRemaining 6
+        Assert-Equal $missingGraphBudget.providers.codex.baseCallsRemaining 6
+        Assert-Equal $missingGraphBudget.providers.codex.retryBudgetRemaining 6
+        Assert-Equal $missingGraphBudget.providers.codex.maximumPlannedAdditionalCalls 12
+        $budgetLine = & $module {
+            param($providerBudget)
+            Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Codex' -ProviderBudget $providerBudget
+        } $missingGraphBudget.providers.codex
+        Assert-Equal $budgetLine 'Codex 남은 호출: 기본 6회, 재시도 최대 6회, 총 최대 12회'
 
         $graph = & $module { param($directory) Initialize-DuoForgeStageGraph -RunDirectory $directory } $run.runDirectory
         Assert-Equal $graph.schemaVersion 1
@@ -1420,6 +1428,51 @@ try {
         Assert-Equal $completion.status 'AWAITING_USER'
     }
 
+    Test-Case '쟁점 목록은 일반 객체와 ordered dictionary의 값과 claim을 표시하고 빈 목록을 안내한다' {
+        $rendered = & $module {
+            function Out-Host {
+                [CmdletBinding()]
+                param([Parameter(ValueFromPipeline)]$InputObject)
+
+                process { $InputObject }
+            }
+
+            $objectIssues = @([pscustomobject]@{
+                issueId = 'OBJ-001'
+                severity = 'minor'
+                blocking = $false
+                resolutionStatus = 'OPEN'
+                claim = '일반 객체 claim 표시'
+            })
+            $dictionaryIssues = @([ordered]@{
+                issueId = 'DICT-001'
+                severity = 'major'
+                blocking = $true
+                resolutionStatus = 'AWAITING_USER'
+                claim = "dictionary claim 첫 줄`ndictionary claim 둘째 줄"
+            })
+            $emptyIssues = @()
+
+            return [ordered]@{
+                objectText = (& { Write-DuoForgeIssueList -Issues $objectIssues } | Out-String -Width 240)
+                dictionaryText = (& { Write-DuoForgeIssueList -Issues $dictionaryIssues } | Out-String -Width 240)
+                emptyText = (& { Write-DuoForgeIssueList -Issues $emptyIssues } 6>&1 | Out-String)
+            }
+        }
+
+        Assert-ContainsText $rendered.objectText 'OBJ-001'
+        Assert-ContainsText $rendered.objectText 'minor'
+        Assert-ContainsText $rendered.objectText 'OPEN'
+        Assert-ContainsText $rendered.objectText '일반 객체 claim 표시'
+        Assert-ContainsText $rendered.dictionaryText 'DICT-001'
+        Assert-ContainsText $rendered.dictionaryText 'major'
+        Assert-ContainsText $rendered.dictionaryText 'True'
+        Assert-ContainsText $rendered.dictionaryText 'AWAITING_USER'
+        Assert-ContainsText $rendered.dictionaryText 'dictionary claim 첫 줄'
+        Assert-ContainsText $rendered.dictionaryText 'dictionary claim 둘째 줄'
+        Assert-ContainsText $rendered.emptyText '등록된 쟁점이 없습니다.'
+    }
+
     Test-Case '인증 파서는 개인정보와 원문 비밀값을 결과에서 제거한다' {
         $claudeRaw = '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"person@example.com","orgId":"secret-org","subscriptionType":"pro"}'
         $claude = ConvertFrom-DuoForgeClaudeAuthStatus -Text $claudeRaw -ExitCode 0
@@ -1770,6 +1823,7 @@ try {
             $partial.latest.adoptionCounts = [ordered]@{ ACCEPTED = 0; PARTIALLY_ACCEPTED = 0; REJECTED = 1; DEFERRED = 0 }
             $sparseActionSummary = Get-DuoForgeProgressActionSummaryInternal -Record $partial.latest
             $active = @(New-DuoForgeProgressFrameInternal -Snapshot $partial -Width 72 -Height 20 -ViewState ([ordered]@{ providerElapsedSeconds = 4 }))
+            $pauseRequested = @(New-DuoForgeProgressFrameInternal -Snapshot $partial -Width 100 -Height 30 -ViewState ([ordered]@{ providerElapsedSeconds = 4; pauseRequestStatus = 'requested' }))
             $targetSnapshot = ConvertTo-DuoForgeHashtable -InputObject $snapshot
             $targetSnapshot.mode = 'dual-document'
             $targetSnapshot.recentCommitted[0].targetDocumentId = 'A'
@@ -1835,6 +1889,7 @@ try {
                 wide = $wide
                 narrow = $narrow
                 active = $active
+                pauseRequested = $pauseRequested
                 target = $targetFrame
                 bothTarget = $bothTargetFrame
                 merge = $mergeFrame
@@ -1878,6 +1933,8 @@ try {
         Assert-ContainsText ($rendered.narrow -join "`n") '쟁점 전체'
         Assert-ContainsText ($rendered.narrow -join "`n") 'Enter 키를 누르면'
         Assert-ContainsText ($rendered.active -join "`n") '응답 수신 · 구조 검증 중'
+        Assert-ContainsText ($rendered.active -join "`n") '[P] 현재 호출 완료 후 안전하게 일시정지'
+        Assert-ContainsText ($rendered.pauseRequested -join "`n") '일시정지 요청됨 · 현재 호출 완료 후 다음 호출 전에 멈춥니다.'
         Assert-ContainsText ($rendered.active -join "`n") '현재  ● Claude · 독립 초안 · 문서 A'
         Assert-ContainsText ($rendered.active -join "`n") '최근 확정  ✓ Codex · R2 최종 검증 · 문서 B'
         Assert-ContainsText ($rendered.active -join "`n") '검증 요약'
@@ -1925,6 +1982,38 @@ try {
         } $run.runDirectory
         Assert-NotContainsText $tampered.latestSummary '변조된 확정 요약'
         Assert-True ($tampered.latestStepKey -ne $tampered.finalStepKey)
+    }
+
+    Test-Case '라이브 진행판의 P 키는 기존 안전 일시정지를 한 번만 요청한다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'progress-pause-key\input\brief.md')
+        $workspace = Join-Path $tempRoot 'progress-pause-key\results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $control = [ordered]@{ keyReads = 0; requests = 0; view = $null }
+        $screen = & $module {
+            param($directory, $state)
+            $keyReader = { $state.keyReads++; return 'p' }.GetNewClosure()
+            $runId = Split-Path -Leaf $directory
+            $resultsRoot = Split-Path -Parent $directory
+            $requestPauseCommand = Get-Command -Name 'Request-DuoForgePauseInternal' -CommandType Function -ErrorAction Stop
+            $pauseRequester = {
+                $state.requests++
+                & $requestPauseCommand -RunId $runId -ResultsRoot $resultsRoot
+            }.GetNewClosure()
+            (& {
+                $state.view = New-DuoForgeProgressViewInternal -RunDirectory $directory -Mode log -KeyReader $keyReader -PauseRequester $pauseRequester
+                Invoke-DuoForgeProgressObserverInternal -Observer $state.view.observer -Type 'PROVIDER_TICK' -RunDirectory $directory -Data ([ordered]@{ elapsedSeconds = 1 })
+            } 6>&1 | Out-String)
+        } $run.runDirectory $control
+        Assert-Equal $control.keyReads 1
+        Assert-Equal $control.requests 1
+        Assert-Equal $control.view.pauseRequestStatus 'requested'
+        Assert-True (-not [string]::IsNullOrWhiteSpace([string]$control.view.pauseRequestId))
+        $pauseRecord = Get-Content -LiteralPath (Join-Path $run.runDirectory 'control\pause-request.json') -Raw | ConvertFrom-Json -Depth 20
+        Assert-Equal $pauseRecord.status 'REQUESTED'
+        Assert-Equal $pauseRecord.requestId $control.view.pauseRequestId
+        Assert-ContainsText $screen '일시정지를 요청했습니다. 현재 호출 완료 후 다음 호출 전에 멈춥니다.'
     }
 
     Test-Case '확정 피드는 단계 그래프 순서의 유효한 최근 3건을 선택하고 손상 항목을 이전 결과로 채운다' {
@@ -2013,7 +2102,7 @@ try {
         Assert-ContainsText ([string]$feed3Headers[2]) '최종 검증'
         Assert-ContainsText $feed.frameCounts['3'].text '현재  완료'
         Assert-ContainsText $feed.frameCounts['3'].text '쟁점 전체'
-        Assert-ContainsText $feed.frameCounts['3'].text '확정된 구조화 결과만 표시합니다'
+        Assert-ContainsText $feed.frameCounts['3'].text '[P] 현재 호출 완료 후 안전하게 일시정지'
     }
 
     Test-Case '자연어 행동 집계는 새 쟁점과 검토 응답 및 실제 편집을 분리하고 0건을 생략한다' {
@@ -4100,6 +4189,10 @@ Setext 결론
         Assert-True ($allowed.executionPlan.contextBatchCount -gt 0)
         $planText = & $module { param($validation) (& { Write-DuoForgeExecutionPlan -Validation $validation } 6>&1 | Out-String) } $allowed
         Assert-ContainsText $planText '문맥 배치:'
+        Assert-ContainsText $planText 'Codex 호출: 기본 '
+        Assert-ContainsText $planText '재시도 최대 '
+        Assert-ContainsText $planText '총 최대 '
+        Assert-NotContainsText $planText '최악'
         $run = New-DuoForgeRun -ValidationResult $allowed
         $contextPlan = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'inputs\context-plan.json') | ConvertFrom-Json -Depth 100
         Assert-Equal @($contextPlan.batches).Count $allowed.contextPlan.selectedBatchCount

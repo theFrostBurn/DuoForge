@@ -237,7 +237,8 @@ function Invoke-DuoForgeInteractiveLiveResume {
     $selections = Get-DuoForgeRunProviderSelectionsInternal -RunDirectory ([string]$Run.runDirectory)
     Write-Host '선택한 스냅샷 내용이 Codex와 Claude에 전송됩니다.' -ForegroundColor Yellow
     Write-DuoForgeProviderSelectionSummary -ProviderSelections $selections
-    Write-Host ("Codex 추가 호출 최악: {0}, Claude 추가 호출 최악: {1}" -f $budget.providers.codex.maximumAdditionalCalls, $budget.providers.claude.maximumAdditionalCalls) -ForegroundColor Yellow
+    Write-Host (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Codex' -ProviderBudget $budget.providers.codex) -ForegroundColor Yellow
+    Write-Host (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Claude' -ProviderBudget $budget.providers.claude) -ForegroundColor Yellow
     $confirmation = if ($null -ne $InputReader) { [string](& $InputReader '실제 공급자 호출을 시작하려면 LIVE를 입력하세요') } else { Read-Host '실제 공급자 호출을 시작하려면 LIVE를 입력하세요' }
     $confirmation = $confirmation.Trim()
     if ($confirmation -cne 'LIVE') { Write-Host '라이브 실행을 취소했습니다.'; return }
@@ -512,11 +513,21 @@ function Invoke-DuoForgeInteractiveRun {
 
 function Invoke-DuoForgeInteractiveHome {
     [CmdletBinding()]
-    param()
+    param(
+        [scriptblock]$SetupInvoker,
+        [scriptblock]$RunsInvoker,
+        [scriptblock]$InputReader
+    )
 
-    $setupReport = Invoke-DuoForgeInteractiveSetup
+    $invokeSetup = {
+        param([bool]$ShowReadyReport)
+        if ($null -ne $SetupInvoker) { return & $SetupInvoker $ShowReadyReport }
+        if ($ShowReadyReport) { return Invoke-DuoForgeInteractiveSetup -ShowReadyReport }
+        return Invoke-DuoForgeInteractiveSetup
+    }
+    $setupReport = & $invokeSetup $false
     while ($true) {
-        $runs = @(Get-DuoForgeRunsInternal)
+        $runs = @(if ($null -ne $RunsInvoker) { & $RunsInvoker } else { Get-DuoForgeRunsInternal })
         $activeCount = @($runs | Where-Object { $_.status -notin @('COMPLETED', 'COMPLETED_PARTIAL', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED') }).Count
         Write-Host ''
         Write-Host 'DuoForge'
@@ -526,11 +537,11 @@ function Invoke-DuoForgeInteractiveHome {
         Write-Host '[3] 완료된 결과 보기'
         Write-Host '[4] 환경 진단, 로그인 및 설정'
         Write-Host '[Q] 종료'
-        $choice = (Read-Host '선택').Trim()
+        $choice = $(if ($null -ne $InputReader) { [string](& $InputReader '선택') } else { [string](Read-Host '선택') }).Trim()
         switch -Regex ($choice) {
             '^(1)$' {
                 if (-not [bool]$setupReport.readyForDocumentModes) {
-                    $setupReport = Invoke-DuoForgeInteractiveSetup
+                    $setupReport = & $invokeSetup $false
                     if (-not [bool]$setupReport.readyForDocumentModes) { Write-Host '두 구독 실행 환경이 준비되기 전에는 새 작업을 시작할 수 없습니다.' -ForegroundColor Yellow; continue }
                 }
                 Invoke-DuoForgeInteractiveNew
@@ -547,7 +558,7 @@ function Invoke-DuoForgeInteractiveHome {
                 if ($null -ne $selected) { Invoke-DuoForgeInteractiveRun -RunRecord $selected }
             }
             '^(4)$' {
-                $setupReport = Invoke-DuoForgeInteractiveSetup -ShowReadyReport
+                $setupReport = & $invokeSetup $true
             }
             '^(Q|q)$' { return }
             default { Write-Host '올바른 항목을 선택해 주세요.' -ForegroundColor Yellow }

@@ -101,6 +101,13 @@ Test-Case '진단 writer는 run 파일에 허용 목록 스키마만 UTF-8 JSONL
     Assert-Equal $records[0].diagnosticId $written.diagnosticId
     Assert-Equal $records[0].schemaVersion 1
     Assert-Equal $records[0].publicSummary '단계 실행 중 예상하지 못한 오류가 발생했습니다.'
+    $attachedCode = & $module {
+        param($diagnostic)
+        $exception = [InvalidOperationException]::new('DIAG-EXCEPTION-MESSAGE-CANARY')
+        Add-DuoForgeDiagnosticMetadataToExceptionInternal -Exception $exception -Diagnostic $diagnostic
+        return [string]$exception.Data['DuoForgeCode']
+    } $written
+    Assert-Equal $attachedCode 'DF-STAGE-UNEXPECTED'
     $json = $records[0] | ConvertTo-Json -Depth 100 -Compress
     foreach ($canary in $diagnosticCanaries) { Assert-NotContainsText $json $canary }
 }
@@ -410,6 +417,45 @@ Test-Case '메뉴 복귀 화면과 명시적 resume --live JSON은 같은 진단
     Assert-Equal $cliResult.code $fake.code
     Assert-Equal $cliResult.diagnosticId $fake.diagnosticId
     Assert-Equal $cliResult.diagnosticsPath $fake.diagnosticsPath
+}
+
+Test-Case '무인자 CLI는 대화형 호스트에서 홈 메뉴를 열고 종료할 수 있다' {
+    $screen = & $module {
+        $homeInvoker = {
+            Invoke-DuoForgeInteractiveHome `
+                -SetupInvoker { [ordered]@{ readyForDocumentModes = $true } } `
+                -RunsInvoker { @() } `
+                -InputReader { param($prompt) 'Q' }
+        }
+        (& {
+            Invoke-DuoForgeCliCoreInternal -Arguments $null -InteractiveHostProbe { $true } -InteractiveHomeInvoker $homeInvoker
+        } 6>&1 | Out-String)
+    }
+
+    Assert-ContainsText $screen 'DuoForge'
+    Assert-ContainsText $screen '[1] 새 작업 시작'
+    Assert-ContainsText $screen '[Q] 종료'
+}
+
+Test-Case '무인자 CLI 엔트리포인트는 오류나 진단 파일 없이 안전하게 시작한다' {
+    $localRoot = Join-Path $tempRoot 'diagnostic-entrypoint-no-args'
+    $entrypoint = Join-Path $projectRoot 'duoforge.ps1'
+    $process = & $module {
+        param($scriptPath, $dataRoot)
+        Invoke-DuoForgeProcess -CommandName 'pwsh' `
+            -Arguments @('-NoLogo', '-NoProfile', '-File', $scriptPath) `
+            -EnvironmentOverrides ([ordered]@{ DUOFORGE_DATA_ROOT = $dataRoot }) `
+            -TimeoutSeconds 30
+    } $entrypoint $localRoot
+
+    Assert-True ([bool]$process.started)
+    Assert-Equal ([int]$process.exitCode) 0
+    $screen = @([string]$process.stdout, [string]$process.stderr) -join "`n"
+    Assert-ContainsText $screen 'DuoForge'
+    Assert-NotContainsText $screen 'DF-UNEXPECTED'
+    Assert-NotContainsText $screen 'DF-CLI-UNEXPECTED'
+    $diagnostics = @(Get-ChildItem -LiteralPath $localRoot -Recurse -File -Filter 'diagnostics.jsonl' -ErrorAction SilentlyContinue)
+    Assert-Equal $diagnostics.Count 0
 }
 
 Test-Case 'CLI 엔트리포인트 오류 화면은 고정 요약과 진단 참조만 공개한다' {

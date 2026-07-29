@@ -281,12 +281,15 @@ function Add-DuoForgeDiagnosticMetadataToExceptionInternal {
     )
 
     try {
+        $record = Get-DuoForgeObjectValue -Object $Diagnostic -Name 'record'
+        if (-not $Exception.Data.Contains('DuoForgeCode')) {
+            $Exception.Data['DuoForgeCode'] = [string](Get-DuoForgeObjectValue -Object $record -Name 'code' -Default 'DF-UNEXPECTED')
+        }
         $Exception.Data['DuoForgeDiagnosticId'] = [string]$Diagnostic.diagnosticId
         $Exception.Data['DuoForgeDiagnosticsLocation'] = [string]$Diagnostic.location
         $Exception.Data['DuoForgeDiagnosticsRelativePath'] = [string]$Diagnostic.relativePath
         $Exception.Data['DuoForgeDiagnosticsPath'] = [string]$Diagnostic.diagnosticsPath
         $Exception.Data['DuoForgeDiagnosticWarningCode'] = [string]$Diagnostic.warningCode
-        $record = Get-DuoForgeObjectValue -Object $Diagnostic -Name 'record'
         $Exception.Data['DuoForgePublicSummary'] = [string](Get-DuoForgeObjectValue -Object $record -Name 'publicSummary' -Default (Get-DuoForgeDiagnosticPublicSummaryInternal -Code ([string]$Exception.Data['DuoForgeCode'])))
     }
     catch { }

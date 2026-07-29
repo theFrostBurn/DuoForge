@@ -654,11 +654,18 @@ function New-DuoForgeProgressFrameInternal {
     else {
         & $addLine ("쟁점 전체 {0} · 미해결 {1} · 차단 {2}" -f $Snapshot.issueCount, $Snapshot.openIssueCount, $Snapshot.blockingIssueCount)
     }
+    $pauseRequestStatus = if ($null -eq $ViewState) { '' } else { [string](Get-DuoForgeObjectValue -Object $ViewState -Name 'pauseRequestStatus' -Default '') }
     $footer = if ($null -ne $ViewState -and [bool](Get-DuoForgeObjectValue -Object $ViewState -Name 'waitForInput' -Default $false)) {
         if ([string](Get-DuoForgeObjectValue -Object $ViewState -Name 'returnTarget' -Default 'shell') -eq 'menu') { 'Enter 키를 누르면 작업 메뉴로 돌아갑니다.' } else { 'Enter 키를 누르면 셸 프롬프트로 돌아갑니다.' }
     }
+    elseif ($pauseRequestStatus -eq 'requested') {
+        '일시정지 요청됨 · 현재 호출 완료 후 다음 호출 전에 멈춥니다.'
+    }
+    elseif ($pauseRequestStatus -eq 'failed') {
+        '일시정지 요청을 저장하지 못했습니다 · P 키로 다시 시도하세요.'
+    }
     else {
-        '확정된 구조화 결과만 표시합니다 · 실행 중에는 키 입력을 받지 않습니다.'
+        '[P] 현재 호출 완료 후 안전하게 일시정지'
     }
     & $addLine $footer
 
@@ -801,11 +808,67 @@ function Invoke-DuoForgeProgressObserverInternal {
     catch { Write-Verbose 'DuoForge 진행 관찰자 오류를 무시했습니다.' }
 }
 
+function Test-DuoForgeProgressPauseKeyInternal {
+    [CmdletBinding()]
+    param([scriptblock]$KeyReader)
+
+    if ($null -ne $KeyReader) {
+        try { return [string](& $KeyReader) -ieq 'P' }
+        catch { return $false }
+    }
+
+    try {
+        $pausePressed = $false
+        while ([Console]::KeyAvailable) {
+            $key = [Console]::ReadKey($true)
+            if ($key.Key -eq [ConsoleKey]::P) { $pausePressed = $true }
+        }
+        return $pausePressed
+    }
+    catch {
+        return $false
+    }
+}
+
+function Invoke-DuoForgeProgressControlInputInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$View,
+        [scriptblock]$KeyReader,
+        [scriptblock]$PauseRequester
+    )
+
+    if ($null -eq $PauseRequester -or [string]$View.pauseRequestStatus -eq 'requested') { return }
+    if (-not (Test-DuoForgeProgressPauseKeyInternal -KeyReader $KeyReader)) { return }
+
+    try {
+        $result = ConvertTo-DuoForgeHashtable -InputObject (& $PauseRequester)
+        $accepted = [bool](Get-DuoForgeObjectValue -Object $result -Name 'requested' -Default $false) -or
+            [bool](Get-DuoForgeObjectValue -Object $result -Name 'alreadyRequested' -Default $false) -or
+            [bool](Get-DuoForgeObjectValue -Object $result -Name 'alreadyPaused' -Default $false)
+        if (-not $accepted) { throw 'pause-request-not-accepted' }
+        $View.pauseRequestStatus = 'requested'
+        $View.pauseRequestId = [string](Get-DuoForgeObjectValue -Object $result -Name 'requestId' -Default '')
+        if ([string]$View.mode -eq 'log') {
+            Write-Host '일시정지를 요청했습니다. 현재 호출 완료 후 다음 호출 전에 멈춥니다.' -ForegroundColor Yellow
+        }
+    }
+    catch {
+        $View.pauseRequestStatus = 'failed'
+        $View.pauseRequestId = ''
+        if ([string]$View.mode -eq 'log') {
+            Write-Host '일시정지 요청을 저장하지 못했습니다. P 키로 다시 시도하세요.' -ForegroundColor Red
+        }
+    }
+}
+
 function New-DuoForgeProgressViewInternal {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$RunDirectory,
-        [ValidateSet('auto', 'fullscreen', 'log')][string]$Mode = 'auto'
+        [ValidateSet('auto', 'fullscreen', 'log')][string]$Mode = 'auto',
+        [scriptblock]$KeyReader,
+        [scriptblock]$PauseRequester
     )
 
     $capability = Get-DuoForgeProgressTerminalCapabilityInternal
@@ -821,15 +884,23 @@ function New-DuoForgeProgressViewInternal {
         finalMessage = ''
         waitForInput = $false
         returnTarget = 'shell'
+        pauseRequestStatus = ''
+        pauseRequestId = ''
         closed = $false
     }
+    $convertToHashtableCommand = Get-Command -Name 'ConvertTo-DuoForgeHashtable' -CommandType Function -ErrorAction Stop
+    $getObjectValueCommand = Get-Command -Name 'Get-DuoForgeObjectValue' -CommandType Function -ErrorAction Stop
+    $controlInputCommand = Get-Command -Name 'Invoke-DuoForgeProgressControlInputInternal' -CommandType Function -ErrorAction Stop
+    $writeFrameCommand = Get-Command -Name 'Write-DuoForgeProgressFrameInternal' -CommandType Function -ErrorAction Stop
+    $writeLogCommand = Get-Command -Name 'Write-DuoForgeProgressLogEventInternal' -CommandType Function -ErrorAction Stop
     $observer = {
         param($event)
-        $view.lastEvent = ConvertTo-DuoForgeHashtable -InputObject $event
+        $view.lastEvent = & $convertToHashtableCommand -InputObject $event
         if ([string]$event.type -eq 'STAGE_STARTED') { $view.providerElapsedSeconds = 0 }
-        if ([string]$event.type -eq 'PROVIDER_TICK') { $view.providerElapsedSeconds = [int](Get-DuoForgeObjectValue -Object $event.data -Name 'elapsedSeconds' -Default 0) }
-        if ([string]$view.mode -eq 'fullscreen') { Write-DuoForgeProgressFrameInternal -View $view }
-        else { Write-DuoForgeProgressLogEventInternal -View $view -Event $view.lastEvent }
+        if ([string]$event.type -eq 'PROVIDER_TICK') { $view.providerElapsedSeconds = [int](& $getObjectValueCommand -Object $event.data -Name 'elapsedSeconds' -Default 0) }
+        & $controlInputCommand -View $view -KeyReader $KeyReader -PauseRequester $PauseRequester
+        if ([string]$view.mode -eq 'fullscreen') { & $writeFrameCommand -View $view }
+        else { & $writeLogCommand -View $view -Event $view.lastEvent }
     }.GetNewClosure()
     $view.observer = $observer
 
@@ -905,7 +976,11 @@ function Invoke-DuoForgeResumeWithProgressInternal {
     )
 
     $run = Get-DuoForgeRunInternal -RunId $RunId -ResultsRoot $ResultsRoot
-    $view = New-DuoForgeProgressViewInternal -RunDirectory ([string]$run.runDirectory)
+    $requestPauseCommand = Get-Command -Name 'Request-DuoForgePauseInternal' -CommandType Function -ErrorAction Stop
+    $pauseRequester = {
+        & $requestPauseCommand -RunId $RunId -ResultsRoot $ResultsRoot
+    }.GetNewClosure()
+    $view = New-DuoForgeProgressViewInternal -RunDirectory ([string]$run.runDirectory) -PauseRequester $pauseRequester
     $view.returnTarget = $ReturnTarget
     $result = $null
     $errorDiagnostic = $null
