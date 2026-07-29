@@ -159,45 +159,40 @@ function Invoke-DuoForgeProcess {
         [scriptblock]$OnTick
     )
 
-    $invocation = if ($null -ne $CommandInvocation) { $CommandInvocation } else { Resolve-DuoForgeCommandInvocation -CommandName $CommandName }
-    if ($null -eq $invocation) {
-        return [ordered]@{
-            started = $false
-            exitCode = $null
-            timedOut = $false
-            stdout = ''
-            stderr = ''
-            errorCategory = 'command-not-found'
-        }
-    }
-
-    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-    $startInfo.FileName = $invocation.fileName
-    $startInfo.WorkingDirectory = [System.IO.Path]::GetFullPath($WorkingDirectory)
-    $startInfo.UseShellExecute = $false
-    $startInfo.CreateNoWindow = -not $Interactive
-    $startInfo.RedirectStandardOutput = -not $Interactive
-    $startInfo.RedirectStandardError = -not $Interactive
-    $startInfo.RedirectStandardInput = -not $Interactive -and $PSBoundParameters.ContainsKey('StandardInput')
-    if (-not $Interactive) {
-        $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
-        $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
-    }
-    $environmentParameters = @{ StartInfo = $startInfo }
-    if ($PSBoundParameters.ContainsKey('EnvironmentAllowList')) { $environmentParameters['EnvironmentAllowList'] = $EnvironmentAllowList }
-    if ($PSBoundParameters.ContainsKey('EnvironmentOverrides')) { $environmentParameters['EnvironmentOverrides'] = $EnvironmentOverrides }
-    Set-DuoForgeProcessEnvironmentInternal @environmentParameters
-
-    foreach ($argument in @($invocation.prefixArguments) + @($Arguments)) {
-        $startInfo.ArgumentList.Add([string]$argument)
-    }
-
-    $process = [System.Diagnostics.Process]::new()
-    $process.StartInfo = $startInfo
+    $process = $null
+    $started = $false
     try {
+        $invocation = if ($null -ne $CommandInvocation) { $CommandInvocation } else { Resolve-DuoForgeCommandInvocation -CommandName $CommandName }
+        if ($null -eq $invocation) {
+            return [ordered]@{ started = $false; exitCode = $null; timedOut = $false; stdout = ''; stderr = ''; errorCategory = 'command-not-found'; exceptionType = ''; hresult = $null; stdoutBytes = 0L; stderrBytes = 0L }
+        }
+
+        $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = [string](Get-DuoForgeObjectValue -Object $invocation -Name 'fileName')
+        $startInfo.WorkingDirectory = [System.IO.Path]::GetFullPath($WorkingDirectory)
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = -not $Interactive
+        $startInfo.RedirectStandardOutput = -not $Interactive
+        $startInfo.RedirectStandardError = -not $Interactive
+        $startInfo.RedirectStandardInput = -not $Interactive -and $PSBoundParameters.ContainsKey('StandardInput')
+        if (-not $Interactive) {
+            $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+            $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+        }
+        $environmentParameters = @{ StartInfo = $startInfo }
+        if ($PSBoundParameters.ContainsKey('EnvironmentAllowList')) { $environmentParameters['EnvironmentAllowList'] = $EnvironmentAllowList }
+        if ($PSBoundParameters.ContainsKey('EnvironmentOverrides')) { $environmentParameters['EnvironmentOverrides'] = $EnvironmentOverrides }
+        Set-DuoForgeProcessEnvironmentInternal @environmentParameters
+
+        foreach ($argument in @(Get-DuoForgeObjectValue -Object $invocation -Name 'prefixArguments' -Default @()) + @($Arguments)) {
+            $startInfo.ArgumentList.Add([string]$argument)
+        }
+
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $startInfo
         $started = $process.Start()
         if (-not $started) {
-            return [ordered]@{ started = $false; exitCode = $null; timedOut = $false; stdout = ''; stderr = ''; errorCategory = 'start-failed' }
+            return [ordered]@{ started = $false; exitCode = $null; timedOut = $false; stdout = ''; stderr = ''; errorCategory = 'start-failed'; exceptionType = ''; hresult = $null; stdoutBytes = 0L; stderrBytes = 0L }
         }
 
         $stdoutTask = if ($Interactive) { $null } else { $process.StandardOutput.ReadToEndAsync() }
@@ -218,7 +213,7 @@ function Invoke-DuoForgeProcess {
                 if ($tickSecond -ne $lastTickSecond) {
                     $lastTickSecond = $tickSecond
                     try { $null = & $OnTick $waitStopwatch.Elapsed }
-                    catch { Write-Verbose ("DuoForge 프로세스 진행 콜백 오류를 무시했습니다: {0}" -f $_.Exception.Message) }
+                    catch { Write-Verbose 'DuoForge 프로세스 진행 콜백 오류를 무시했습니다.' }
                 }
             }
         }
@@ -228,28 +223,55 @@ function Invoke-DuoForgeProcess {
             $process.WaitForExit()
         }
 
+        $stdout = if ($Interactive) { '' } else { $stdoutTask.GetAwaiter().GetResult() }
+        $stderr = if ($Interactive) { '' } else { $stderrTask.GetAwaiter().GetResult() }
+        $exitCode = if ($completed) { $process.ExitCode } else { $null }
         return [ordered]@{
             started = $true
-            exitCode = if ($completed) { $process.ExitCode } else { $null }
+            exitCode = $exitCode
             timedOut = -not $completed
-            stdout = if ($Interactive) { '' } else { $stdoutTask.GetAwaiter().GetResult() }
-            stderr = if ($Interactive) { '' } else { $stderrTask.GetAwaiter().GetResult() }
-            errorCategory = if ($completed) { $null } else { 'timeout' }
-            commandSource = [string]$invocation.source
+            stdout = $stdout
+            stderr = $stderr
+            errorCategory = if (-not $completed) { 'timeout' } elseif ([int]$exitCode -ne 0) { 'nonzero-exit' } else { $null }
+            commandSource = [string](Get-DuoForgeObjectValue -Object $invocation -Name 'source')
+            exceptionType = ''
+            hresult = $null
+            stdoutBytes = [int64][System.Text.UTF8Encoding]::new($false).GetByteCount($stdout)
+            stderrBytes = [int64][System.Text.UTF8Encoding]::new($false).GetByteCount($stderr)
         }
     }
     catch {
         return [ordered]@{
-            started = $false
+            started = $started
             exitCode = $null
             timedOut = $false
             stdout = ''
             stderr = ''
             errorCategory = 'process-error'
+            exceptionType = $_.Exception.GetType().Name
+            hresult = [int64]$_.Exception.HResult
+            stdoutBytes = 0L
+            stderrBytes = 0L
         }
     }
     finally {
-        $process.Dispose()
+        if ($null -ne $process) { $process.Dispose() }
+    }
+}
+
+function Get-DuoForgeSafeProcessMetadataInternal {
+    [CmdletBinding()]
+    param([AllowNull()]$ProcessResult)
+
+    return [ordered]@{
+        started = Get-DuoForgeObjectValue -Object $ProcessResult -Name 'started'
+        timedOut = Get-DuoForgeObjectValue -Object $ProcessResult -Name 'timedOut'
+        exitCode = Get-DuoForgeObjectValue -Object $ProcessResult -Name 'exitCode'
+        errorCategory = [string](Get-DuoForgeObjectValue -Object $ProcessResult -Name 'errorCategory')
+        exceptionType = [string](Get-DuoForgeObjectValue -Object $ProcessResult -Name 'exceptionType')
+        hresult = Get-DuoForgeObjectValue -Object $ProcessResult -Name 'hresult'
+        stdoutBytes = Get-DuoForgeObjectValue -Object $ProcessResult -Name 'stdoutBytes'
+        stderrBytes = Get-DuoForgeObjectValue -Object $ProcessResult -Name 'stderrBytes'
     }
 }
 

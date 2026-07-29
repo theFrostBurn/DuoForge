@@ -14,6 +14,18 @@
 
 ## 1. 이번에 완료한 작업
 
+### 실행별 안전 진단과 지원 상관관계 — 완료
+
+오류가 있는 실행은 run의 `diagnostics.jsonl`에 안전한 허용 목록 레코드를 append하고, run 부재·쓰기 실패 시 local 진단 디렉터리로 폴백한다. 단계·공급자/process·중단 복구·최종 renderer 오류의 `diagnosticId`를 단계 상태, 이벤트, observer와 반환 결과에 연결했으며 모든 사용자 표면이 같은 DF 코드와 writer의 실제 최종 경로를 표시한다.
+
+구현 결과:
+
+1. 정상 실행에는 빈 진단 파일이나 미사용 `logs\`를 만들지 않는다. 기존 실행·fixture의 `logs\`는 삭제·재작성하지 않는다.
+2. writer 이중 실패는 원래 오류를 가리지 않고 `DF-DIAGNOSTIC-WRITE` 경고만 남긴다.
+3. 원문 stdout·stderr, 프롬프트·문서·컨텍스트·모델 결과, 명령·환경·인증 값, 절대 입력 경로와 원시 예외 데이터는 진단·이벤트·화면에 기록하지 않는다.
+4. run/local 폴백, process 메타데이터, 다중 재시도, interrupted recovery, renderer, 고정형·누적 UI, 메뉴·CLI와 보안 canary를 PowerShell 7 오프라인 회귀로 고정했다.
+5. `114개 통과, 0개 실패`, 변경 PowerShell parser 검사, 생성된 모든 진단 행의 `ConvertFrom-Json -Depth 100` 재파싱을 완료했다. 실제 공급자 호출은 수행하지 않았다.
+
 ### TUI 토론 관전 피드 1차 — 완료
 
 고정형 진행판이 장벽과 현재 작업에 더해 검증된 최근 확정 결과 최대 3건을 이어서 보여주도록 표시 계층을 개선했다. 공급자 실행 계약은 바꾸지 않았다.
@@ -59,6 +71,7 @@
 
 | 항목 | 상태 | 현재 결과 | 검증 근거 |
 |---|---|---|---|
+| 실행별 안전 진단과 지원 상관관계 | 완료 | run별 JSONL, local 폴백, 고정 공개 요약, 단계·이벤트·observer·result ID 연결, 동일 UI 참조, 신규 `logs\` 부재와 레거시 불변 | `README.md`의 실행 데이터, PowerShell 7 오프라인 회귀 114개 |
 | 고정형 토론 진행판과 관전 피드 1차 | 완료 | 실제 장벽, 현재 공급자·단계·대상 문서, heartbeat, 검증된 최근 확정 최대 3건과 분리된 자연어 행동 집계, 실패·재시도 상태와 안전한 누적 로그 폴백 | `README.md`의 고정형 토론 진행판, PowerShell 7 오프라인 회귀 102개 |
 | 의미 기반 대용량 문맥 1차 | 완료 | Markdown 구조 분할, 위치 지도, 추출형 앞뒤 브리지, A/B 균형 부분 커버리지와 schema 1 재개 호환 | `docs/IMPLEMENTATION_PLAN.md` 슬라이스 9, PowerShell 7 오프라인 회귀 100개 |
 

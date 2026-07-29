@@ -155,11 +155,40 @@ $canaries = @('WORKFLOW-V2-DOCUMENT-A', 'WORKFLOW-V2-DOCUMENT-B', '로컬 메모
 foreach ($canary in $canaries) { Assert-LiveInvariant (-not $eventText.Contains($canary, [StringComparison]::Ordinal)) 'DOCUMENT_CONTENT_IN_EVENTS' }
 
 $logsRoot = Join-Path $runDirectory 'logs'
-$logFiles = if (Test-Path -LiteralPath $logsRoot -PathType Container) { @(Get-ChildItem -LiteralPath $logsRoot -Recurse -File -Force) } else { @() }
-foreach ($logFile in $logFiles) {
-    $logText = Get-Content -LiteralPath $logFile.FullName -Raw -Encoding UTF8
-    Assert-LiveInvariant ($logText -notmatch $forbiddenJsonKeyPattern) 'FORBIDDEN_LOG_DATA_KEY'
-    foreach ($canary in $canaries) { Assert-LiveInvariant (-not $logText.Contains($canary, [StringComparison]::Ordinal)) 'DOCUMENT_CONTENT_IN_LOGS' }
+Assert-LiveInvariant (-not (Test-Path -LiteralPath $logsRoot)) 'UNUSED_LOGS_DIRECTORY_CREATED'
+$diagnosticPath = Join-Path $runDirectory 'diagnostics.jsonl'
+$diagnosticRows = @()
+if (Test-Path -LiteralPath $diagnosticPath -PathType Leaf) {
+    $diagnosticRows = @(
+        Get-Content -LiteralPath $diagnosticPath -Encoding UTF8 |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object { $_ | ConvertFrom-Json -Depth 100 }
+    )
+    $allowedDiagnosticKeys = @('schemaVersion', 'at', 'diagnosticId', 'recordType', 'scope', 'code', 'category', 'phase', 'severity', 'publicSummary', 'run', 'step', 'process', 'recovery', 'environment', 'stack') | Sort-Object
+    $allowedDiagnosticNestedKeys = [ordered]@{
+        run = @('runId', 'workflowVersion', 'status', 'lastCompletedStage')
+        step = @('stepKey', 'provider', 'stage', 'targetDocumentId', 'round', 'attempt')
+        process = @('started', 'timedOut', 'exitCode', 'errorCategory', 'exceptionType', 'hresult', 'stdoutBytes', 'stderrBytes')
+        recovery = @('retryable', 'retryMode', 'scheduled')
+        environment = @('duoforgeVersion', 'powershellVersion', 'powershellEdition', 'osDescription', 'processArchitecture', 'providerVersions')
+    }
+    foreach ($row in $diagnosticRows) {
+        Assert-LiveInvariant ((@($row.PSObject.Properties.Name | Sort-Object) -join ',') -ceq ($allowedDiagnosticKeys -join ',')) 'DIAGNOSTIC_TOP_LEVEL_ALLOWLIST'
+        foreach ($entry in $allowedDiagnosticNestedKeys.GetEnumerator()) {
+            $actualKeys = @($row.($entry.Key).PSObject.Properties.Name | Sort-Object)
+            $expectedKeys = @($entry.Value | Sort-Object)
+            Assert-LiveInvariant (($actualKeys -join ',') -ceq ($expectedKeys -join ',')) ("DIAGNOSTIC_{0}_ALLOWLIST" -f $entry.Key.ToUpperInvariant())
+        }
+        $providerVersionKeys = @($row.environment.providerVersions.PSObject.Properties.Name | Sort-Object)
+        Assert-LiveInvariant (($providerVersionKeys -join ',') -ceq ((@('codex', 'claude') | Sort-Object) -join ',')) 'DIAGNOSTIC_PROVIDER_VERSIONS_ALLOWLIST'
+        foreach ($frame in @($row.stack)) {
+            $frameKeys = @($frame.PSObject.Properties.Name | Sort-Object)
+            Assert-LiveInvariant (($frameKeys -join ',') -ceq ((@('moduleRelativeFile', 'line', 'function') | Sort-Object) -join ',')) 'DIAGNOSTIC_STACK_ALLOWLIST'
+        }
+        $diagnosticText = $row | ConvertTo-Json -Depth 100 -Compress
+        Assert-LiveInvariant ($diagnosticText -notmatch $forbiddenJsonKeyPattern) 'FORBIDDEN_DIAGNOSTIC_DATA_KEY'
+        foreach ($canary in $canaries) { Assert-LiveInvariant (-not $diagnosticText.Contains($canary, [StringComparison]::Ordinal)) 'DOCUMENT_CONTENT_IN_DIAGNOSTICS' }
+    }
 }
 
 $providerWorkRoot = Join-Path $runDirectory 'provider-work'
@@ -221,7 +250,9 @@ if ($safeStatus -in @('AWAITING_USER', 'AWAITING_EVIDENCE')) {
     snapshotHashesVerified = $snapshots.Count
     forbiddenEventTypes = 0
     forbiddenEventDataKeys = 0
-    documentCanariesInEventsOrLogs = 0
+    unusedLogsDirectory = $false
+    diagnosticRowsParsed = $diagnosticRows.Count
+    documentCanariesInEventsOrDiagnostics = 0
     providerWorkArtifacts = 0
     finalFiles = $actualFinalNames
     runDirectory = Get-RelativeSafePath -Root $projectRoot -Path $runDirectory

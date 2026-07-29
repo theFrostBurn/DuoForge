@@ -244,6 +244,25 @@ function Get-DuoForgeProgressRetryLabelInternal {
     }
 }
 
+function Get-DuoForgeProgressDiagnosticReferenceInternal {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]$Source,
+        [string]$RunDirectory
+    )
+
+    if ($null -eq $Source) { return $null }
+    $data = Get-DuoForgeObjectValue -Object $Source -Name 'data' -Default $Source
+    $diagnosticId = [string](Get-DuoForgeObjectValue -Object $data -Name 'diagnosticId')
+    $code = [string](Get-DuoForgeObjectValue -Object $data -Name 'code')
+    $location = [string](Get-DuoForgeObjectValue -Object $data -Name 'diagnosticsLocation')
+    $relativePath = [string](Get-DuoForgeObjectValue -Object $data -Name 'diagnosticsRelativePath')
+    $diagnosticsPath = Resolve-DuoForgeDiagnosticsPathInternal -RunDirectory $RunDirectory -Location $location -RelativePath $relativePath -DiagnosticsPath ([string](Get-DuoForgeObjectValue -Object $data -Name 'diagnosticsPath'))
+    $warningCode = [string](Get-DuoForgeObjectValue -Object $data -Name 'diagnosticWarningCode')
+    if ([string]::IsNullOrWhiteSpace($diagnosticId) -and [string]::IsNullOrWhiteSpace($warningCode)) { return $null }
+    return [ordered]@{ code = $code; diagnosticId = $diagnosticId; diagnosticsPath = $diagnosticsPath; diagnosticWarningCode = $warningCode }
+}
+
 function Get-DuoForgeProgressBarrierStatusInternal {
     [CmdletBinding()]
     param([AllowEmptyCollection()][Parameter(Mandatory)][object[]]$Steps)
@@ -504,6 +523,7 @@ function New-DuoForgeProgressFrameInternal {
         $lines.Add((Limit-DuoForgeProgressTextInternal -Text $Text -Width $lineWidth))
     }
     $divider = '─' * [Math]::Min($lineWidth, 120)
+    $diagnosticReference = Get-DuoForgeProgressDiagnosticReferenceInternal -Source $(if ($null -ne $ViewState -and $ViewState.Contains('diagnosticId')) { $ViewState } else { $Snapshot.lastEvent }) -RunDirectory ([string](Get-DuoForgeObjectValue -Object $Snapshot -Name 'runDirectory'))
     $recentCommitted = @(
         if ($Snapshot.Contains('recentCommitted')) {
             $Snapshot.recentCommitted | Select-Object -Last 3
@@ -512,7 +532,10 @@ function New-DuoForgeProgressFrameInternal {
             $Snapshot.latest
         }
     )
+    if ($null -ne $diagnosticReference -and $Height -le 20 -and $recentCommitted.Count -gt 1) { $recentCommitted = @($recentCommitted | Select-Object -Last 1) }
     $finalMessage = if ($null -ne $ViewState -and $ViewState.Contains('finalMessage')) { [string]$ViewState.finalMessage } else { '' }
+    [object[]]$diagnosticPathLines = @(if ($null -ne $diagnosticReference -and -not [string]::IsNullOrWhiteSpace([string]$diagnosticReference.diagnosticsPath)) { Split-DuoForgeProgressTextInternal -Text ("진단 파일: {0}" -f $diagnosticReference.diagnosticsPath) -Width $lineWidth -MaximumLines 6 })
+    $diagnosticLineCount = if ($null -eq $diagnosticReference) { 0 } else { 1 + $diagnosticPathLines.Count + $(if ([string]$diagnosticReference.diagnosticWarningCode -eq 'DF-DIAGNOSTIC-WRITE') { 1 } else { 0 }) }
     & $addLine 'DUOFORGE  토론 진행판'
     & $addLine ("{0} · {1} · {2}" -f $Snapshot.name, $Snapshot.modeLabel, $Snapshot.runId)
 
@@ -524,7 +547,7 @@ function New-DuoForgeProgressFrameInternal {
     & $addLine ('장벽 레일 ' + ('─' * [Math]::Max(1, $lineWidth - (Get-DuoForgeProgressTextWidthInternal -Text '장벽 레일 '))))
 
     $feedLineCount = if ($recentCommitted.Count -eq 0) { 1 } else { $recentCommitted.Count * 2 }
-    $fixedLines = 9 + $feedLineCount + $(if ([string]::IsNullOrWhiteSpace($finalMessage)) { 0 } else { 1 })
+    $fixedLines = 9 + $feedLineCount + $diagnosticLineCount + $(if ([string]::IsNullOrWhiteSpace($finalMessage)) { 0 } else { 1 })
     $barrierBudget = [Math]::Max(3, [Math]::Min(8, ($Height - 1) - $fixedLines))
     $visibleBarriers = @(Get-DuoForgeVisibleProgressBarriersInternal -Barriers @($Snapshot.barriers) -Maximum $barrierBudget)
     foreach ($barrier in $visibleBarriers) {
@@ -566,7 +589,15 @@ function New-DuoForgeProgressFrameInternal {
         $failedTarget = Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId ([string](Get-DuoForgeObjectValue -Object $failedData -Name 'targetDocumentId')) -Mode ([string]$Snapshot.mode)
         if (-not [string]::IsNullOrWhiteSpace($failedTarget)) { $failedParts += $failedTarget }
         $failedParts += [string]$Snapshot.statusLabel
+        $failureCode = [string](Get-DuoForgeObjectValue -Object $failedData -Name 'code')
+        if (-not [string]::IsNullOrWhiteSpace($failureCode)) { $failedParts += $failureCode }
         & $addLine ("현재  ! {0}" -f ($failedParts -join ' · '))
+    }
+    elseif ($lastEventType -eq 'FINAL_ARTIFACTS_FAILED') {
+        & $addLine ("현재  ! 최종 산출물 생성 · {0} · {1}" -f $Snapshot.statusLabel, [string](Get-DuoForgeObjectValue -Object $Snapshot.lastEvent.data -Name 'code'))
+    }
+    elseif ($lastEventType -eq 'STAGE_INTERRUPTED_RECOVERED') {
+        & $addLine ("현재  ↻ 중단 단계 복구 · {0}" -f [string](Get-DuoForgeObjectValue -Object $Snapshot.lastEvent.data -Name 'code'))
     }
     else {
         & $addLine ("현재  {0}" -f $Snapshot.statusLabel)
@@ -611,6 +642,11 @@ function New-DuoForgeProgressFrameInternal {
     }
 
     & $addLine $divider
+    if ($null -ne $diagnosticReference) {
+        & $addLine ("오류 코드: {0} · 진단 ID: {1}" -f $diagnosticReference.code, $diagnosticReference.diagnosticId)
+        foreach ($pathLine in $diagnosticPathLines) { $lines.Add([string]$pathLine) }
+        if ([string]$diagnosticReference.diagnosticWarningCode -eq 'DF-DIAGNOSTIC-WRITE') { & $addLine '진단 기록 실패: DF-DIAGNOSTIC-WRITE' }
+    }
     if (-not [string]::IsNullOrWhiteSpace($finalMessage)) { & $addLine $finalMessage }
     if ([string]$Snapshot.status -eq 'RUNNING') {
         & $addLine '쟁점 원장  전체 단계 확정 후 집계'
@@ -619,7 +655,7 @@ function New-DuoForgeProgressFrameInternal {
         & $addLine ("쟁점 전체 {0} · 미해결 {1} · 차단 {2}" -f $Snapshot.issueCount, $Snapshot.openIssueCount, $Snapshot.blockingIssueCount)
     }
     $footer = if ($null -ne $ViewState -and [bool](Get-DuoForgeObjectValue -Object $ViewState -Name 'waitForInput' -Default $false)) {
-        'Enter 키를 누르면 작업 메뉴로 돌아갑니다.'
+        if ([string](Get-DuoForgeObjectValue -Object $ViewState -Name 'returnTarget' -Default 'shell') -eq 'menu') { 'Enter 키를 누르면 작업 메뉴로 돌아갑니다.' } else { 'Enter 키를 누르면 셸 프롬프트로 돌아갑니다.' }
     }
     else {
         '확정된 구조화 결과만 표시합니다 · 실행 중에는 키 입력을 받지 않습니다.'
@@ -738,6 +774,10 @@ function Write-DuoForgeProgressLogEventInternal {
         }
         'STAGE_FAILED' { Write-Host ("! {0} 실패 · {1} 상태로 보존" -f $label, $snapshot.statusLabel) -ForegroundColor Red }
         'STAGE_INTERRUPTED_RECOVERED' { Write-Host ("↻ 이전에 중단된 단계를 재개 대상으로 복구: {0}" -f $label) -ForegroundColor Yellow }
+        'FINAL_ARTIFACTS_FAILED' { Write-Host '! 최종 산출물 생성 실패 · 재개 가능 상태로 보존' -ForegroundColor Red }
+    }
+    if ($type -in @('STAGE_RETRY_SCHEDULED', 'STAGE_FAILED', 'STAGE_INTERRUPTED_RECOVERED', 'FINAL_ARTIFACTS_FAILED')) {
+        Write-DuoForgeDiagnosticReferenceInternal -Source $data -RunDirectory ([string]$View.runDirectory)
     }
 }
 
@@ -758,7 +798,7 @@ function Invoke-DuoForgeProgressObserverInternal {
         data = ConvertTo-DuoForgeHashtable -InputObject $Data
     }
     try { $null = & $Observer $event }
-    catch { Write-Verbose ("DuoForge 진행 관찰자 오류를 무시했습니다: {0}" -f $_.Exception.Message) }
+    catch { Write-Verbose 'DuoForge 진행 관찰자 오류를 무시했습니다.' }
 }
 
 function New-DuoForgeProgressViewInternal {
@@ -780,6 +820,7 @@ function New-DuoForgeProgressViewInternal {
         providerElapsedSeconds = 0
         finalMessage = ''
         waitForInput = $false
+        returnTarget = 'shell'
         closed = $false
     }
     $observer = {
@@ -811,18 +852,20 @@ function Close-DuoForgeProgressViewInternal {
     param(
         [Parameter(Mandatory)][System.Collections.IDictionary]$View,
         [System.Collections.IDictionary]$Result,
-        [string]$ErrorMessage,
+        [System.Collections.IDictionary]$ErrorDiagnostic,
         [switch]$WaitForAcknowledgement
     )
 
     if ([bool]$View.closed) { return }
     $View.closed = $true
     $View.waitForInput = [bool]$WaitForAcknowledgement -and [string]$View.mode -eq 'fullscreen'
-    if (-not [string]::IsNullOrWhiteSpace($ErrorMessage)) {
-        $View.finalMessage = '실행 오류 · ' + (ConvertTo-DuoForgeProgressTextInternal -Text $ErrorMessage -MaximumCharacters 240)
+    if ($null -ne $ErrorDiagnostic) {
+        $View.finalMessage = '실행 오류 · ' + (Get-DuoForgeDiagnosticPublicSummaryInternal -Code ([string]$ErrorDiagnostic.code))
+        foreach ($name in @('code', 'diagnosticId', 'diagnosticsLocation', 'diagnosticsRelativePath', 'diagnosticsPath', 'diagnosticWarningCode')) { $View[$name] = Get-DuoForgeObjectValue -Object $ErrorDiagnostic -Name $name }
     }
     elseif ($null -ne $Result) {
         $View.finalMessage = '실행 종료 · ' + (Get-DuoForgeProgressStateLabelInternal -Status ([string]$Result.status))
+        foreach ($name in @('code', 'diagnosticId', 'diagnosticsLocation', 'diagnosticsRelativePath', 'diagnosticsPath', 'diagnosticWarningCode')) { $View[$name] = Get-DuoForgeObjectValue -Object $Result -Name $name }
     }
     if ([string]$View.mode -eq 'fullscreen') {
         if ($View.waitForInput) {
@@ -848,6 +891,7 @@ function Close-DuoForgeProgressViewInternal {
     }
     elseif ($null -ne $Result) {
         Write-Host ("실행 상태: {0}, 이번 호출 단계: {1}" -f $Result.status, $Result.invoked) -ForegroundColor Cyan
+        if (-not [string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $Result -Name 'diagnosticId'))) { Write-DuoForgeDiagnosticReferenceInternal -Source $Result -RunDirectory ([string]$View.runDirectory) }
     }
 }
 
@@ -856,24 +900,33 @@ function Invoke-DuoForgeResumeWithProgressInternal {
     param(
         [Parameter(Mandatory)][string]$RunId,
         [string]$ResultsRoot,
-        [switch]$WaitForAcknowledgement
+        [switch]$WaitForAcknowledgement,
+        [ValidateSet('menu', 'shell')][string]$ReturnTarget = 'shell'
     )
 
     $run = Get-DuoForgeRunInternal -RunId $RunId -ResultsRoot $ResultsRoot
     $view = New-DuoForgeProgressViewInternal -RunDirectory ([string]$run.runDirectory)
+    $view.returnTarget = $ReturnTarget
     $result = $null
-    $errorMessage = $null
+    $errorDiagnostic = $null
     try {
         $result = Invoke-DuoForgeResumeLiveInternal -RunId $RunId -ResultsRoot $ResultsRoot -LiveConsent $true -ProgressObserver $view.observer
         return $result
     }
     catch {
-        $errorMessage = $_.Exception.Message
+        if (-not $_.Exception.Data.Contains('DuoForgeDiagnosticId')) {
+            $manifest = Get-DuoForgeObjectValue -Object $run -Name 'manifest' -Default ([ordered]@{})
+            $state = Get-DuoForgeObjectValue -Object $run -Name 'state' -Default ([ordered]@{})
+            $code = if ($_.Exception.Data.Contains('DuoForgeCode')) { [string]$_.Exception.Data['DuoForgeCode'] } else { 'DF-STAGE-UNEXPECTED' }
+            $diagnostic = Write-DuoForgeDiagnosticInternal -RunDirectory ([string]$run.runDirectory) -Code $code -Category 'resume' -Phase 'resume' -Scope 'run' -Run ([ordered]@{ runId = $RunId; workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest; status = Get-DuoForgeObjectValue -Object $state -Name 'status'; lastCompletedStage = Get-DuoForgeObjectValue -Object $state -Name 'lastCompletedStage' }) -ErrorRecord $_
+            Add-DuoForgeDiagnosticMetadataToExceptionInternal -Exception $_.Exception -Diagnostic $diagnostic
+        }
+        $errorDiagnostic = Get-DuoForgeDiagnosticSourceFromExceptionInternal -Exception $_.Exception
         throw
     }
     finally {
         try {
-            Close-DuoForgeProgressViewInternal -View $view -Result $result -ErrorMessage $errorMessage -WaitForAcknowledgement:$WaitForAcknowledgement
+            Close-DuoForgeProgressViewInternal -View $view -Result $result -ErrorDiagnostic $errorDiagnostic -WaitForAcknowledgement:$WaitForAcknowledgement
         }
         catch { }
     }

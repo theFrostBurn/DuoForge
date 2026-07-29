@@ -227,17 +227,30 @@ function Select-DuoForgeInteractiveRun {
 
 function Invoke-DuoForgeInteractiveLiveResume {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][System.Collections.IDictionary]$Run)
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Run,
+        [scriptblock]$InputReader,
+        [scriptblock]$ResumeInvoker
+    )
 
     $budget = Get-DuoForgeRemainingCallBudget -RunDirectory ([string]$Run.runDirectory)
     $selections = Get-DuoForgeRunProviderSelectionsInternal -RunDirectory ([string]$Run.runDirectory)
     Write-Host '선택한 스냅샷 내용이 Codex와 Claude에 전송됩니다.' -ForegroundColor Yellow
     Write-DuoForgeProviderSelectionSummary -ProviderSelections $selections
     Write-Host ("Codex 추가 호출 최악: {0}, Claude 추가 호출 최악: {1}" -f $budget.providers.codex.maximumAdditionalCalls, $budget.providers.claude.maximumAdditionalCalls) -ForegroundColor Yellow
-    $confirmation = (Read-Host '실제 공급자 호출을 시작하려면 LIVE를 입력하세요').Trim()
+    $confirmation = if ($null -ne $InputReader) { [string](& $InputReader '실제 공급자 호출을 시작하려면 LIVE를 입력하세요') } else { Read-Host '실제 공급자 호출을 시작하려면 LIVE를 입력하세요' }
+    $confirmation = $confirmation.Trim()
     if ($confirmation -cne 'LIVE') { Write-Host '라이브 실행을 취소했습니다.'; return }
     $resultsRoot = [System.IO.Path]::GetDirectoryName([string]$Run.runDirectory)
-    $null = Invoke-DuoForgeResumeWithProgressInternal -RunId ([string]$Run.state.runId) -ResultsRoot $resultsRoot -WaitForAcknowledgement
+    $result = if ($null -ne $ResumeInvoker) {
+        & $ResumeInvoker ([string]$Run.state.runId) $resultsRoot $true
+    }
+    else {
+        Invoke-DuoForgeResumeWithProgressInternal -RunId ([string]$Run.state.runId) -ResultsRoot $resultsRoot -WaitForAcknowledgement -ReturnTarget menu
+    }
+    if ($null -ne $result -and -not [string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $result -Name 'diagnosticId'))) {
+        Write-DuoForgeDiagnosticReferenceInternal -Source $result -RunDirectory ([string]$Run.runDirectory)
+    }
 }
 
 function Read-DuoForgeInteractiveExplanationRequest {

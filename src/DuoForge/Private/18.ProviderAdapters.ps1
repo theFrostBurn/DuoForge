@@ -195,29 +195,30 @@ function Get-DuoForgeProviderFailureClassificationInternal {
     $exitCode = if ($null -eq $exitCodeValue) { $null } else { [int]$exitCodeValue }
     $errorCategory = [string](Get-DuoForgeObjectValue -Object $ProcessResult -Name 'errorCategory')
     $diagnosticText = ([string](Get-DuoForgeObjectValue -Object $ProcessResult -Name 'stdout')) + [Environment]::NewLine + ([string](Get-DuoForgeObjectValue -Object $ProcessResult -Name 'stderr'))
+    $processMetadata = Get-DuoForgeSafeProcessMetadataInternal -ProcessResult $ProcessResult
 
     if (-not $started -and $errorCategory -eq 'command-not-found') {
-        return [ordered]@{ category = 'command-not-found'; code = 'DF-PROVIDER-NOT-FOUND'; targetStatus = 'BLOCKED_PREFLIGHT'; retryable = $false; message = "$Provider CLI를 찾을 수 없습니다."; exitCode = $null }
+        return [ordered]@{ category = 'command-not-found'; code = 'DF-PROVIDER-NOT-FOUND'; targetStatus = 'BLOCKED_PREFLIGHT'; retryable = $false; message = "$Provider CLI를 찾을 수 없습니다."; exitCode = $null; process = $processMetadata }
     }
     if (-not $started) {
-        return [ordered]@{ category = 'process-start'; code = 'DF-PROVIDER-START'; targetStatus = 'RESUMABLE_ERROR'; retryable = $false; message = "$Provider CLI 프로세스를 시작하지 못했습니다."; exitCode = $null }
+        return [ordered]@{ category = 'process-start'; code = 'DF-PROVIDER-START'; targetStatus = 'RESUMABLE_ERROR'; retryable = $false; message = "$Provider CLI 프로세스를 시작하지 못했습니다."; exitCode = $null; process = $processMetadata }
     }
     if ($timedOut) {
-        return [ordered]@{ category = 'timeout'; code = 'DF-PROVIDER-TIMEOUT'; targetStatus = 'RESUMABLE_ERROR'; retryable = $true; message = "$Provider CLI 호출 시간이 초과되었습니다."; exitCode = $null }
+        return [ordered]@{ category = 'timeout'; code = 'DF-PROVIDER-TIMEOUT'; targetStatus = 'RESUMABLE_ERROR'; retryable = $true; message = "$Provider CLI 호출 시간이 초과되었습니다."; exitCode = $null; process = $processMetadata }
     }
     if ($diagnosticText -match '(?i)(invalid_json_schema|invalid\s+schema\s+for\s+response_format)') {
-        return [ordered]@{ category = 'schema-compatibility'; code = 'DF-PROVIDER-SCHEMA-COMPAT'; targetStatus = 'BLOCKED_PREFLIGHT'; retryable = $false; message = "$Provider 구조화 출력 스키마가 현재 CLI 또는 공급자 API와 호환되지 않습니다."; exitCode = $exitCode }
+        return [ordered]@{ category = 'schema-compatibility'; code = 'DF-PROVIDER-SCHEMA-COMPAT'; targetStatus = 'BLOCKED_PREFLIGHT'; retryable = $false; message = "$Provider 구조화 출력 스키마가 현재 CLI 또는 공급자 API와 호환되지 않습니다."; exitCode = $exitCode; process = $processMetadata }
     }
     if ($diagnosticText -match "(?i)(usage\s+limit|quota|insufficient_quota|out\s+of\s+credits|plan\s+(?:usage\s+)?limit|limit\s+reached\s+for\s+your\s+plan|you(?:'|’)ve\s+hit\s+your\s+limit)") {
-        return [ordered]@{ category = 'subscription-quota'; code = 'DF-PROVIDER-QUOTA'; targetStatus = 'PAUSED_QUOTA'; retryable = $false; message = "$Provider 구독 사용 한도에 도달했습니다. API 과금 방식으로 자동 전환하지 않습니다."; exitCode = $exitCode }
+        return [ordered]@{ category = 'subscription-quota'; code = 'DF-PROVIDER-QUOTA'; targetStatus = 'PAUSED_QUOTA'; retryable = $false; message = "$Provider 구독 사용 한도에 도달했습니다. API 과금 방식으로 자동 전환하지 않습니다."; exitCode = $exitCode; process = $processMetadata }
     }
     if ($diagnosticText -match '(?i)(rate\s+limit|too\s+many\s+requests|temporarily\s+throttled)') {
-        return [ordered]@{ category = 'rate-limit'; code = 'DF-PROVIDER-RATE-LIMIT'; targetStatus = 'RESUMABLE_ERROR'; retryable = $true; message = "$Provider 요청 속도 제한이 감지되었습니다."; exitCode = $exitCode }
+        return [ordered]@{ category = 'rate-limit'; code = 'DF-PROVIDER-RATE-LIMIT'; targetStatus = 'RESUMABLE_ERROR'; retryable = $true; message = "$Provider 요청 속도 제한이 감지되었습니다."; exitCode = $exitCode; process = $processMetadata }
     }
     if ($diagnosticText -match '(?i)(not\s+logged\s+in|login\s+required|please\s+(?:log\s*in|login)|unauthorized|authentication\s+failed|invalid\s+(?:credential|token)|expired\s+(?:token|session))') {
-        return [ordered]@{ category = 'authentication'; code = 'DF-PROVIDER-AUTH'; targetStatus = 'BLOCKED_PREFLIGHT'; retryable = $false; message = "$Provider 구독 인증을 다시 확인해야 합니다."; exitCode = $exitCode }
+        return [ordered]@{ category = 'authentication'; code = 'DF-PROVIDER-AUTH'; targetStatus = 'BLOCKED_PREFLIGHT'; retryable = $false; message = "$Provider 구독 인증을 다시 확인해야 합니다."; exitCode = $exitCode; process = $processMetadata }
     }
-    return [ordered]@{ category = 'provider-process'; code = 'DF-PROVIDER-PROCESS'; targetStatus = 'RESUMABLE_ERROR'; retryable = $false; message = "$Provider CLI가 정상 완료되지 않았습니다. 종료 코드: $exitCode"; exitCode = $exitCode }
+    return [ordered]@{ category = 'provider-process'; code = 'DF-PROVIDER-PROCESS'; targetStatus = 'RESUMABLE_ERROR'; retryable = $false; message = "$Provider CLI가 정상 완료되지 않았습니다. 종료 코드: $exitCode"; exitCode = $exitCode; process = $processMetadata }
 }
 
 function New-DuoForgeProviderFailureExceptionInternal {
@@ -229,6 +230,7 @@ function New-DuoForgeProviderFailureExceptionInternal {
     $exception.Data['DuoForgeFailureStatus'] = [string]$Classification.targetStatus
     $exception.Data['DuoForgeRetryable'] = [bool]$Classification.retryable
     if ($null -ne $Classification.exitCode) { $exception.Data['DuoForgeExitCode'] = [int]$Classification.exitCode }
+    $exception.Data['DuoForgeProcess'] = Get-DuoForgeSafeProcessMetadataInternal -ProcessResult (Get-DuoForgeObjectValue -Object $Classification -Name 'process')
     return $exception
 }
 
@@ -272,6 +274,7 @@ function Invoke-DuoForgeLiveProviderStage {
         visibleArtifactHashes = @($Prompt.artifactHashes)
     })
 
+    $processResult = $null
     try {
         $onTick = if ($null -ne $ProgressObserver) {
             {
@@ -330,8 +333,15 @@ function Invoke-DuoForgeLiveProviderStage {
         })
         return $converted.result
     }
+    catch {
+        if ($null -ne $processResult -and -not $_.Exception.Data.Contains('DuoForgeProcess')) {
+            try { $_.Exception.Data['DuoForgeProcess'] = Get-DuoForgeSafeProcessMetadataInternal -ProcessResult $processResult } catch { }
+        }
+        throw
+    }
     finally {
-        Remove-DuoForgeProviderWorkDirectory -RunDirectory $RunDirectory -WorkDirectory ([string]$spec.workingDirectory)
+        try { Remove-DuoForgeProviderWorkDirectory -RunDirectory $RunDirectory -WorkDirectory ([string]$spec.workingDirectory) }
+        catch { Write-Verbose 'DuoForge 공급자 작업 폴더 정리 오류를 무시했습니다.' }
     }
 }
 

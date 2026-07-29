@@ -343,21 +343,38 @@ function Repair-DuoForgeCorruptedStageArtifactsInternal {
 
 function Repair-DuoForgeInterruptedStartedStepsInternal {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][System.Collections.IDictionary]$Graph)
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Graph,
+        [Parameter(Mandatory)][string]$RunDirectory,
+        [Parameter(Mandatory)]$Manifest,
+        [Parameter(Mandatory)]$State
+    )
 
     $recovered = [System.Collections.Generic.List[object]]::new()
     foreach ($step in @($Graph.steps | Where-Object { [string]$_.status -eq 'STARTED' })) {
+        $retryExhausted = [int]$step.attemptCount -ge 2
+        $errorCode = if ($retryExhausted) { 'DF-STAGE-RETRY-EXHAUSTED' } else { 'DF-STAGE-INTERRUPTED' }
+        $retryMode = if ($retryExhausted) { 'RETRY_EXHAUSTED' } else { 'STANDARD_RETRY' }
+        $providers = Get-DuoForgeObjectValue -Object $Manifest -Name 'providers' -Default ([ordered]@{})
+        $diagnostic = Write-DuoForgeDiagnosticInternal -RunDirectory $RunDirectory -Code $errorCode -Category 'interrupted-process' -Phase 'recovery' -Scope 'run' `
+            -Run ([ordered]@{ runId = Get-DuoForgeObjectValue -Object $Manifest -Name 'runId'; workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $Manifest; status = Get-DuoForgeObjectValue -Object $State -Name 'status'; lastCompletedStage = Get-DuoForgeObjectValue -Object $State -Name 'lastCompletedStage' }) `
+            -Step ([ordered]@{ stepKey = $step.stepKey; provider = $step.provider; stage = $step.stage; targetDocumentId = Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId'; round = $step.round; attempt = $step.attemptCount }) `
+            -Recovery ([ordered]@{ retryable = -not $retryExhausted; retryMode = $retryMode; scheduled = -not $retryExhausted }) `
+            -ProviderVersions ([ordered]@{ codex = Get-DuoForgeObjectValue -Object (Get-DuoForgeObjectValue -Object $providers -Name 'codex') -Name 'version'; claude = Get-DuoForgeObjectValue -Object (Get-DuoForgeObjectValue -Object $providers -Name 'claude') -Name 'version' })
+        $correlation = Get-DuoForgeDiagnosticCorrelationInternal -Diagnostic $diagnostic
         $step.status = 'FAILED'
-        $step.retryMode = if ([int]$step.attemptCount -ge 2) { 'RETRY_EXHAUSTED' } else { 'STANDARD_RETRY' }
+        $step.retryMode = $retryMode
         $step.lastError = [ordered]@{
             category = 'interrupted-process'
-            code = 'DF-STAGE-INTERRUPTED'
+            code = $errorCode
             exceptionType = 'InterruptedProcess'
-            commandName = ''
-            retryable = [int]$step.attemptCount -lt 2
+            retryable = -not $retryExhausted
             attempt = [int]$step.attemptCount
             at = Get-DuoForgeUtcNow
-            validationErrors = @()
+            diagnosticId = $correlation.diagnosticId
+            diagnosticsLocation = $correlation.diagnosticsLocation
+            diagnosticsRelativePath = $correlation.diagnosticsRelativePath
+            diagnosticWarningCode = $correlation.diagnosticWarningCode
         }
         $recovered.Add([ordered]@{
             stepKey = [string]$step.stepKey
@@ -365,7 +382,14 @@ function Repair-DuoForgeInterruptedStartedStepsInternal {
             stage = [string]$step.stage
             round = [int]$step.round
             attempt = [int]$step.attemptCount
-            retryExhausted = [int]$step.attemptCount -ge 2
+            retryExhausted = $retryExhausted
+            code = $errorCode
+            retryable = -not $retryExhausted
+            diagnosticId = $correlation.diagnosticId
+            diagnosticsLocation = $correlation.diagnosticsLocation
+            diagnosticsRelativePath = $correlation.diagnosticsRelativePath
+            diagnosticWarningCode = $correlation.diagnosticWarningCode
+            diagnosticsPath = [string]$diagnostic.diagnosticsPath
         })
     }
     return @($recovered)
@@ -381,7 +405,7 @@ function Add-DuoForgeProgressRunEventInternal {
     )
 
     try { Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type $Type -Status $Status -Data $Data }
-    catch { Write-Verbose ("DuoForge 진행 이벤트 기록 오류를 무시했습니다: {0}" -f $_.Exception.Message) }
+    catch { Write-Verbose 'DuoForge 진행 이벤트 기록 오류를 무시했습니다.' }
 }
 
 function Invoke-DuoForgeStageEngine {
@@ -389,7 +413,8 @@ function Invoke-DuoForgeStageEngine {
     param(
         [Parameter(Mandatory)][string]$RunDirectory,
         [Parameter(Mandatory)][scriptblock]$ProviderInvoker,
-        [scriptblock]$ProgressObserver
+        [scriptblock]$ProgressObserver,
+        [scriptblock]$FinalRenderer
     )
 
     return Invoke-WithDuoForgeRunLock -RunDirectory $RunDirectory -ScriptBlock {
@@ -401,11 +426,13 @@ function Invoke-DuoForgeStageEngine {
         $graph = Initialize-DuoForgeStageGraph -RunDirectory $RunDirectory
         $stepsPath = Join-Path $RunDirectory 'steps.json'
         $artifactRepair = Repair-DuoForgeCorruptedStageArtifactsInternal -RunDirectory $RunDirectory -Graph $graph
-        $interruptedSteps = @(Repair-DuoForgeInterruptedStartedStepsInternal -Graph $graph)
+        $interruptedSteps = @(Repair-DuoForgeInterruptedStartedStepsInternal -Graph $graph -RunDirectory $RunDirectory -Manifest $manifest -State $state)
         if ([bool]$artifactRepair.repaired -or $interruptedSteps.Count -gt 0) { Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph }
         foreach ($recovered in $interruptedSteps) {
-            Add-DuoForgeProgressRunEventInternal -RunDirectory $RunDirectory -Type 'STAGE_INTERRUPTED_RECOVERED' -Status ([string]$state.status) -Data $recovered
-            Invoke-DuoForgeProgressObserverInternal -Observer $ProgressObserver -Type 'STAGE_INTERRUPTED_RECOVERED' -RunDirectory $RunDirectory -Data $recovered
+            $durableRecovery = ConvertTo-DuoForgeHashtable -InputObject $recovered
+            $durableRecovery.Remove('diagnosticsPath')
+            Add-DuoForgeProgressRunEventInternal -RunDirectory $RunDirectory -Type 'STAGE_INTERRUPTED_RECOVERED' -Status ([string]$state.status) -Data $durableRecovery
+            Invoke-DuoForgeProgressObserverInternal -Observer $ProgressObserver -Type 'STAGE_INTERRUPTED_RECOVERED' -RunDirectory $RunDirectory -Data $durableRecovery
         }
         Invoke-DuoForgeProgressObserverInternal -Observer $ProgressObserver -Type 'PROGRESS_REFRESHED' -RunDirectory $RunDirectory -Data ([ordered]@{
             artifactRepair = [bool]$artifactRepair.repaired
@@ -421,11 +448,17 @@ function Invoke-DuoForgeStageEngine {
                 stage = [string]$failedStep.stage
                 round = [int]$failedStep.round
                 attempt = [int]$failedStep.attemptCount
-                code = 'DF-STAGE-RETRY-EXHAUSTED'
+                code = [string]$failedStep.lastError.code
                 retryable = $false
+                diagnosticId = [string]$failedStep.lastError.diagnosticId
+                diagnosticsLocation = [string]$failedStep.lastError.diagnosticsLocation
+                diagnosticsRelativePath = [string]$failedStep.lastError.diagnosticsRelativePath
+                diagnosticWarningCode = [string]$failedStep.lastError.diagnosticWarningCode
             }
+            Add-DuoForgeProgressRunEventInternal -RunDirectory $RunDirectory -Type 'STAGE_FAILED' -Status 'RESUMABLE_ERROR' -Data $failureData
             Invoke-DuoForgeProgressObserverInternal -Observer $ProgressObserver -Type 'STAGE_FAILED' -RunDirectory $RunDirectory -Data $failureData
-            return [ordered]@{ status = $state.status; invoked = 0; failedStep = [string]$failedStep.stepKey; code = 'DF-STAGE-RETRY-EXHAUSTED'; retryable = $false }
+            $diagnosticsPath = Resolve-DuoForgeDiagnosticsPathInternal -RunDirectory $RunDirectory -Location ([string]$failedStep.lastError.diagnosticsLocation) -RelativePath ([string]$failedStep.lastError.diagnosticsRelativePath)
+            return [ordered]@{ status = $state.status; invoked = 0; failedStep = [string]$failedStep.stepKey; code = [string]$failedStep.lastError.code; retryable = $false; diagnosticId = [string]$failedStep.lastError.diagnosticId; diagnosticsLocation = [string]$failedStep.lastError.diagnosticsLocation; diagnosticsRelativePath = [string]$failedStep.lastError.diagnosticsRelativePath; diagnosticsPath = $diagnosticsPath; diagnosticWarningCode = [string]$failedStep.lastError.diagnosticWarningCode }
         }
         if ([string]$state.status -in @('COMPLETED', 'COMPLETED_PARTIAL') -and -not [bool]$artifactRepair.repaired) {
             return [ordered]@{ status = $state.status; invoked = 0; skipped = @($graph.steps | Where-Object { $_.status -eq 'COMMITTED' }).Count }
@@ -567,38 +600,31 @@ function Invoke-DuoForgeStageEngine {
                     }
                     $formatRecovery = Test-DuoForgeFormatRecoveryErrorInternal -Code $errorCode
                     $retryExhausted = $retryable -and [int]$step.attemptCount -ge 2
-                    $step.retryMode = if ($retryExhausted) { 'RETRY_EXHAUSTED' } else { $null }
+                    $retryScheduled = $retryable -and [int]$step.attemptCount -lt 2
+                    $step.retryMode = if ($retryExhausted) { 'RETRY_EXHAUSTED' } elseif ($retryScheduled -and $formatRecovery) { 'FORMAT_REPAIR' } elseif ($retryScheduled) { 'STANDARD_RETRY' } else { $null }
+                    $processMetadata = if ($_.Exception.Data.Contains('DuoForgeProcess')) { Get-DuoForgeSafeProcessMetadataInternal -ProcessResult $_.Exception.Data['DuoForgeProcess'] } else { $null }
+                    $providers = Get-DuoForgeObjectValue -Object $manifest -Name 'providers' -Default ([ordered]@{})
+                    $diagnostic = Write-DuoForgeDiagnosticInternal -RunDirectory $RunDirectory -Code $errorCode -Category $failureCategory -Phase 'stage' -Scope 'run' `
+                        -Run ([ordered]@{ runId = Get-DuoForgeObjectValue -Object $manifest -Name 'runId'; workflowVersion = $workflowVersion; status = Get-DuoForgeObjectValue -Object $state -Name 'status'; lastCompletedStage = Get-DuoForgeObjectValue -Object $state -Name 'lastCompletedStage' }) `
+                        -Step ([ordered]@{ stepKey = $step.stepKey; provider = $step.provider; stage = $step.stage; targetDocumentId = Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId'; round = $step.round; attempt = $step.attemptCount }) `
+                        -Process $processMetadata -Recovery ([ordered]@{ retryable = $retryable; retryMode = [string]$step.retryMode; scheduled = $retryScheduled }) `
+                        -ProviderVersions ([ordered]@{ codex = Get-DuoForgeObjectValue -Object (Get-DuoForgeObjectValue -Object $providers -Name 'codex') -Name 'version'; claude = Get-DuoForgeObjectValue -Object (Get-DuoForgeObjectValue -Object $providers -Name 'claude') -Name 'version' }) -ErrorRecord $_
+                    $correlation = Get-DuoForgeDiagnosticCorrelationInternal -Diagnostic $diagnostic
                     $step.lastError = [ordered]@{
                         category = $failureCategory
                         code = $errorCode
                         exceptionType = $_.Exception.GetType().Name
-                        commandName = [string]$_.CategoryInfo.TargetName
                         retryable = $retryable
                         attempt = [int]$step.attemptCount
                         at = Get-DuoForgeUtcNow
-                        validationErrors = if ($_.Exception.Data.Contains('DuoForgeValidationErrors')) { @($_.Exception.Data['DuoForgeValidationErrors']) } else { @() }
+                        validationErrors = if ($formatRecovery) { @('응답 구조가 요구 스키마를 충족하지 않았습니다.') } else { @() }
+                        diagnosticId = $correlation.diagnosticId
+                        diagnosticsLocation = $correlation.diagnosticsLocation
+                        diagnosticsRelativePath = $correlation.diagnosticsRelativePath
+                        diagnosticWarningCode = $correlation.diagnosticWarningCode
                     }
                     Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph
-                    if ($retryable -and [int]$step.attemptCount -lt 2) {
-                        $step.retryMode = if ($formatRecovery) { 'FORMAT_REPAIR' } else { 'STANDARD_RETRY' }
-                        Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph
-                        Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'STAGE_RETRY_SCHEDULED' -Status 'RUNNING' -Data ([ordered]@{ workflowVersion = $workflowVersion; stepKey = $step.stepKey; provider = $step.provider; stage = $step.stage; targetDocumentId = Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId'; round = $step.round; failedAttempt = $step.attemptCount; code = $errorCode; category = $failureCategory; retryMode = $step.retryMode })
-                        Invoke-DuoForgeProgressObserverInternal -Observer $ProgressObserver -Type 'STAGE_RETRY_SCHEDULED' -RunDirectory $RunDirectory -Data ([ordered]@{
-                            workflowVersion = $workflowVersion
-                            stepKey = [string]$step.stepKey
-                            provider = [string]$step.provider
-                            stage = [string]$step.stage
-                            targetDocumentId = Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId'
-                            round = [int]$step.round
-                            failedAttempt = [int]$step.attemptCount
-                            code = $errorCode
-                            retryMode = [string]$step.retryMode
-                        })
-                        continue
-                    }
-                    $state = Set-DuoForgeRunStateInternal -RunDirectory $RunDirectory -Status $targetStatus -Round ([int]$step.round)
-                    Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'STAGE_FAILED' -Status $targetStatus -Data ([ordered]@{ workflowVersion = $workflowVersion; stepKey = $step.stepKey; provider = $step.provider; stage = $step.stage; targetDocumentId = Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId'; round = $step.round; attempt = $step.attemptCount; code = $errorCode; category = $failureCategory; retryable = $retryable })
-                    Invoke-DuoForgeProgressObserverInternal -Observer $ProgressObserver -Type 'STAGE_FAILED' -RunDirectory $RunDirectory -Data ([ordered]@{
+                    $failureData = [ordered]@{
                         workflowVersion = $workflowVersion
                         stepKey = [string]$step.stepKey
                         provider = [string]$step.provider
@@ -606,10 +632,25 @@ function Invoke-DuoForgeStageEngine {
                         targetDocumentId = Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId'
                         round = [int]$step.round
                         attempt = [int]$step.attemptCount
+                        failedAttempt = [int]$step.attemptCount
                         code = $errorCode
+                        category = $failureCategory
                         retryable = $retryable
-                    })
-                    return [ordered]@{ status = $state.status; invoked = $invoked; failedStep = $step.stepKey; code = $errorCode; category = $failureCategory; retryable = $retryable }
+                        retryMode = [string]$step.retryMode
+                        diagnosticId = $correlation.diagnosticId
+                        diagnosticsLocation = $correlation.diagnosticsLocation
+                        diagnosticsRelativePath = $correlation.diagnosticsRelativePath
+                        diagnosticWarningCode = $correlation.diagnosticWarningCode
+                    }
+                    if ($retryScheduled) {
+                        Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'STAGE_RETRY_SCHEDULED' -Status 'RUNNING' -Data $failureData
+                        Invoke-DuoForgeProgressObserverInternal -Observer $ProgressObserver -Type 'STAGE_RETRY_SCHEDULED' -RunDirectory $RunDirectory -Data $failureData
+                        continue
+                    }
+                    $state = Set-DuoForgeRunStateInternal -RunDirectory $RunDirectory -Status $targetStatus -Round ([int]$step.round)
+                    Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'STAGE_FAILED' -Status $targetStatus -Data $failureData
+                    Invoke-DuoForgeProgressObserverInternal -Observer $ProgressObserver -Type 'STAGE_FAILED' -RunDirectory $RunDirectory -Data $failureData
+                    return [ordered]@{ status = $state.status; invoked = $invoked; failedStep = $step.stepKey; code = $errorCode; category = $failureCategory; retryable = $retryable; diagnosticId = $correlation.diagnosticId; diagnosticsLocation = $correlation.diagnosticsLocation; diagnosticsRelativePath = $correlation.diagnosticsRelativePath; diagnosticsPath = [string]$diagnostic.diagnosticsPath; diagnosticWarningCode = $correlation.diagnosticWarningCode }
                 }
             }
         }
@@ -621,14 +662,22 @@ function Invoke-DuoForgeStageEngine {
         }
 
         try {
-            $rendered = Render-DuoForgeFinalArtifacts -RunDirectory $RunDirectory -Graph $graph
+            $rendered = if ($null -ne $FinalRenderer) { & $FinalRenderer $RunDirectory $graph } else { Render-DuoForgeFinalArtifacts -RunDirectory $RunDirectory -Graph $graph }
             Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'FINAL_ARTIFACTS_RENDERED' -Status 'RUNNING' -Data ([ordered]@{ files = @($rendered.files | ForEach-Object { [System.IO.Path]::GetFileName($_) }) })
         }
         catch {
             $rendererCode = if ($_.Exception.Data.Contains('DuoForgeCode')) { [string]$_.Exception.Data['DuoForgeCode'] } else { 'DF-FINAL-RENDERER' }
+            $providers = Get-DuoForgeObjectValue -Object $manifest -Name 'providers' -Default ([ordered]@{})
+            $diagnostic = Write-DuoForgeDiagnosticInternal -RunDirectory $RunDirectory -Code $rendererCode -Category 'renderer-error' -Phase 'renderer' -Scope 'run' `
+                -Run ([ordered]@{ runId = Get-DuoForgeObjectValue -Object $manifest -Name 'runId'; workflowVersion = $workflowVersion; status = Get-DuoForgeObjectValue -Object $state -Name 'status'; lastCompletedStage = Get-DuoForgeObjectValue -Object $state -Name 'lastCompletedStage' }) `
+                -Recovery ([ordered]@{ retryable = $false; retryMode = ''; scheduled = $false }) `
+                -ProviderVersions ([ordered]@{ codex = Get-DuoForgeObjectValue -Object (Get-DuoForgeObjectValue -Object $providers -Name 'codex') -Name 'version'; claude = Get-DuoForgeObjectValue -Object (Get-DuoForgeObjectValue -Object $providers -Name 'claude') -Name 'version' }) -ErrorRecord $_
+            $correlation = Get-DuoForgeDiagnosticCorrelationInternal -Diagnostic $diagnostic
             $state = Set-DuoForgeRunStateInternal -RunDirectory $RunDirectory -Status 'RESUMABLE_ERROR'
-            Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'FINAL_ARTIFACTS_FAILED' -Status 'RESUMABLE_ERROR' -Data ([ordered]@{ category = 'renderer-error'; code = $rendererCode; exceptionType = $_.Exception.GetType().Name })
-            return [ordered]@{ status = $state.status; invoked = $invoked; failedStep = 'final-renderer'; code = $rendererCode }
+            $rendererData = [ordered]@{ category = 'renderer-error'; code = $rendererCode; exceptionType = $_.Exception.GetType().Name; diagnosticId = $correlation.diagnosticId; diagnosticsLocation = $correlation.diagnosticsLocation; diagnosticsRelativePath = $correlation.diagnosticsRelativePath; diagnosticWarningCode = $correlation.diagnosticWarningCode }
+            Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'FINAL_ARTIFACTS_FAILED' -Status 'RESUMABLE_ERROR' -Data $rendererData
+            Invoke-DuoForgeProgressObserverInternal -Observer $ProgressObserver -Type 'FINAL_ARTIFACTS_FAILED' -RunDirectory $RunDirectory -Data $rendererData
+            return [ordered]@{ status = $state.status; invoked = $invoked; failedStep = 'final-renderer'; code = $rendererCode; diagnosticId = $correlation.diagnosticId; diagnosticsLocation = $correlation.diagnosticsLocation; diagnosticsRelativePath = $correlation.diagnosticsRelativePath; diagnosticsPath = [string]$diagnostic.diagnosticsPath; diagnosticWarningCode = $correlation.diagnosticWarningCode }
         }
 
         $ledger = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'issues.json')

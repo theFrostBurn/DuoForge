@@ -736,6 +736,10 @@ try {
         $runDirectory = Join-Path $tempRoot 'serialized-v1-results\fixture-workflow-v1-resume'
         [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($runDirectory)) | Out-Null
         Copy-Item -LiteralPath $fixtureRoot -Destination $runDirectory -Recurse
+        $legacyLogPath = Join-Path $runDirectory 'logs\legacy.log'
+        [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($legacyLogPath)) | Out-Null
+        [System.IO.File]::WriteAllText($legacyLogPath, 'legacy-log-must-remain-byte-identical', [System.Text.UTF8Encoding]::new($false))
+        $legacyLogHash = (Get-FileHash -LiteralPath $legacyLogPath -Algorithm SHA256).Hash
 
         $snapshotAPath = Join-Path $runDirectory 'inputs\snapshots\S000001.md'
         $snapshotBPath = Join-Path $runDirectory 'inputs\snapshots\S000002.md'
@@ -819,6 +823,8 @@ try {
         foreach ($path in $immutableRunHashesBefore.Keys) {
             Assert-Equal (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash $immutableRunHashesBefore[$path]
         }
+        Assert-True (Test-Path -LiteralPath $legacyLogPath -PathType Leaf)
+        Assert-Equal (Get-FileHash -LiteralPath $legacyLogPath -Algorithm SHA256).Hash $legacyLogHash
     }
 
     Test-Case '공동 문서 요청은 입력 폴더 안의 결과 루트를 차단한다' {
@@ -1296,6 +1302,9 @@ try {
             [System.IO.Directory]::CreateDirectory($runDirectory) | Out-Null
             Copy-Item -Path (Join-Path $templateDirectory '*') -Destination $runDirectory -Recurse -Force
             foreach ($relativeDirectory in @('rounds', 'control', 'logs', 'final')) { [System.IO.Directory]::CreateDirectory((Join-Path $runDirectory $relativeDirectory)) | Out-Null }
+            $legacyLogPath = Join-Path $runDirectory 'logs\legacy.log'
+            [System.IO.File]::WriteAllText($legacyLogPath, ("legacy-{0}" -f [string]$case.mode), [System.Text.UTF8Encoding]::new($false))
+            $legacyLogHash = (Get-FileHash -LiteralPath $legacyLogPath -Algorithm SHA256).Hash
 
             $snapshotAPath = Join-Path $runDirectory 'inputs\snapshots\S000001.md'
             $snapshotBPath = Join-Path $runDirectory 'inputs\snapshots\S000002.md'
@@ -1369,6 +1378,8 @@ try {
             Assert-Equal ([string]$result.status) 'COMPLETED'
             Assert-Equal (Get-FileHash -LiteralPath $contextPlanPath -Algorithm SHA256).Hash $contextPlanHash
             foreach ($name in @($case.expectedFinalFiles)) { Assert-True (Test-Path -LiteralPath (Join-Path $runDirectory "final\$name") -PathType Leaf) }
+            Assert-True (Test-Path -LiteralPath $legacyLogPath -PathType Leaf)
+            Assert-Equal (Get-FileHash -LiteralPath $legacyLogPath -Algorithm SHA256).Hash $legacyLogHash
         }
 
         foreach ($fixturePath in $fixtureHashes.Keys) {
@@ -1673,6 +1684,8 @@ try {
         Assert-Equal $run.status 'SNAPSHOTTED'
         Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'manifest.json') -PathType Leaf)
         Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'inputs\snapshots\S000001.md') -PathType Leaf)
+        Assert-False (Test-Path -LiteralPath (Join-Path $run.runDirectory 'logs'))
+        Assert-False (Test-Path -LiteralPath (Join-Path $run.runDirectory 'diagnostics.jsonl'))
         Assert-Equal $run.manifest.schemaVersion 4
         Assert-Equal $run.manifest.workflowVersion 'workflow-v2'
         Assert-Equal $run.manifest.promptTemplateVersion 'duoforge-stage-v3'
@@ -4272,6 +4285,8 @@ Setext 결론
         $events = Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ForEach-Object { $_ | ConvertFrom-Json }
         Assert-Equal @($events | Where-Object { $_.type -eq 'COMPLETED_OUTPUT_CORRUPTION_DETECTED' }).Count 2
     }
+
+    . (Join-Path $PSScriptRoot 'Test-Diagnostics.ps1')
 }
 finally {
     Write-Host ''

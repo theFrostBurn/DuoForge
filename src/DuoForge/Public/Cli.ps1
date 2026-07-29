@@ -1,9 +1,17 @@
-function Invoke-DuoForgeCli {
+function Invoke-DuoForgeCliCoreInternal {
     [CmdletBinding()]
-    param([string[]]$Arguments = @())
+    param(
+        [string[]]$Arguments = @(),
+        [scriptblock]$InputReader,
+        [scriptblock]$ResumeInvoker,
+        [scriptblock]$InteractiveHostProbe
+    )
+
+    $isInteractive = { if ($null -ne $InteractiveHostProbe) { return [bool](& $InteractiveHostProbe) }; return [bool](Test-DuoForgeInteractiveHost) }.GetNewClosure()
+    $readInput = { param([string]$Prompt) if ($null -ne $InputReader) { return [string](& $InputReader $Prompt) }; return [string](Read-Host $Prompt) }.GetNewClosure()
 
     if ($Arguments.Count -eq 0) {
-        if (Test-DuoForgeInteractiveHost) {
+        if (& $isInteractive) {
             Invoke-DuoForgeInteractiveHome
         }
         else {
@@ -73,14 +81,14 @@ function Invoke-DuoForgeCli {
                 Write-Host '새 설명을 요청하려면 --live를 추가해 다시 실행해 주세요.' -ForegroundColor Yellow
                 return
             }
-            if (-not (Test-DuoForgeInteractiveHost)) { throw (New-DuoForgeException -Code 'DF-LIVE-NONINTERACTIVE' -Message '라이브 설명은 대화형 PowerShell에서만 확인할 수 있습니다.') }
+            if (-not (& $isInteractive)) { throw (New-DuoForgeException -Code 'DF-LIVE-NONINTERACTIVE' -Message '라이브 설명은 대화형 PowerShell에서만 확인할 수 있습니다.') }
             $run = Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace
             $requiredCalls = if ($provider -eq 'both') { 2 } else { 1 }
             if ([int]$existing.budget.remaining -lt $requiredCalls) { throw (New-DuoForgeException -Code 'DF-EXPLANATION-LIMIT' -Message '설명 호출 잔여 예산이 부족합니다.') }
             Write-Host ('쟁점 {0}에 {1} 관점, {2} 수준, {3} 초점으로 설명을 요청합니다.' -f $issueId, $provider, $level, $focus) -ForegroundColor Yellow
             Write-DuoForgeProviderSelectionSummary -ProviderSelections $run.manifest.providerSelections
             Write-Host ('이번 설명 호출 수: {0}, 실행 전체 잔여 예산: {1}' -f $requiredCalls, $existing.budget.remaining) -ForegroundColor Yellow
-            $confirmation = (Read-Host '실제 설명 호출을 시작하려면 LIVE를 입력하세요').Trim()
+            $confirmation = ([string](& $readInput '실제 설명 호출을 시작하려면 LIVE를 입력하세요')).Trim()
             if ($confirmation -cne 'LIVE') { Write-Host '설명 호출을 취소했습니다.'; return }
             $result = Invoke-DuoForgeIssueExplanationInternal -RunId $runId -IssueId $issueId -Provider $provider -Level $level -Focus $focus -ResultsRoot $workspace -LiveConsent $true
             Write-DuoForgeExplanationRecords -Records @($result.explanations)
@@ -145,8 +153,8 @@ function Invoke-DuoForgeCli {
             }
             $confirmed = [bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'confirm-partial' -Default $false)
             if (-not $confirmed) {
-                if (-not (Test-DuoForgeInteractiveHost)) { throw (New-DuoForgeException -Code 'DF-DEFER-CONFIRM' -Message '비대화형 보류에는 --confirm-partial이 필요합니다.') }
-                $confirmation = (Read-Host 'Major 쟁점을 보류하면 부분 완료로 종료됩니다. DEFER를 입력하세요').Trim()
+                if (-not (& $isInteractive)) { throw (New-DuoForgeException -Code 'DF-DEFER-CONFIRM' -Message '비대화형 보류에는 --confirm-partial이 필요합니다.') }
+                $confirmation = ([string](& $readInput 'Major 쟁점을 보류하면 부분 완료로 종료됩니다. DEFER를 입력하세요')).Trim()
                 $confirmed = $confirmation -ceq 'DEFER'
             }
             if (-not $confirmed) { Write-Host '보류를 취소했습니다.'; return }
@@ -185,16 +193,16 @@ function Invoke-DuoForgeCli {
             if ([string]$run.state.status -eq 'AWAITING_EVIDENCE') {
                 throw (New-DuoForgeException -Code 'DF-EVIDENCE-REQUIRED' -Message '요청된 근거를 먼저 추가해야 라이브 재개할 수 있습니다.')
             }
-            if (-not (Test-DuoForgeInteractiveHost)) {
+            if (-not (& $isInteractive)) {
                 throw (New-DuoForgeException -Code 'DF-LIVE-NONINTERACTIVE' -Message '라이브 실행은 대화형 PowerShell에서만 확인할 수 있습니다.')
             }
             $selections = Get-DuoForgeRunProviderSelectionsInternal -RunDirectory ([string]$run.runDirectory)
             Write-Host '선택한 스냅샷 내용이 Codex와 Claude에 전송됩니다.' -ForegroundColor Yellow
             Write-DuoForgeProviderSelectionSummary -ProviderSelections $selections
             Write-Host ("Codex 추가 호출 최악: {0}, Claude 추가 호출 최악: {1}" -f $budget.providers.codex.maximumAdditionalCalls, $budget.providers.claude.maximumAdditionalCalls) -ForegroundColor Yellow
-            $confirmation = (Read-Host '실제 공급자 호출을 시작하려면 LIVE를 입력하세요').Trim()
+            $confirmation = ([string](& $readInput '실제 공급자 호출을 시작하려면 LIVE를 입력하세요')).Trim()
             if ($confirmation -cne 'LIVE') { Write-Host '라이브 실행을 취소했습니다.'; return }
-            $result = Invoke-DuoForgeResumeWithProgressInternal -RunId $runId -ResultsRoot $workspace -WaitForAcknowledgement
+            $result = if ($null -ne $ResumeInvoker) { & $ResumeInvoker $runId $workspace $true } else { Invoke-DuoForgeResumeWithProgressInternal -RunId $runId -ResultsRoot $workspace -WaitForAcknowledgement -ReturnTarget shell }
             $result | ConvertTo-Json -Depth 30
             return
         }
@@ -219,7 +227,7 @@ function Invoke-DuoForgeCli {
                 }
             }
             $selectionValidation = Test-DuoForgeProviderSelectionsInternal -Selections $providerSelections
-            if (-not $selectionValidation.valid -and (Test-DuoForgeInteractiveHost)) {
+            if (-not $selectionValidation.valid -and (& $isInteractive)) {
                 $providerSelections = Complete-DuoForgeInteractiveProviderSelectionsInternal -InitialSelections $providerSelections
                 if ($null -eq $providerSelections) { Write-Host '모델 선택을 취소했습니다.'; return }
             }
@@ -253,15 +261,46 @@ function Invoke-DuoForgeCli {
             if (-not $validation.valid) { Write-DuoForgeValidationErrors -Validation $validation; throw (New-DuoForgeException -Code 'DF-START-BLOCKED' -Message '실행 전 검증에 실패했습니다.') }
             Write-DuoForgeExecutionPlan -Validation $validation
             if ([bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'plan-only' -Default $false)) { return }
-            if (-not (Test-DuoForgeInteractiveHost)) {
+            if (-not (& $isInteractive)) {
                 throw (New-DuoForgeException -Code 'DF-CONFIRM-NONINTERACTIVE' -Message 'v1은 확정 실행 전에 대화형 사용자 확인이 필요합니다. 비대화형 환경에서는 --plan-only를 사용해 주세요.')
             }
-            $confirmation = (Read-Host '스냅샷과 실행 기록을 만들까요? [Y/N]').Trim()
+            $confirmation = ([string](& $readInput '스냅샷과 실행 기록을 만들까요? [Y/N]')).Trim()
             if ($confirmation -notin @('Y', 'y')) { Write-Host '취소했습니다. 확정 실행은 생성하지 않았습니다.'; return }
             $run = New-DuoForgeRunInternal -ValidationResult $validation
             $run | ConvertTo-Json -Depth 20
             return
         }
         default { throw (New-DuoForgeException -Code 'DF-CLI-COMMAND' -Message "알 수 없는 명령입니다: $command") }
+    }
+}
+
+function Invoke-DuoForgeCli {
+    [CmdletBinding()]
+    param([string[]]$Arguments = @())
+
+    try {
+        return Invoke-DuoForgeCliCoreInternal -Arguments $Arguments
+    }
+    catch {
+        $originalError = $_
+        if (-not $originalError.Exception.Data.Contains('DuoForgeDiagnosticId')) {
+            $runDirectory = ''
+            $runContext = $null
+            try {
+                $parsed = ConvertFrom-DuoForgeCliArguments -Arguments $Arguments
+                $runId = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'run' -Default '')
+                if (-not [string]::IsNullOrWhiteSpace($runId)) {
+                    $workspace = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')
+                    $run = Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace
+                    $runDirectory = [string]$run.runDirectory
+                    $runContext = [ordered]@{ runId = $runId; workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $run.manifest; status = Get-DuoForgeObjectValue -Object $run.state -Name 'status'; lastCompletedStage = Get-DuoForgeObjectValue -Object $run.state -Name 'lastCompletedStage' }
+                }
+            }
+            catch { }
+            $code = if ($originalError.Exception.Data.Contains('DuoForgeCode')) { [string]$originalError.Exception.Data['DuoForgeCode'] } else { 'DF-CLI-UNEXPECTED' }
+            $diagnostic = Write-DuoForgeDiagnosticInternal -RunDirectory $runDirectory -Code $code -Category 'cli' -Phase 'cli' -Scope 'local' -Run $runContext -ErrorRecord $originalError
+            Add-DuoForgeDiagnosticMetadataToExceptionInternal -Exception $originalError.Exception -Diagnostic $diagnostic
+        }
+        throw $originalError.Exception
     }
 }

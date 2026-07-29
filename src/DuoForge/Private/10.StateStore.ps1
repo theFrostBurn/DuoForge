@@ -313,7 +313,7 @@ function Invoke-WithDuoForgeRunMutationTransactionInternal {
         throw $originalException
     }
     try { Remove-DuoForgeTransactionDirectoryInternal -TransactionDirectory $transactionDirectory }
-    catch { Write-Verbose ("커밋된 DuoForge 트랜잭션 정리를 다음 실행으로 미룹니다: {0}" -f $_.Exception.Message) }
+    catch { Write-Verbose '커밋된 DuoForge 트랜잭션 정리를 다음 실행으로 미룹니다.' }
     return $result
 }
 
@@ -1066,9 +1066,12 @@ function New-DuoForgeRunInternal {
         [System.Collections.IDictionary]$ValidationResult
     )
 
-    if (-not [bool]$ValidationResult.valid) {
-        throw (New-DuoForgeException -Code 'DF-RUN-INVALID' -Message '검증에 실패한 요청으로 실행을 만들 수 없습니다.')
-    }
+    $runId = ''
+    $runDirectory = ''
+    try {
+        if (-not [bool]$ValidationResult.valid) {
+            throw (New-DuoForgeException -Code 'DF-RUN-INVALID' -Message '검증에 실패한 요청으로 실행을 만들 수 없습니다.')
+        }
 
     $requestSelections = Get-DuoForgeObjectValue -Object $ValidationResult.request -Name 'providerSelections'
     $null = Assert-DuoForgeProviderSelectionsInternal -Selections $requestSelections
@@ -1081,7 +1084,7 @@ function New-DuoForgeRunInternal {
 
     return Invoke-WithDuoForgeRunLock -RunDirectory $runDirectory -ScriptBlock {
         foreach ($relativeDirectory in @(
-            'inputs\snapshots', 'inputs\context-packs', 'rounds', 'decisions', 'control', 'logs', 'final'
+            'inputs\snapshots', 'inputs\context-packs', 'rounds', 'decisions', 'control', 'final'
         )) {
             [System.IO.Directory]::CreateDirectory((Join-Path $runDirectory $relativeDirectory)) | Out-Null
         }
@@ -1185,6 +1188,24 @@ function New-DuoForgeRunInternal {
             status = $state.status
             manifest = $manifest
         }
+        }
+    }
+    catch {
+        if (-not $_.Exception.Data.Contains('DuoForgeDiagnosticId')) {
+            $code = if ($_.Exception.Data.Contains('DuoForgeCode')) { [string]$_.Exception.Data['DuoForgeCode'] } else { 'DF-RUN-CREATE' }
+            $runContext = [ordered]@{ runId = $runId; workflowVersion = 'workflow-v2'; status = 'CREATED'; lastCompletedStage = '' }
+            $doctor = Get-DuoForgeObjectValue -Object $ValidationResult -Name 'doctor'
+            $providers = Get-DuoForgeObjectValue -Object $doctor -Name 'providers'
+            $codexProvider = Get-DuoForgeObjectValue -Object $providers -Name 'codex'
+            $claudeProvider = Get-DuoForgeObjectValue -Object $providers -Name 'claude'
+            $providerVersions = [ordered]@{
+                codex = [string](Get-DuoForgeObjectValue -Object $codexProvider -Name 'version')
+                claude = [string](Get-DuoForgeObjectValue -Object $claudeProvider -Name 'version')
+            }
+            $diagnostic = Write-DuoForgeDiagnosticInternal -RunDirectory $runDirectory -Code $code -Category 'run-create' -Phase 'run-create' -Scope 'run' -Run $runContext -ProviderVersions $providerVersions -ErrorRecord $_
+            Add-DuoForgeDiagnosticMetadataToExceptionInternal -Exception $_.Exception -Diagnostic $diagnostic
+        }
+        throw
     }
 }
 
