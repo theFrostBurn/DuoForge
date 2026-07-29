@@ -43,7 +43,18 @@ function Invoke-DuoForgeCliCoreInternal {
             $workspace = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')
             $runs = @(Get-DuoForgeRunsInternal -ResultsRoot $workspace)
             if ([bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'json' -Default $false)) { $runs | ConvertTo-Json -Depth 20 }
-            else { $runs | Format-Table runId, name, mode, status, updatedAt -AutoSize | Out-Host }
+            else {
+                $rows = foreach ($item in $runs) {
+                    [pscustomobject][ordered]@{
+                        '작업 ID' = $item.runId
+                        '이름' = $item.name
+                        '작업 방식' = Get-DuoForgeDisplayModeLabelInternal -Mode ([string]$item.mode)
+                        '상태' = Get-DuoForgeDisplayStateLabelInternal -Status ([string]$item.status)
+                        '최근 변경' = $item.updatedAt
+                    }
+                }
+                $rows | Format-Table -AutoSize | Out-Host
+            }
             return
         }
         'status' {
@@ -52,7 +63,16 @@ function Invoke-DuoForgeCliCoreInternal {
             $workspace = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')
             $run = Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace
             if ([bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'json' -Default $false)) { $run | ConvertTo-Json -Depth 100 }
-            else { $run.state | Format-List | Out-Host }
+            else {
+                [pscustomobject][ordered]@{
+                    '작업 ID' = $run.state.runId
+                    '이름' = $run.manifest.name
+                    '작업 방식' = Get-DuoForgeDisplayModeLabelInternal -Mode ([string]$run.state.mode)
+                    '상태' = Get-DuoForgeDisplayStateLabelInternal -Status ([string]$run.state.status)
+                    '토론 회차' = $run.state.round
+                    '마지막 완료 단계' = Get-DuoForgeDisplayStageLabelInternal -Stage ([string]$run.state.lastCompletedStage)
+                } | Format-List | Out-Host
+            }
             return
         }
         'issues' {
@@ -88,7 +108,7 @@ function Invoke-DuoForgeCliCoreInternal {
             $run = Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace
             $requiredCalls = if ($provider -eq 'both') { 2 } else { 1 }
             if ([int]$existing.budget.remaining -lt $requiredCalls) { throw (New-DuoForgeException -Code 'DF-EXPLANATION-LIMIT' -Message '설명 호출 잔여 예산이 부족합니다.') }
-            Write-Host ('쟁점 {0}에 {1} 관점, {2} 수준, {3} 초점으로 설명을 요청합니다.' -f $issueId, $provider, $level, $focus) -ForegroundColor Yellow
+            Write-Host ('검토 항목 {0}에 {1} 관점, {2} 수준, {3} 초점으로 설명을 요청합니다.' -f $issueId, $provider, $level, $focus) -ForegroundColor Yellow
             Write-DuoForgeProviderSelectionSummary -ProviderSelections $run.manifest.providerSelections
             Write-Host ('이번 설명 호출 수: {0}, 실행 전체 잔여 예산: {1}' -f $requiredCalls, $existing.budget.remaining) -ForegroundColor Yellow
             $confirmation = ([string](& $readInput '실제 설명 호출을 시작하려면 LIVE를 입력하세요')).Trim()
@@ -157,7 +177,7 @@ function Invoke-DuoForgeCliCoreInternal {
             $confirmed = [bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'confirm-partial' -Default $false)
             if (-not $confirmed) {
                 if (-not (& $isInteractive)) { throw (New-DuoForgeException -Code 'DF-DEFER-CONFIRM' -Message '비대화형 보류에는 --confirm-partial이 필요합니다.') }
-                $confirmation = ([string](& $readInput 'Major 쟁점을 보류하면 부분 완료로 종료됩니다. DEFER를 입력하세요')).Trim()
+                $confirmation = ([string](& $readInput '중요 검토 항목을 보류하면 일부 범위만 완료됩니다. DEFER를 입력하세요')).Trim()
                 $confirmed = $confirmation -ceq 'DEFER'
             }
             if (-not $confirmed) { Write-Host '보류를 취소했습니다.'; return }
@@ -183,11 +203,11 @@ function Invoke-DuoForgeCliCoreInternal {
             $run = Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace
             $budget = Get-DuoForgeRemainingCallBudget -RunDirectory ([string]$run.runDirectory)
             if (-not [bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'live' -Default $false)) {
-                Write-Host ("현재 상태: {0}" -f $run.state.status)
-                if ([string]$run.state.status -eq 'AWAITING_EVIDENCE') { Write-Host '요청된 Markdown 근거를 evidence 명령으로 추가한 뒤 재개해 주세요.' -ForegroundColor Yellow }
-                elseif ([string]$run.state.status -eq 'PAUSED_QUOTA') { Write-Host '구독 한도가 회복되고 구독 로그인이 유효한 뒤 재개해 주세요. API 과금 방식으로 자동 전환하지 않습니다.' -ForegroundColor Yellow }
-                elseif ([string]$run.state.status -eq 'BLOCKED_PREFLIGHT') { Write-Host 'doctor와 공급자 구독 로그인을 다시 확인한 뒤 재개해 주세요.' -ForegroundColor Yellow }
-                elseif ([string]$run.state.status -eq 'PAUSED_USER') { Write-Host '마지막 완료 체크포인트부터 재개할 수 있습니다.' -ForegroundColor Yellow }
+                Write-Host ("현재 상태: {0}" -f (Get-DuoForgeDisplayStateLabelInternal -Status ([string]$run.state.status)))
+                if ([string]$run.state.status -eq 'AWAITING_EVIDENCE') { Write-Host '요청된 Markdown 자료를 evidence 명령으로 추가한 뒤 계속해 주세요.' -ForegroundColor Yellow }
+                elseif ([string]$run.state.status -eq 'PAUSED_QUOTA') { Write-Host '사용 한도가 회복되고 구독 로그인이 유효한 뒤 계속해 주세요. API 과금 방식으로 자동 전환하지 않습니다.' -ForegroundColor Yellow }
+                elseif ([string]$run.state.status -eq 'BLOCKED_PREFLIGHT') { Write-Host 'doctor와 Codex·Claude 구독 로그인을 다시 확인한 뒤 계속해 주세요.' -ForegroundColor Yellow }
+                elseif ([string]$run.state.status -eq 'PAUSED_USER') { Write-Host '마지막 완료 지점부터 계속할 수 있습니다.' -ForegroundColor Yellow }
                 Write-Host (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Codex' -ProviderBudget $budget.providers.codex)
                 Write-Host (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Claude' -ProviderBudget $budget.providers.claude)
                 Write-Host '실제 구독 기반 CLI 호출을 시작하려면 --live를 추가해 다시 실행해 주세요.' -ForegroundColor Yellow
@@ -200,7 +220,7 @@ function Invoke-DuoForgeCliCoreInternal {
                 throw (New-DuoForgeException -Code 'DF-LIVE-NONINTERACTIVE' -Message '라이브 실행은 대화형 PowerShell에서만 확인할 수 있습니다.')
             }
             $selections = Get-DuoForgeRunProviderSelectionsInternal -RunDirectory ([string]$run.runDirectory)
-            Write-Host '선택한 스냅샷 내용이 Codex와 Claude에 전송됩니다.' -ForegroundColor Yellow
+            Write-Host '선택한 입력 사본 내용이 Codex와 Claude에 전송됩니다.' -ForegroundColor Yellow
             Write-DuoForgeProviderSelectionSummary -ProviderSelections $selections
             Write-Host (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Codex' -ProviderBudget $budget.providers.codex) -ForegroundColor Yellow
             Write-Host (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Claude' -ProviderBudget $budget.providers.claude) -ForegroundColor Yellow

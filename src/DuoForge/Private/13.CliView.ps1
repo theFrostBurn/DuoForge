@@ -22,13 +22,13 @@ DuoForge
   duoforge resume --run <실행 ID> [--workspace <폴더>] [--live]
   duoforge list [--workspace <폴더>] [--json]
 
-추론 정도:
+분석 깊이:
   - Codex: low, medium, high, xhigh, max, ultra
   - Claude: low, medium, high, xhigh, max
 
 안전 원칙:
   - API 키 인증은 사용하지 않습니다.
-  - 새 실행마다 두 공급자의 모델과 추론 정도를 명시적으로 선택합니다.
+  - 새 작업마다 Codex와 Claude의 모델과 분석 깊이를 명시적으로 선택합니다.
   - 모델 호출 전 입력, 전송 범위와 최악 호출 수를 확인합니다.
   - 3A는 현재 Windows 격리 후보가 필수 차단 계약을 충족하지 못해 비활성화되어 있습니다.
 
@@ -42,7 +42,7 @@ function Write-DuoForgeDoctorReport {
     param([Parameter(Mandatory)][System.Collections.IDictionary]$Report)
 
     Write-Host ''
-    Write-Host 'DuoForge 환경 진단'
+    Write-Host 'DuoForge 실행 환경 확인'
     Write-Host ('PowerShell: {0} ({1})' -f $Report.powershell.version, $(if ($Report.powershell.ready) { '정상' } else { '차단' }))
     foreach ($provider in @('codex', 'claude')) {
         $item = $Report.providers[$provider]
@@ -56,7 +56,7 @@ function Write-DuoForgeDoctorReport {
     else {
         Write-Host '✓ API 인증 우선 조건 없음'
     }
-    Write-Host ('문서 모드 준비: {0}' -f $(if ($Report.readyForDocumentModes) { '예' } else { '아니요' }))
+    Write-Host ('문서 작업 준비: {0}' -f $(if ($Report.readyForDocumentModes) { '예' } else { '아니요' }))
     Write-Host '프로젝트 비교 3A: 비활성화 (범위 밖 읽기·자식 프로세스 차단 실패)'
     foreach ($recommendation in $Report.recommendations) {
         Write-Host ("- $recommendation")
@@ -71,7 +71,7 @@ function Write-DuoForgeProviderSelectionSummary {
     foreach ($provider in @('codex', 'claude')) {
         $options = Get-DuoForgeProviderSelectionOptionsInternal -Provider $provider
         $selection = Get-DuoForgeObjectValue -Object $ProviderSelections -Name $provider
-        Write-Host ('{0} 선택: 모델={1}, 추론 정도={2}' -f $options.displayName, $selection.model, $selection.reasoningEffort)
+        Write-Host ('{0} 선택: 모델={1}, 분석 깊이={2}' -f $options.displayName, $selection.model, $selection.reasoningEffort)
     }
 }
 
@@ -94,12 +94,12 @@ function Write-DuoForgeExecutionPlan {
     param([Parameter(Mandatory)][System.Collections.IDictionary]$Validation)
 
     Write-Host ''
-    Write-Host '실행 전 확인'
-    Write-Host ('모드: {0}' -f $Validation.request.mode)
-    Write-Host ('라운드: {0}' -f $Validation.request.maxRounds)
+    Write-Host '작업 시작 전 확인'
+    Write-Host ('작업 방식: {0}' -f (Get-DuoForgeDisplayModeLabelInternal -Mode ([string]$Validation.request.mode)))
+    Write-Host ('토론 회차: {0}' -f $Validation.request.maxRounds)
     Write-Host ('누적 모델 실행 시간 상한: {0}분' -f (Get-DuoForgeConfig).limits.maxWallClockMinutes)
-    Write-Host ('라운드마다 일시정지: {0}' -f $(if ([bool](Get-DuoForgeObjectValue -Object $Validation.request -Name 'pauseAfterRound' -Default $false)) { '예' } else { '아니요' }))
-    Write-Host ('결과 루트: {0}' -f $Validation.resultsRoot)
+    Write-Host ('토론 회차마다 일시정지: {0}' -f $(if ([bool](Get-DuoForgeObjectValue -Object $Validation.request -Name 'pauseAfterRound' -Default $false)) { '예' } else { '아니요' }))
+    Write-Host ('결과 저장 위치: {0}' -f $Validation.resultsRoot)
     Write-DuoForgeProviderSelectionSummary -ProviderSelections $Validation.request.providerSelections
     if ($Validation.request.mode -eq 'shared-document') {
         Write-Host ('입력: {0} ({1})' -f $Validation.inputs.primary.path, (Format-DuoForgeByteSize -Bytes $Validation.inputs.primary.bytes))
@@ -107,13 +107,13 @@ function Write-DuoForgeExecutionPlan {
     elseif ($Validation.request.mode -in @('document-merge', 'dual-document')) {
         foreach ($documentId in @('A', 'B')) {
             $context = $Validation.inputs.documents[$documentId].context
-            Write-Host ('문서 {0}: {1}, 자동 문맥 {2}개 / {3}' -f $documentId, $Validation.inputs.documents[$documentId].primary.path, $context.includedFiles, (Format-DuoForgeByteSize -Bytes $context.includedBytes))
+            Write-Host ('문서 {0}: {1}, 함께 읽을 참고 파일 {2}개 / {3}' -f $documentId, $Validation.inputs.documents[$documentId].primary.path, $context.includedFiles, (Format-DuoForgeByteSize -Bytes $context.includedBytes))
         }
     }
     $contextPlan = Get-DuoForgeObjectValue -Object $Validation -Name 'contextPlan'
     if ($null -ne $contextPlan -and [bool](Get-DuoForgeObjectValue -Object $contextPlan -Name 'enabled' -Default $false)) {
-        Write-Host ('문맥 배치: {0}/{1}, 예상 파일 커버리지 {2}%, 바이트 커버리지 {3}%' -f $contextPlan.selectedBatchCount, $contextPlan.requiredBatchCount, $contextPlan.predictedFileCoveragePercent, $contextPlan.predictedByteCoveragePercent)
-        if ([bool]$contextPlan.requiresPartialConsent) { Write-Host '일부 문맥만 분석되므로 결과는 COMPLETED_PARTIAL로 제한됩니다.' -ForegroundColor Yellow }
+        Write-Host ('나눠서 분석할 묶음: {0}/{1}, 예상 파일 분석 범위 {2}%, 바이트 분석 범위 {3}%' -f $contextPlan.selectedBatchCount, $contextPlan.requiredBatchCount, $contextPlan.predictedFileCoveragePercent, $contextPlan.predictedByteCoveragePercent)
+        if ([bool]$contextPlan.requiresPartialConsent) { Write-Host '일부 내용만 분석하므로 결과는 일부 범위만 완료된 것으로 표시됩니다.' -ForegroundColor Yellow }
     }
     foreach ($warning in @($Validation.warnings)) {
         Write-Host ("경고 [$($warning.code)] $($warning.message)") -ForegroundColor Yellow
@@ -123,8 +123,8 @@ function Write-DuoForgeExecutionPlan {
         $providerLabel = if ($provider -eq 'codex') { 'Codex' } else { 'Claude' }
         Write-Host ('{0} 호출: 기본 {1}회, 재시도 최대 {2}회, 총 최대 {3}회 (한도 {4}회)' -f $providerLabel, $providerPlan.baseCalls, $providerPlan.retryBudget, $providerPlan.maximumCalls, $providerPlan.limit)
     }
-    Write-Host '선택한 입력 내용은 두 모델 공급자에게 전송될 수 있습니다.' -ForegroundColor Yellow
-    Write-Host 'start는 검증된 스냅샷만 만들며 모델을 호출하지 않습니다. 이후 resume --live에서 다시 확인하고 호출합니다.' -ForegroundColor Yellow
+    Write-Host '선택한 입력 내용은 Codex와 Claude에 전송될 수 있습니다.' -ForegroundColor Yellow
+    Write-Host 'start는 확인된 입력 사본만 만들며 AI를 호출하지 않습니다. 이후 resume --live에서 다시 확인하고 호출합니다.' -ForegroundColor Yellow
 }
 
 function Write-DuoForgeIssueList {
@@ -132,27 +132,27 @@ function Write-DuoForgeIssueList {
     param([AllowEmptyCollection()][Parameter(Mandatory)][object[]]$Issues)
 
     if ($Issues.Count -eq 0) {
-        Write-Host '등록된 쟁점이 없습니다.'
+        Write-Host '등록된 검토 항목이 없습니다.'
         return
     }
 
     $rows = foreach ($issue in $Issues) {
         if ($issue -is [System.Collections.IDictionary]) {
             [pscustomobject][ordered]@{
-                issueId = $issue['issueId']
-                severity = $issue['severity']
-                blocking = $issue['blocking']
-                resolutionStatus = $issue['resolutionStatus']
-                claim = $issue['claim']
+                '번호' = $issue['issueId']
+                '중요도' = Get-DuoForgeDisplaySeverityLabelInternal -Severity ([string]$issue['severity'])
+                '진행 차단' = if ([bool]$issue['blocking']) { '예' } else { '아니요' }
+                '처리 상태' = Get-DuoForgeDisplayIssueStatusLabelInternal -Status ([string]$issue['resolutionStatus'])
+                '내용' = $issue['claim']
             }
         }
         else {
             [pscustomobject][ordered]@{
-                issueId = $issue.issueId
-                severity = $issue.severity
-                blocking = $issue.blocking
-                resolutionStatus = $issue.resolutionStatus
-                claim = $issue.claim
+                '번호' = $issue.issueId
+                '중요도' = Get-DuoForgeDisplaySeverityLabelInternal -Severity ([string]$issue.severity)
+                '진행 차단' = if ([bool]$issue.blocking) { '예' } else { '아니요' }
+                '처리 상태' = Get-DuoForgeDisplayIssueStatusLabelInternal -Status ([string]$issue.resolutionStatus)
+                '내용' = $issue.claim
             }
         }
     }

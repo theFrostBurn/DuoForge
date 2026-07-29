@@ -419,15 +419,94 @@ try {
         Assert-False ([bool]$surface.options[3].enabled)
         Assert-ContainsText ([string]$surface.options[3].disabledReason) 'DF-PREFLIGHT-3A-ISOLATION'
         Assert-Equal ((@($surface.modeLabels) -join ',')) '컨셉으로 공동 문서 만들기,두 문서를 하나로 합의하기,두 문서를 각각 개선하기,두 프로젝트 비교하기(비활성)'
-        Assert-Equal ((@($surface.stageLabels) -join ',')) '독립 병합 후보,문서 A/B 검토,대상 문서 개정,대상 문서 최종 검증'
+        Assert-Equal ((@($surface.stageLabels) -join ',')) '각자 통합안 작성,두 문서 함께 검토,문서 수정,수정 문서 최종 확인'
         Assert-Equal ((@($surface.targetLabels) -join ',')) '문서 A,문서 B,공동 문서,합의 문서 C'
-        Assert-Equal ((@($surface.stateLabels) -join ',')) '재개 가능 오류,구독 한도 대기,사전 검사 차단'
-        Assert-Equal ((@($surface.retryLabels) -join ',')) '형식 복구 재시도 대기,공급자 호출 재시도 대기'
+        Assert-Equal ((@($surface.stateLabels) -join ',')) '오류 발생 · 이어서 가능,사용 한도 회복 대기,실행 환경 문제로 멈춤'
+        Assert-Equal ((@($surface.retryLabels) -join ',')) '답변 형식 다시 확인 대기,AI 답변 재시도 대기'
 
         $interactiveSource = Get-Content -LiteralPath (Join-Path $projectRoot 'src\DuoForge\Private\14.Interactive.ps1') -Raw
         Assert-NotContainsText $interactiveSource "Role 'codex-document'"
         Assert-NotContainsText $interactiveSource "Role 'claude-document'"
         Assert-ContainsText $interactiveSource '-DocumentA $documentA -DocumentB $documentB'
+    }
+
+    Test-Case '공통 메뉴는 커서 이동과 Enter, 순환, 단축키, 비활성 이유와 줄 입력 폴백을 보존한다' {
+        $surface = & $module {
+            function Invoke-WithKeys {
+                param([object[]]$Keys, [int]$Initial = 0, [object[]]$Items)
+                $queue = [System.Collections.Generic.Queue[object]]::new()
+                foreach ($key in $Keys) { $queue.Enqueue($key) }
+                $frames = [System.Collections.Generic.List[string]]::new()
+                $reader = { $queue.Dequeue() }.GetNewClosure()
+                $writer = { param($lines) $frames.Add((@($lines) -join "`n")) }.GetNewClosure()
+                $result = Invoke-DuoForgeMenuSelectionInternal -Items $Items -Title '합성 메뉴' -EscapeValue 'back' -InitialSelectedIndex $Initial -KeyReader $reader -FrameWriter $writer -CapabilityProbe { $true }
+                [ordered]@{ result = $result; frames = @($frames) }
+            }
+            $items = @(
+                [ordered]@{ value = 'a'; label = '첫 항목'; shortcuts = @('1', 'A'); enabled = $true }
+                [ordered]@{ value = 'b'; label = '둘째 항목'; shortcuts = @('2'); enabled = $true }
+                [ordered]@{ value = 'c'; label = '셋째 항목'; shortcuts = @('3'); enabled = $true }
+            )
+            $disabled = @(
+                [ordered]@{ value = 'a'; label = '사용 가능'; shortcuts = @('1'); enabled = $true }
+                [ordered]@{ value = 'x'; label = '현재 비활성'; shortcuts = @('X'); enabled = $false; disabledReason = '안전 조건이 아직 충족되지 않았습니다.' }
+            )
+            $fallback = [ordered]@{ inputCalls = 0 }
+            $fallbackReader = { param($prompt) $fallback.inputCalls++; '2' }.GetNewClosure()
+            $fallbackResult = Invoke-DuoForgeMenuSelectionInternal -Items $items -Title '폴백' -EscapeValue 'back' -KeyReader { 'Enter' } -FrameWriter { throw 'synthetic-render-failure' } -CapabilityProbe { $true } -InputReader $fallbackReader
+            $unattended = [ordered]@{ inputCalls = 0 }
+            $unattendedResult = Invoke-DuoForgeMenuSelectionInternal -Items $items -EscapeValue 'back' -CapabilityProbe { [ordered]@{ cursor = $false; reason = 'non-interactive' } } -InputReader $null
+            [ordered]@{
+                down = Invoke-WithKeys -Keys @('Down', 'Down', 'Enter') -Items $items
+                upWrap = Invoke-WithKeys -Keys @('Up', 'Enter') -Items $items
+                end = Invoke-WithKeys -Keys @('End', 'Enter') -Items $items
+                home = Invoke-WithKeys -Keys @('Home', 'Enter') -Initial 2 -Items $items
+                escape = Invoke-WithKeys -Keys @('Escape') -Items $items
+                shortcut = Invoke-WithKeys -Keys @('a') -Items $items
+                one = Invoke-WithKeys -Keys @('Enter') -Items @($items[0])
+                zero = Invoke-DuoForgeMenuSelectionInternal -Items @() -EscapeValue 'back' -KeyReader { throw '입력기를 호출하면 안 됩니다.' } -FrameWriter { throw '렌더러를 호출하면 안 됩니다.' } -CapabilityProbe { $true }
+                disabled = Invoke-WithKeys -Keys @('Down', 'Enter', 'Down', 'Enter') -Items $disabled
+                fallbackResult = $fallbackResult
+                fallbackCalls = $fallback.inputCalls
+                unattendedResult = $unattendedResult
+                unattendedCalls = $unattended.inputCalls
+                renderModes = [ordered]@{
+                    virtualTerminal = Resolve-DuoForgeMenuRenderModeInternal -SupportsVirtualTerminal $true -NativeCursor $true
+                    nativeConsole = Resolve-DuoForgeMenuRenderModeInternal -SupportsVirtualTerminal $false -NativeCursor $true
+                    lineFallback = Resolve-DuoForgeMenuRenderModeInternal -SupportsVirtualTerminal $false -NativeCursor $false
+                }
+                cursorRendererLineAttributes = @((Get-Command Write-DuoForgeCursorMenuFrameInternal).Parameters['Lines'].Attributes | ForEach-Object { $_.GetType().Name })
+            }
+        }
+        Assert-Equal $surface.down.result 'c'
+        Assert-Equal $surface.upWrap.result 'c'
+        Assert-Equal $surface.end.result 'c'
+        Assert-Equal $surface.home.result 'a'
+        Assert-Equal $surface.escape.result 'back'
+        Assert-Equal $surface.shortcut.result 'a'
+        Assert-Equal $surface.one.result 'a'
+        Assert-Equal $surface.zero 'back'
+        Assert-Equal $surface.disabled.result 'a'
+        Assert-ContainsText ($surface.disabled.frames -join "`n") '안전 조건이 아직 충족되지 않았습니다.'
+        Assert-Equal $surface.fallbackResult 'b'
+        Assert-Equal $surface.fallbackCalls 1
+        Assert-Equal $surface.unattendedResult 'back'
+        Assert-Equal $surface.unattendedCalls 0
+        Assert-Equal $surface.renderModes.virtualTerminal 'ansi'
+        Assert-Equal $surface.renderModes.nativeConsole 'console'
+        Assert-Equal $surface.renderModes.lineFallback 'line'
+        Assert-True ('AllowEmptyStringAttribute' -in @($surface.cursorRendererLineAttributes)) '제목과 안내 사이의 빈 줄이 커서 렌더러 바인딩에서 거부되었습니다.'
+    }
+
+    Test-Case '안전 확인 토큰은 공통 메뉴와 분리된 대소문자 구분 텍스트 계약으로 남는다' {
+        $interactiveSource = Get-Content -LiteralPath (Join-Path $projectRoot 'src\DuoForge\Private\14.Interactive.ps1') -Raw
+        foreach ($token in @('LIVE', 'PARTIAL', 'ROUND', 'APPLY')) {
+            Assert-True ($interactiveSource -match ("-cne\s+'{0}'" -f $token)) "$token 정확 입력 계약이 없습니다."
+        }
+        $menuSource = Get-Content -LiteralPath (Join-Path $projectRoot 'src\DuoForge\Private\13.MenuView.ps1') -Raw
+        foreach ($token in @('LIVE', 'PARTIAL', 'ROUND', 'APPLY')) {
+            Assert-False ($menuSource -match ("-cne\s+'{0}'" -f $token)) "공통 메뉴가 $token 확인 계약을 소유하면 안 됩니다."
+        }
     }
 
     Test-Case '모드 2와 3의 공개 요청은 정규 A/B 필드만 기록한다' {
@@ -1461,16 +1540,16 @@ try {
         }
 
         Assert-ContainsText $rendered.objectText 'OBJ-001'
-        Assert-ContainsText $rendered.objectText 'minor'
-        Assert-ContainsText $rendered.objectText 'OPEN'
+        Assert-ContainsText $rendered.objectText '참고'
+        Assert-ContainsText $rendered.objectText '검토 중'
         Assert-ContainsText $rendered.objectText '일반 객체 claim 표시'
         Assert-ContainsText $rendered.dictionaryText 'DICT-001'
-        Assert-ContainsText $rendered.dictionaryText 'major'
-        Assert-ContainsText $rendered.dictionaryText 'True'
-        Assert-ContainsText $rendered.dictionaryText 'AWAITING_USER'
+        Assert-ContainsText $rendered.dictionaryText '중요'
+        Assert-ContainsText $rendered.dictionaryText '예'
+        Assert-ContainsText $rendered.dictionaryText '답변 필요'
         Assert-ContainsText $rendered.dictionaryText 'dictionary claim 첫 줄'
         Assert-ContainsText $rendered.dictionaryText 'dictionary claim 둘째 줄'
-        Assert-ContainsText $rendered.emptyText '등록된 쟁점이 없습니다.'
+        Assert-ContainsText $rendered.emptyText '등록된 검토 항목이 없습니다.'
     }
 
     Test-Case '인증 파서는 개인정보와 원문 비밀값을 결과에서 제거한다' {
@@ -1499,8 +1578,8 @@ try {
             $blockedText = (& { Write-DuoForgeDoctorReport -Report $blockedReport } 6>&1 | Out-String)
             return [ordered]@{ ready = $readyText; blocked = $blockedText }
         } $ready $blocked
-        Assert-ContainsText $rendered.ready '문서 모드 준비: 예'
-        Assert-ContainsText $rendered.blocked '문서 모드 준비: 아니요'
+        Assert-ContainsText $rendered.ready '문서 작업 준비: 예'
+        Assert-ContainsText $rendered.blocked '문서 작업 준비: 아니요'
         Assert-ContainsText $rendered.blocked 'codex login'
     }
 
@@ -1799,7 +1878,7 @@ try {
             param($directory)
             $snapshot = Get-DuoForgeProgressSnapshotInternal -RunDirectory $directory
             $wide = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 100 -Height 30 -Now ([datetimeoffset]'2026-07-28T12:00:00+09:00'))
-            $finalView = [ordered]@{ finalMessage = '실행 종료 · 완료'; waitForInput = $true }
+            $finalView = [ordered]@{ finalMessage = '작업 종료 · 완료'; waitForInput = $true }
             $narrow = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 72 -Height 20 -Now ([datetimeoffset]'2026-07-28T12:00:00+09:00') -ViewState $finalView)
             $partial = ConvertTo-DuoForgeHashtable -InputObject $snapshot
             $partial.status = 'RUNNING'
@@ -1909,17 +1988,17 @@ try {
                 narrowWidths = @($narrow | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) })
                 wideWidths = @($wide | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) })
                 unsafeWidths = @($unsafeFrame | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) })
-                narrowFeedHeaders = @($narrow | Where-Object { [string]$_ -like '최근 확정  ✓*' }).Count
-                narrowBarriers = @($narrow | Where-Object { [string]$_ -match '^[✓●↻◐○] (준비|R[0-9]+)' }).Count
+                narrowFeedHeaders = @($narrow | Where-Object { [string]$_ -like '최근 완료*✓*' }).Count
+                narrowBarriers = @($narrow | Where-Object { [string]$_ -match '^[✓●↻◐○] (준비|[0-9]+차)' }).Count
                 koreanWidth = Get-DuoForgeProgressTextWidthInternal -Text '한글A'
                 safe = ConvertTo-DuoForgeProgressTextInternal -Text ("`e[31m위험`e[0m`n다음")
                 emojiSafe = $emojiSafe
                 emojiWidth = Get-DuoForgeProgressTextWidthInternal -Text $emojiSafe
             }
         } $run.runDirectory
-        Assert-ContainsText ($rendered.wide -join "`n") '장벽 레일'
-        Assert-ContainsText ($rendered.wide -join "`n") '최근 확정'
-        Assert-ContainsText ($rendered.wide -join "`n") '최종 검증'
+        Assert-ContainsText ($rendered.wide -join "`n") '단계별 진행'
+        Assert-ContainsText ($rendered.wide -join "`n") '최근 완료'
+        Assert-ContainsText ($rendered.wide -join "`n") '최종 확인'
         Assert-ContainsText ($rendered.wide -join "`n") '공동 문서'
         Assert-True ($rendered.narrow.Count -le 19)
         Assert-True (@($rendered.narrowWidths | Where-Object { [int]$_ -gt 71 }).Count -eq 0)
@@ -1928,36 +2007,37 @@ try {
         Assert-True (@($rendered.unsafeWidths | Where-Object { [int]$_ -gt 71 }).Count -eq 0)
         Assert-Equal $rendered.narrowFeedHeaders 3
         Assert-True ($rendered.narrowBarriers -ge 3)
-        Assert-ContainsText ($rendered.narrow -join "`n") '현재  완료'
-        Assert-ContainsText ($rendered.narrow -join "`n") '실행 종료 · 완료'
-        Assert-ContainsText ($rendered.narrow -join "`n") '쟁점 전체'
+        Assert-ContainsText ($rendered.narrow -join "`n") '지금 상태  완료'
+        Assert-ContainsText ($rendered.narrow -join "`n") '작업 종료 · 완료'
+        Assert-ContainsText ($rendered.narrow -join "`n") '검토 현황'
         Assert-ContainsText ($rendered.narrow -join "`n") 'Enter 키를 누르면'
-        Assert-ContainsText ($rendered.active -join "`n") '응답 수신 · 구조 검증 중'
-        Assert-ContainsText ($rendered.active -join "`n") '[P] 현재 호출 완료 후 안전하게 일시정지'
+        Assert-ContainsText ($rendered.active -join "`n") '답변 도착 · 형식 확인 중'
+        Assert-ContainsText ($rendered.active -join "`n") 'P 안전 일시정지'
         Assert-ContainsText ($rendered.pauseRequested -join "`n") '일시정지 요청됨 · 현재 호출 완료 후 다음 호출 전에 멈춥니다.'
-        Assert-ContainsText ($rendered.active -join "`n") '현재  ● Claude · 독립 초안 · 문서 A'
-        Assert-ContainsText ($rendered.active -join "`n") '최근 확정  ✓ Codex · R2 최종 검증 · 문서 B'
+        Assert-ContainsText ($rendered.active -join "`n") '지금 작업 중  ⠼ Claude · 각자 초안 작성'
+        Assert-ContainsText ($rendered.active -join "`n") '작업 대상  문서 A'
+        Assert-ContainsText ($rendered.active -join "`n") 'Codex · 2차 최종 확인 · 문서 B'
         Assert-ContainsText ($rendered.active -join "`n") '검증 요약'
-        Assert-ContainsText ($rendered.active -join "`n") '새 쟁점 주요 2'
-        Assert-ContainsText ($rendered.active -join "`n") '검토 응답 근거 필요 1'
-        Assert-ContainsText ($rendered.active -join "`n") '실제 편집 미반영 1'
-        Assert-ContainsText ($rendered.target -join "`n") '최근 확정  ✓ Claude · R2 검토 응답 · 문서 A'
-        Assert-ContainsText ($rendered.target -join "`n") '최근 확정  ✓ Claude · R2 공동 문서 합성 · 문서 B'
+        Assert-ContainsText ($rendered.active -join "`n") '새 항목: 중요 2'
+        Assert-ContainsText ($rendered.active -join "`n") '의견: 자료 필요 1'
+        Assert-ContainsText ($rendered.active -join "`n") '반영: 미반영 1'
+        Assert-ContainsText ($rendered.target -join "`n") 'Claude · 2차 검토 의견 판단 · 문서 A'
+        Assert-ContainsText ($rendered.target -join "`n") 'Claude · 2차 공동 문서 작성 · 문서 B'
         Assert-ContainsText ($rendered.bothTarget -join "`n") '문서 A/B'
         Assert-ContainsText ($rendered.merge -join "`n") '합의 문서 C'
         Assert-ContainsText ($rendered.unsafe -join "`n") '긴 한글 😀 요약 다음 줄'
         Assert-False ([string]($rendered.unsafe -join "`n") -like "*`e*")
-        Assert-Equal $rendered.actionSummary '새 쟁점 치명적 1 · 주요 2 · 경미 3 | 검토 응답 수용 4 · 부분 수용 5 · 거부 6 | 실제 편집 반영 7 · 부분 반영 8'
-        Assert-Equal $rendered.sparseActionSummary '새 쟁점 주요 2 | 검토 응답 근거 필요 1 | 실제 편집 미반영 1'
-        Assert-ContainsText ($rendered.waiting -join "`n") '현재  ● Claude · 독립 초안 · 문서 A · 응답 대기 00:04'
+        Assert-Equal $rendered.actionSummary '새 검토 항목: 반드시 해결 1 · 중요 2 · 참고 3 | 검토 의견 처리: 수용 4 · 일부 수용 5 · 거부 6 | 문서 반영: 반영 7 · 일부 반영 8'
+        Assert-Equal $rendered.sparseActionSummary '새 검토 항목: 중요 2 | 검토 의견 처리: 자료 필요 1 | 문서 반영: 미반영 1'
+        Assert-ContainsText ($rendered.waiting -join "`n") '지금 작업 중  ⠼ Claude · 각자 초안 작성 · 문서 A · 답변을 기다리는 중 00:04'
         Assert-ContainsText ($rendered.waiting -join "`n") 'Codex ✓  Claude ●'
-        Assert-ContainsText ($rendered.active -join "`n") '쟁점 원장  전체 단계 확정 후 집계'
-        Assert-ContainsText ($rendered.retry -join "`n") '현재  ↻ Codex · 대상 문서 개정 · 문서 A · 형식 복구 재시도 대기'
-        Assert-ContainsText ($rendered.standardRetry -join "`n") '현재  ↻ Codex · 대상 문서 개정 · 문서 A · 공급자 호출 재시도 대기'
-        Assert-ContainsText ($rendered.failed -join "`n") '현재  ! Claude · 대상 문서 최종 검증 · 문서 B · 재개 가능 오류'
-        Assert-ContainsText ($rendered.quota -join "`n") '현재  ! Claude · 대상 문서 최종 검증 · 문서 B · 구독 한도 대기'
-        Assert-ContainsText ($rendered.blocked -join "`n") '현재  ! Claude · 대상 문서 최종 검증 · 문서 B · 사전 검사 차단'
-        Assert-ContainsText $rendered.logText '공동 문서 시작'
+        Assert-ContainsText ($rendered.active -join "`n") '검토 현황  전체 단계 완료 후 집계'
+        Assert-ContainsText ($rendered.retry -join "`n") '지금 작업 중  ↻ Codex · 문서 수정 · 문서 A · 답변 형식 다시 확인 대기'
+        Assert-ContainsText ($rendered.standardRetry -join "`n") '지금 작업 중  ↻ Codex · 문서 수정 · 문서 A · AI 답변 재시도 대기'
+        Assert-ContainsText ($rendered.failed -join "`n") '지금 작업 중  ! Claude · 수정 문서 최종 확인 · 문서 B · 오류 발생 · 이어서 가능'
+        Assert-ContainsText ($rendered.quota -join "`n") '지금 작업 중  ! Claude · 수정 문서 최종 확인 · 문서 B · 사용 한도 회복 대기'
+        Assert-ContainsText ($rendered.blocked -join "`n") '지금 작업 중  ! Claude · 수정 문서 최종 확인 · 문서 B · 실행 환경 문제로 멈춤'
+        Assert-ContainsText $rendered.logText ' 시작'
         Assert-False ([string]$rendered.logText -like "*`e*")
         Assert-Equal ([regex]::Matches($rendered.committedLogText, [regex]::Escape($rendered.committedSummary)).Count) 1
         Assert-Equal @($rendered.committedLogText -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count 2
@@ -1982,6 +2062,170 @@ try {
         } $run.runDirectory
         Assert-NotContainsText $tampered.latestSummary '변조된 확정 요약'
         Assert-True ($tampered.latestStepKey -ne $tampered.finalStepKey)
+    }
+
+    Test-Case 'LIVE 개요와 상세 화면은 네 지원 크기에서 높이별 확장, 스피너와 단일 스크롤을 지킨다' {
+        $surface = & $module {
+            $stages = @('independent-draft', 'cross-review', 'author-response', 'synthesis', 'final-validation', 'document-validation')
+            $steps = [System.Collections.Generic.List[object]]::new()
+            for ($index = 0; $index -lt $stages.Count; $index++) {
+                $steps.Add([ordered]@{ round = if ($index -eq 0) { 0 } else { 1 }; stage = $stages[$index]; provider = if ($index % 2 -eq 0) { 'codex' } else { 'claude' }; status = if ($index -eq 2) { 'STARTED' } else { 'COMMITTED' }; targetDocumentId = 'A' })
+            }
+            $records = [System.Collections.Generic.List[object]]::new()
+            foreach ($number in 1..3) {
+                $records.Add([ordered]@{
+                    stepKey = "step-$number"
+                    provider = if ($number % 2 -eq 0) { 'claude' } else { 'codex' }
+                    round = 2
+                    stage = 'document-review'
+                    label = '두 문서 함께 검토'
+                    targetDocumentId = 'A'
+                    sourceDocumentIds = @('A', 'B')
+                    summary = (("요약-$number 공백 우선 줄바꿈을 확인하는 검증된 문장입니다. ") * 18).Trim()
+                    issueCounts = [ordered]@{ critical = 0; major = $number; minor = 1 }
+                    responseCounts = [ordered]@{ ACCEPTED = 1; PARTIALLY_ACCEPTED = 0; REJECTED = 0; DEFERRED = 0; NEEDS_EVIDENCE = 0; ASK_USER = 0 }
+                    adoptionCounts = [ordered]@{ ACCEPTED = 1; PARTIALLY_ACCEPTED = 0; REJECTED = 0; DEFERRED = 0 }
+                })
+            }
+            $snapshot = [ordered]@{
+                runDirectory = 'D:\offline-fixture'
+                name = '오프라인 화면 fixture'
+                mode = 'dual-document'
+                modeLabel = '두 문서를 각각 개선하기'
+                runId = 'run-offline-frame'
+                status = 'RUNNING'
+                statusLabel = '진행 중'
+                steps = @($steps)
+                barriers = @(Get-DuoForgeProgressBarriersInternal -Steps @($steps))
+                activeSteps = @($steps[2])
+                committedSteps = 5
+                totalSteps = 6
+                recentCommitted = @($records)
+                latest = $records[-1]
+                issueCount = 4
+                openIssueCount = 2
+                blockingIssueCount = 1
+                lastEvent = [ordered]@{ type = 'STAGE_STARTED'; data = [ordered]@{} }
+            }
+            $matrix = [ordered]@{}
+            foreach ($size in @(@(72, 20), @(80, 24), @(100, 30), @(120, 32))) {
+                $key = '{0}x{1}' -f $size[0], $size[1]
+                $view = [ordered]@{ mode = 'fullscreen'; screenMode = 'overview'; selectedCommittedIndex = -1; providerElapsedSeconds = 2; unicodeSpinner = $true; pauseRequestStatus = '' }
+                $frame = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width $size[0] -Height $size[1] -ViewState $view)
+                $matrix[$key] = [ordered]@{
+                    text = $frame -join "`n"
+                    rows = $frame.Count
+                    maximumWidth = (@($frame | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) }) | Measure-Object -Maximum).Maximum
+                    headers = @($frame | Where-Object { [string]$_ -like '최근 완료*✓*' }).Count
+                    changes = @($frame | Where-Object { [string]$_ -like '  변경 사항*' }).Count
+                    barriers = @($frame | Where-Object { [string]$_ -match '^[✓●↻◐○] (준비|[0-9]+차)' }).Count
+                    selected = $view.selectedCommittedIndex
+                    truncated = [bool]$view.layoutTruncated
+                }
+            }
+
+            $spinnerLines = [System.Collections.Generic.List[string]]::new()
+            foreach ($elapsed in 0..2) {
+                $view = [ordered]@{ screenMode = 'overview'; selectedCommittedIndex = -1; providerElapsedSeconds = $elapsed; unicodeSpinner = $true }
+                $frame = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 80 -Height 24 -ViewState $view)
+                $spinnerLines.Add([string](@($frame | Where-Object { [string]$_ -like '지금 작업 중*' })[0]))
+            }
+
+            $detailView = [ordered]@{ mode = 'fullscreen'; screenMode = 'detail'; selectedCommittedIndex = -1; recentCommittedCount = 3; detailScrollOffset = 0; providerElapsedSeconds = 2; unicodeSpinner = $true; pauseRequestStatus = '' }
+            $detailFirst = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 72 -Height 20 -ViewState $detailView)
+            Invoke-DuoForgeProgressControlInputInternal -View $detailView -KeyReader { 'PageDown' }
+            $afterPageDown = [int]$detailView.detailScrollOffset
+            Invoke-DuoForgeProgressControlInputInternal -View $detailView -KeyReader { 'Home' }
+            $afterHome = [int]$detailView.detailScrollOffset
+            Invoke-DuoForgeProgressControlInputInternal -View $detailView -KeyReader { 'End' }
+            $afterEnd = [int]$detailView.detailScrollOffset
+            Invoke-DuoForgeProgressControlInputInternal -View $detailView -KeyReader { 'Escape' }
+            $afterEscape = [string]$detailView.screenMode
+
+            $navigation = [ordered]@{ mode = 'fullscreen'; screenMode = 'overview'; selectedCommittedIndex = -1; recentCommittedCount = 3; detailScrollOffset = 0; pauseRequestStatus = '' }
+            $null = New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 80 -Height 24 -ViewState $navigation
+            $initialSelection = [int]$navigation.selectedCommittedIndex
+            Invoke-DuoForgeProgressControlInputInternal -View $navigation -KeyReader { 'Up' }
+            $afterUp = [int]$navigation.selectedCommittedIndex
+            Invoke-DuoForgeProgressControlInputInternal -View $navigation -KeyReader { 'j' }
+            $afterJ = [int]$navigation.selectedCommittedIndex
+            Invoke-DuoForgeProgressControlInputInternal -View $navigation -KeyReader { 'Home' }
+            Invoke-DuoForgeProgressControlInputInternal -View $navigation -KeyReader { 'k' }
+            $afterKBoundary = [int]$navigation.selectedCommittedIndex
+            Invoke-DuoForgeProgressControlInputInternal -View $navigation -KeyReader { 'End' }
+            $afterEndSelection = [int]$navigation.selectedCommittedIndex
+            Invoke-DuoForgeProgressControlInputInternal -View $navigation -KeyReader { 'd' }
+            $afterDetail = [string]$navigation.screenMode
+
+            $pause = [ordered]@{ count = 0 }
+            $pauseRequester = { $pause.count++; [ordered]@{ requested = $true; requestId = 'pause-fixture' } }.GetNewClosure()
+            Invoke-DuoForgeProgressControlInputInternal -View $detailView -KeyReader { 'P' } -PauseRequester $pauseRequester
+            Invoke-DuoForgeProgressControlInputInternal -View $detailView -KeyReader { 'p' } -PauseRequester $pauseRequester
+
+            [ordered]@{
+                matrix = $matrix
+                spinnerLines = @($spinnerLines)
+                spinnerWidths = @($spinnerLines | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text $_ })
+                unicodeFrames = @(0..2 | ForEach-Object { Get-DuoForgeProgressSpinnerFrameInternal -ElapsedSeconds $_ })
+                asciiFrames = @(0..2 | ForEach-Object { Get-DuoForgeProgressSpinnerFrameInternal -ElapsedSeconds $_ -Ascii })
+                detailText = $detailFirst -join "`n"
+                detailRows = $detailFirst.Count
+                detailMaximumOffset = [int]$detailView.detailMaximumOffset
+                afterPageDown = $afterPageDown
+                afterHome = $afterHome
+                afterEnd = $afterEnd
+                afterEscape = $afterEscape
+                initialSelection = $initialSelection
+                afterUp = $afterUp
+                afterJ = $afterJ
+                afterKBoundary = $afterKBoundary
+                afterEndSelection = $afterEndSelection
+                afterDetail = $afterDetail
+                pauseCount = $pause.count
+                wrap = @(Split-DuoForgeProgressTextInternal -Text 'alpha beta gamma delta epsilon' -Width 10 -MaximumLines 3)
+                longWord = @(Split-DuoForgeProgressTextInternal -Text ('가' * 30) -Width 9 -MaximumLines 3)
+                unknownStage = Get-DuoForgeDisplayStageLabelInternal -Stage 'future-stage'
+                unknownState = Get-DuoForgeDisplayStateLabelInternal -Status 'FUTURE_STATE'
+            }
+        }
+
+        foreach ($key in @('72x20', '80x24', '100x30', '120x32')) {
+            $parts = $key -split 'x'
+            Assert-True ($surface.matrix[$key].rows -le ([int]$parts[1] - 1)) "$key 행 높이를 넘었습니다."
+            Assert-True ([int]$surface.matrix[$key].maximumWidth -le ([int]$parts[0] - 1)) "$key 표시 폭을 넘었습니다."
+            Assert-Equal $surface.matrix[$key].headers 3
+            Assert-True ($surface.matrix[$key].barriers -ge 3)
+            Assert-False ([bool]$surface.matrix[$key].truncated)
+            Assert-Equal $surface.matrix[$key].selected 2
+        }
+        Assert-Equal $surface.matrix['72x20'].changes 1
+        Assert-Equal $surface.matrix['80x24'].changes 2
+        Assert-Equal $surface.matrix['100x30'].changes 2
+        Assert-Equal $surface.matrix['120x32'].changes 3
+        Assert-Equal (@($surface.spinnerLines | Select-Object -Unique).Count) 3
+        Assert-Equal (@($surface.spinnerWidths | Select-Object -Unique).Count) 1
+        Assert-Equal (@($surface.unicodeFrames | Select-Object -Unique).Count) 3
+        Assert-Equal (@($surface.asciiFrames | Select-Object -Unique).Count) 3
+        foreach ($frame in @($surface.unicodeFrames + $surface.asciiFrames)) { Assert-Equal (& $module { param($text) Get-DuoForgeProgressTextWidthInternal -Text $text } $frame) 1 }
+        Assert-ContainsText $surface.detailText '요약-3'
+        Assert-NotContainsText $surface.detailText '요약-1'
+        Assert-NotContainsText $surface.detailText '요약-2'
+        Assert-True ($surface.detailRows -le 19)
+        Assert-True ($surface.afterPageDown -gt 0)
+        Assert-Equal $surface.afterHome 0
+        Assert-Equal $surface.afterEnd $surface.detailMaximumOffset
+        Assert-Equal $surface.afterEscape 'overview'
+        Assert-Equal $surface.initialSelection 2
+        Assert-Equal $surface.afterUp 1
+        Assert-Equal $surface.afterJ 2
+        Assert-Equal $surface.afterKBoundary 0
+        Assert-Equal $surface.afterEndSelection 2
+        Assert-Equal $surface.afterDetail 'detail'
+        Assert-Equal $surface.pauseCount 1
+        Assert-Equal $surface.wrap[0] 'alpha beta'
+        Assert-True ([string]$surface.longWord[-1] -like '*…')
+        Assert-Equal $surface.unknownStage 'future-stage'
+        Assert-Equal $surface.unknownState 'FUTURE_STATE'
     }
 
     Test-Case '라이브 진행판의 P 키는 기존 안전 일시정지를 한 번만 요청한다' {
@@ -2051,10 +2295,10 @@ try {
                 $copy.latest = if ($count -eq 0) { $null } else { $copy.recentCommitted[-1] }
                 $frame = @(New-DuoForgeProgressFrameInternal -Snapshot $copy -Width 72 -Height 20)
                 $frameCounts[[string]$count] = [ordered]@{
-                    feedHeaders = @($frame | Where-Object { [string]$_ -like '최근 확정  ✓*' }).Count
+                    feedHeaders = @($frame | Where-Object { [string]$_ -like '최근 완료*✓*' }).Count
                     lines = $frame.Count
                     widths = @($frame | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) })
-                    barriers = @($frame | Where-Object { [string]$_ -match '^[✓●↻◐○] (준비|R[0-9]+)' }).Count
+                    barriers = @($frame | Where-Object { [string]$_ -match '^[✓●↻◐○] (준비|[0-9]+차)' }).Count
                     text = $frame -join "`n"
                 }
             }
@@ -2092,17 +2336,17 @@ try {
         Assert-Equal $feed.afterTamperLatest $feed.afterTamperKeys[-1]
         foreach ($invalidKey in @($feed.invalidKeys)) { Assert-False ($invalidKey -in @($feed.afterTamperKeys)) }
         foreach ($count in 0..3) { Assert-Equal $feed.frameCounts[[string]$count].feedHeaders $count }
-        Assert-ContainsText $feed.frameCounts['0'].text '아직 커밋된 토론 단계가 없습니다.'
+        Assert-ContainsText $feed.frameCounts['0'].text '아직 완료된 토론 단계가 없습니다.'
         Assert-True ($feed.frameCounts['3'].lines -le 19)
         Assert-True (@($feed.frameCounts['3'].widths | Where-Object { [int]$_ -gt 71 }).Count -eq 0)
         Assert-True ($feed.frameCounts['3'].barriers -ge 3)
-        $feed3Headers = @($feed.frameCounts['3'].text -split "`n" | Where-Object { $_ -like '최근 확정  ✓*' })
-        Assert-ContainsText ([string]$feed3Headers[0]) '검토 응답'
-        Assert-ContainsText ([string]$feed3Headers[1]) '공동 문서 합성'
-        Assert-ContainsText ([string]$feed3Headers[2]) '최종 검증'
-        Assert-ContainsText $feed.frameCounts['3'].text '현재  완료'
-        Assert-ContainsText $feed.frameCounts['3'].text '쟁점 전체'
-        Assert-ContainsText $feed.frameCounts['3'].text '[P] 현재 호출 완료 후 안전하게 일시정지'
+        $feed3Headers = @($feed.frameCounts['3'].text -split "`n" | Where-Object { $_ -like '최근 완료*✓*' })
+        Assert-ContainsText ([string]$feed3Headers[0]) '검토 의견 판단'
+        Assert-ContainsText ([string]$feed3Headers[1]) '공동 문서 작성'
+        Assert-ContainsText ([string]$feed3Headers[2]) '최종 확인'
+        Assert-ContainsText $feed.frameCounts['3'].text '지금 상태  완료'
+        Assert-ContainsText $feed.frameCounts['3'].text '검토 현황'
+        Assert-ContainsText $feed.frameCounts['3'].text 'P 안전 일시정지'
     }
 
     Test-Case '자연어 행동 집계는 새 쟁점과 검토 응답 및 실제 편집을 분리하고 0건을 생략한다' {
@@ -2122,7 +2366,7 @@ try {
                 zero = Get-DuoForgeProgressActionSummaryInternal -Record $zero
             }
         }
-        Assert-Equal $summaries.all '새 쟁점 치명적 1 · 주요 2 · 경미 3 | 검토 응답 수용 4 · 부분 수용 5 · 거부 6 · 보류 7 · 근거 필요 8 · 사용자 결정 9 | 실제 편집 반영 10 · 부분 반영 11 · 미반영 12 · 보류 13'
+        Assert-Equal $summaries.all '새 검토 항목: 반드시 해결 1 · 중요 2 · 참고 3 | 검토 의견 처리: 수용 4 · 일부 수용 5 · 거부 6 · 보류 7 · 자료 필요 8 · 답변 필요 9 | 문서 반영: 반영 10 · 일부 반영 11 · 미반영 12 · 보류 13'
         Assert-Equal $summaries.zero ''
         Assert-NotContainsText $summaries.all 'C/M/m'
         Assert-NotContainsText $summaries.all '채택'
@@ -4188,7 +4432,7 @@ Setext 결론
         Assert-True ([bool]$allowed.valid) ($allowed.errors | ConvertTo-Json -Depth 20 -Compress)
         Assert-True ($allowed.executionPlan.contextBatchCount -gt 0)
         $planText = & $module { param($validation) (& { Write-DuoForgeExecutionPlan -Validation $validation } 6>&1 | Out-String) } $allowed
-        Assert-ContainsText $planText '문맥 배치:'
+        Assert-ContainsText $planText '나눠서 분석할 묶음:'
         Assert-ContainsText $planText 'Codex 호출: 기본 '
         Assert-ContainsText $planText '재시도 최대 '
         Assert-ContainsText $planText '총 최대 '
@@ -4296,9 +4540,9 @@ Setext 결론
                 }
             } $run.runDirectory
             Assert-NotContainsText ([string]$contextProgress.record.summary) 'RAW-CONTEXT-PROGRESS-MUST-NOT-RENDER'
-            Assert-ContainsText ([string]$contextProgress.record.summary) '문맥 배치 분석 결과'
+            Assert-ContainsText ([string]$contextProgress.record.summary) '나눈 문서의 분석 결과'
             Assert-NotContainsText ($contextProgress.frame -join "`n") 'RAW-CONTEXT-PROGRESS-MUST-NOT-RENDER'
-            Assert-ContainsText ($contextProgress.frame -join "`n") '문맥 배치 분석 결과'
+            Assert-ContainsText ($contextProgress.frame -join "`n") '나눈 문서의 분석 결과'
             foreach ($promptKey in @($trace.prompts.Keys | Where-Object { $_ -notlike 'context-*' })) {
                 Assert-NotContainsText $trace.prompts[$promptKey] 'RAW-CONTEXT-A-'
                 Assert-NotContainsText $trace.prompts[$promptKey] 'RAW-CONTEXT-B-'

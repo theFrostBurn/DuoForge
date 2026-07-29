@@ -543,14 +543,14 @@ function Test-DuoForgeProviderSelectionsInternal {
         if ([string]::IsNullOrWhiteSpace($effort)) {
             $errors.Add([ordered]@{
                 code = 'DF-PROVIDER-SELECTION-REQUIRED'
-                message = "$($options.displayName) 추론 정도를 반드시 선택해야 합니다."
+                message = "$($options.displayName) 분석 깊이를 반드시 선택해야 합니다."
             })
         }
         $supportedEfforts = @(Get-DuoForgeReasoningEffortsForModelInternal -Options $options -Model $model)
         if (-not [string]::IsNullOrWhiteSpace($effort) -and $effort -cnotin $supportedEfforts) {
             $errors.Add([ordered]@{
                 code = 'DF-PROVIDER-EFFORT'
-                message = "$($options.displayName) 모델 '$model'의 추론 정도 '$effort'는 지원 목록에 없습니다: $($supportedEfforts -join ', ')"
+                message = "$($options.displayName) 모델 '$model'의 분석 깊이 '$effort'는 지원 목록에 없습니다: $($supportedEfforts -join ', ')"
             })
         }
     }
@@ -587,44 +587,39 @@ function Read-DuoForgeModelChoiceInternal {
     param(
         [Parameter(Mandatory)]
         [ValidateSet('codex', 'claude')]
-        [string]$Provider
+        [string]$Provider,
+        [scriptblock]$InputReader,
+        [scriptblock]$MenuInvoker,
+        $SelectionOptions
     )
 
-    $options = Get-DuoForgeProviderSelectionOptionsInternal -Provider $Provider
+    $options = if ($null -ne $SelectionOptions) { $SelectionOptions } else { Get-DuoForgeProviderSelectionOptionsInternal -Provider $Provider }
     while ($true) {
-        Write-Host ''
-        Write-Host ("{0} 모델을 선택해 주세요." -f $options.displayName)
         Write-Host ("목록 출처: {0}" -f $options.catalogSource) -ForegroundColor DarkGray
         if ([string]$options.catalogSource -like '*fallback*') {
             Write-Host 'CLI의 현재 목록을 읽지 못해 제한된 대체 목록을 표시합니다.' -ForegroundColor Yellow
         }
+        $items = [System.Collections.Generic.List[object]]::new()
+        $recommendedIndex = 0
         for ($index = 0; $index -lt @($options.suggestedModels).Count; $index++) {
             $item = $options.suggestedModels[$index]
             $recommended = if ([bool]$item.recommended) { ' (권장)' } else { '' }
             $label = if ($Provider -eq 'claude') { '{0} ({1})' -f $item.displayName, $item.value } else { [string]$item.value }
-            Write-Host ("[{0}] {1}{2} - {3}" -f ($index + 1), $label, $recommended, $item.description)
+            if ([bool]$item.recommended) { $recommendedIndex = $index }
+            $items.Add([ordered]@{ value = "model:$index"; label = "$label$recommended"; detail = [string]$item.description; shortcuts = @([string]($index + 1)); enabled = $true })
         }
         $customNumber = @($options.suggestedModels).Count + 1
-        Write-Host ("[{0}] 모델명 직접 입력" -f $customNumber)
-        Write-Host '[B] 이전으로'
-        $choice = (Read-Host '선택').Trim()
+        $items.Add([ordered]@{ value = 'custom'; label = '모델명 직접 입력'; shortcuts = @([string]$customNumber); enabled = $true })
+        $items.Add([ordered]@{ value = 'B'; label = '이전으로'; shortcuts = @('B'); enabled = $true })
+        $choice = Invoke-DuoForgeMenuInternal -Items @($items) -Title ("{0} 모델을 선택해 주세요." -f $options.displayName) -EscapeValue 'B' -InitialSelectedIndex $recommendedIndex -InputReader $InputReader -MenuInvoker $MenuInvoker
         if ($choice -ieq 'B') { return $null }
-
-        $number = 0
-        if (-not [int]::TryParse($choice, [ref]$number)) {
-            Write-Host '올바른 모델 항목을 선택해 주세요.' -ForegroundColor Yellow
-            continue
-        }
-        if ($number -ge 1 -and $number -le @($options.suggestedModels).Count) {
-            return [string]$options.suggestedModels[$number - 1].value
-        }
-        if ($number -eq $customNumber) {
-            $model = (Read-Host 'CLI에 전달할 정확한 모델명').Trim()
+        if ($choice -like 'model:*') { return [string]$options.suggestedModels[[int]$choice.Substring(6)].value }
+        if ($choice -eq 'custom') {
+            $model = $(if ($null -ne $InputReader) { [string](& $InputReader 'CLI에 전달할 정확한 모델명') } else { [string](Read-Host 'CLI에 전달할 정확한 모델명') }).Trim()
             if (Test-DuoForgeModelIdentifierInternal -Model $model) { return $model }
             Write-Host '모델명은 영문자나 숫자로 시작하고 영문자, 숫자, 점, 밑줄, 콜론, 슬래시, 대괄호, 하이픈만 사용할 수 있습니다.' -ForegroundColor Yellow
             continue
         }
-        Write-Host '올바른 모델 항목을 선택해 주세요.' -ForegroundColor Yellow
     }
 }
 
@@ -634,34 +629,37 @@ function Read-DuoForgeReasoningEffortChoiceInternal {
         [Parameter(Mandatory)]
         [ValidateSet('codex', 'claude')]
         [string]$Provider,
-        [AllowNull()][AllowEmptyString()][string]$Model
+        [AllowNull()][AllowEmptyString()][string]$Model,
+        [scriptblock]$InputReader,
+        [scriptblock]$MenuInvoker,
+        $SelectionOptions
     )
 
-    $options = Get-DuoForgeProviderSelectionOptionsInternal -Provider $Provider
+    $options = if ($null -ne $SelectionOptions) { $SelectionOptions } else { Get-DuoForgeProviderSelectionOptionsInternal -Provider $Provider }
     $reasoningEfforts = @(Get-DuoForgeReasoningEffortsForModelInternal -Options $options -Model $Model)
     $recommendedReasoningEffort = Get-DuoForgeRecommendedReasoningEffortForModelInternal -Options $options -Model $Model
     while ($true) {
-        Write-Host ''
-        Write-Host ("{0} 추론 정도를 선택해 주세요. (모델: {1})" -f $options.displayName, $Model)
+        $items = [System.Collections.Generic.List[object]]::new()
+        $recommendedIndex = 0
         for ($index = 0; $index -lt $reasoningEfforts.Count; $index++) {
             $recommended = if ([string]$reasoningEfforts[$index] -ceq [string]$recommendedReasoningEffort) { ' (권장)' } else { '' }
-            Write-Host ("[{0}] {1}{2}" -f ($index + 1), $reasoningEfforts[$index], $recommended)
+            if (-not [string]::IsNullOrWhiteSpace($recommended)) { $recommendedIndex = $index }
+            $items.Add([ordered]@{ value = [string]$reasoningEfforts[$index]; label = ([string]$reasoningEfforts[$index] + $recommended); shortcuts = @([string]($index + 1)); enabled = $true })
         }
-        Write-Host '[B] 이전으로'
-        $choice = (Read-Host '선택').Trim()
+        $items.Add([ordered]@{ value = 'B'; label = '이전으로'; shortcuts = @('B'); enabled = $true })
+        $choice = Invoke-DuoForgeMenuInternal -Items @($items) -Title ("{0} 분석 깊이를 선택해 주세요. (모델: {1})" -f $options.displayName, $Model) -EscapeValue 'B' -InitialSelectedIndex $recommendedIndex -InputReader $InputReader -MenuInvoker $MenuInvoker
         if ($choice -ieq 'B') { return $null }
-
-        $number = 0
-        if ([int]::TryParse($choice, [ref]$number) -and $number -ge 1 -and $number -le $reasoningEfforts.Count) {
-            return [string]$reasoningEfforts[$number - 1]
-        }
-        Write-Host '올바른 추론 정도를 선택해 주세요.' -ForegroundColor Yellow
+        return [string]$choice
     }
 }
 
 function Complete-DuoForgeInteractiveProviderSelectionsInternal {
     [CmdletBinding()]
-    param($InitialSelections)
+    param(
+        $InitialSelections,
+        [scriptblock]$InputReader,
+        [scriptblock]$MenuInvoker
+    )
 
     $result = [ordered]@{}
     foreach ($provider in @('codex', 'claude')) {
@@ -671,7 +669,7 @@ function Complete-DuoForgeInteractiveProviderSelectionsInternal {
         $options = Get-DuoForgeProviderSelectionOptionsInternal -Provider $provider
 
         if (-not (Test-DuoForgeModelIdentifierInternal -Model $model)) {
-            $model = Read-DuoForgeModelChoiceInternal -Provider $provider
+            $model = Read-DuoForgeModelChoiceInternal -Provider $provider -InputReader $InputReader -MenuInvoker $MenuInvoker
             if ($null -eq $model) { return $null }
         }
         else {
@@ -680,11 +678,11 @@ function Complete-DuoForgeInteractiveProviderSelectionsInternal {
 
         $supportedEfforts = @(Get-DuoForgeReasoningEffortsForModelInternal -Options $options -Model $model)
         if ($effort -cnotin $supportedEfforts) {
-            $effort = Read-DuoForgeReasoningEffortChoiceInternal -Provider $provider -Model $model
+            $effort = Read-DuoForgeReasoningEffortChoiceInternal -Provider $provider -Model $model -InputReader $InputReader -MenuInvoker $MenuInvoker
             if ($null -eq $effort) { return $null }
         }
         else {
-            Write-Host ("{0} 추론 정도: {1}" -f $options.displayName, $effort)
+            Write-Host ("{0} 분석 깊이: {1}" -f $options.displayName, $effort)
         }
 
         $result[$provider] = [ordered]@{

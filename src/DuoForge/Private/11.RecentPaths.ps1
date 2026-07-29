@@ -95,29 +95,31 @@ function Read-DuoForgePathChoice {
     param(
         [Parameter(Mandatory)][string]$Prompt,
         [Parameter(Mandatory)][string]$Role,
-        [ValidateSet('File', 'Directory')][string]$Type = 'File'
+        [ValidateSet('File', 'Directory')][string]$Type = 'File',
+        [scriptblock]$InputReader,
+        [scriptblock]$MenuInvoker,
+        [scriptblock]$PathPicker
     )
 
     while ($true) {
-        Write-Host ''
-        Write-Host $Prompt
-        Write-Host '[1] Windows 선택창 열기'
-        Write-Host '[2] 경로 붙여넣기 또는 파일 끌어놓기'
-        Write-Host '[3] 최근 사용 경로'
-        Write-Host '[B] 이전으로'
-        $choice = (Read-Host '선택').Trim()
+        $choice = Invoke-DuoForgeMenuInternal -Title $Prompt -EscapeValue 'B' -InputReader $InputReader -MenuInvoker $MenuInvoker -Items @(
+            [ordered]@{ value = '1'; label = 'Windows 선택창 열기'; shortcuts = @('1'); enabled = $true }
+            [ordered]@{ value = '2'; label = '경로 붙여넣기 또는 파일 끌어놓기'; shortcuts = @('2'); enabled = $true }
+            [ordered]@{ value = '3'; label = '최근 사용 경로'; shortcuts = @('3'); enabled = $true }
+            [ordered]@{ value = 'B'; label = '이전으로'; shortcuts = @('B'); enabled = $true }
+        )
         if ($choice -ieq 'B') { return $null }
 
         $path = $null
         if ($choice -eq '1') {
-            $path = Select-DuoForgeWindowsPath -Type $Type -Title $Prompt
+            $path = if ($null -ne $PathPicker) { & $PathPicker $Type $Prompt } else { Select-DuoForgeWindowsPath -Type $Type -Title $Prompt }
             if ([string]::IsNullOrWhiteSpace($path)) {
                 Write-Host '선택창을 취소했거나 열 수 없습니다. 다른 방식을 선택해 주세요.' -ForegroundColor Yellow
                 continue
             }
         }
         elseif ($choice -eq '2') {
-            $path = Read-Host '경로'
+            $path = if ($null -ne $InputReader) { [string](& $InputReader '경로') } else { [string](Read-Host '경로') }
         }
         elseif ($choice -eq '3') {
             $recent = @(Get-DuoForgeRecentPaths -Role $Role)
@@ -125,16 +127,12 @@ function Read-DuoForgePathChoice {
                 Write-Host '최근 경로가 없습니다.' -ForegroundColor Yellow
                 continue
             }
-            for ($index = 0; $index -lt $recent.Count; $index++) {
-                Write-Host ('[{0}] {1}' -f ($index + 1), $recent[$index].path)
-            }
-            $recentChoice = Read-Host '번호'
-            $selectedIndex = 0
-            if (-not [int]::TryParse($recentChoice, [ref]$selectedIndex) -or $selectedIndex -lt 1 -or $selectedIndex -gt $recent.Count) {
-                Write-Host '올바른 번호를 선택해 주세요.' -ForegroundColor Yellow
-                continue
-            }
-            $path = [string]$recent[$selectedIndex - 1].path
+            $recentItems = [System.Collections.Generic.List[object]]::new()
+            for ($index = 0; $index -lt $recent.Count; $index++) { $recentItems.Add([ordered]@{ value = [string]$index; label = [string]$recent[$index].path; shortcuts = @([string]($index + 1)); enabled = $true }) }
+            $recentItems.Add([ordered]@{ value = 'B'; label = '이전으로'; shortcuts = @('B'); enabled = $true })
+            $recentChoice = Invoke-DuoForgeMenuInternal -Items @($recentItems) -Title '최근 사용 경로' -EscapeValue 'B' -InputReader $InputReader -MenuInvoker $MenuInvoker
+            if ($recentChoice -ieq 'B') { continue }
+            $path = [string]$recent[[int]$recentChoice].path
         }
         else {
             Write-Host '올바른 항목을 선택해 주세요.' -ForegroundColor Yellow
