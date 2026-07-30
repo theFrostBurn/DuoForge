@@ -345,7 +345,7 @@ function Set-DuoForgeRunStateInternal {
 
     $statePath = Join-Path $RunDirectory 'state.json'
     $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $statePath)
-    $terminal = @('COMPLETED', 'COMPLETED_PARTIAL', 'SOURCE_DRIFT', 'FAILED_STAGE', 'CANCELLED')
+    $terminal = @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED', 'SOURCE_DRIFT', 'FAILED_STAGE', 'CANCELLED')
     if ([string]$state.status -in $terminal) {
         throw (New-DuoForgeException -Code 'DF-STATE-TERMINAL' -Message "종료 상태 $($state.status)에서는 상태를 변경할 수 없습니다.")
     }
@@ -1108,6 +1108,9 @@ function New-DuoForgeRunInternal {
             openIssues = @()
             blockingIssues = @()
             answeredIssues = @()
+            decisionReviewCycle = 0
+            maxDecisionReviewCycles = 3
+            decisionReviewLimitReached = $false
             coverage = $null
             runtimeSeconds = 0.0
             createdAt = $now

@@ -3974,7 +3974,7 @@ try {
                 foreach ($selectedIndex in 0..($normalizedMenuItems.Count - 1)) {
                     $cardRows = @(New-DuoForgeInteractiveQuestionCardRowsInternal -Question $presentationQuestion -Presentation $presentation -Width $width -Height $height)
                     $menuLines = @(New-DuoForgeMenuFrameInternal -Items $normalizedMenuItems -Title '승인 요청: 번호로 선택하거나 O로 내 의견을 입력해 주세요.' -SelectedIndex $selectedIndex)
-                    $allLines = @($cardRows | ForEach-Object { [string]$_.text }) + @($menuLines | ForEach-Object { Limit-DuoForgeProgressTextInternal -Text ([string]$_) -Width ($width - 1) })
+                    $allLines = @('질문 검토 3/3 · 현재 배치 3개 · 뒤에 2개', '마지막 검토입니다. 이후 새 질문은 자동으로 묻지 않습니다.') + @($cardRows | ForEach-Object { [string]$_.text }) + @($menuLines | ForEach-Object { Limit-DuoForgeProgressTextInternal -Text ([string]$_) -Width ($width - 1) })
                     [ordered]@{
                         width = $width
                         height = $height
@@ -4266,6 +4266,137 @@ try {
         Assert-True ([bool]$customFlow.promptHasAnswer)
         Assert-True ([bool]$customFlow.promptHasConstraint)
         Assert-Equal $customFlow.stateStatus 'PAUSED_USER'
+    }
+
+    Test-Case '사용자 결정 검토는 필요할 때만 재질문하고 최대 세 회차에서 종료한다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'decision-review-cycle\input\brief.md')
+        $workspace = Join-Path $tempRoot 'decision-review-cycle-results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $control = @{ calls = 0 }
+        $invokeCycle = {
+            param($directory, $controlState)
+            & $module {
+                param($runDirectory, $sharedControl)
+                $callback = {
+                    param($step)
+                    $sharedControl.calls++
+                    $result = New-DuoForgeFakeStageResult -Step $step
+                    if ([string]$step.stage -eq 'final-validation') {
+                        $sequence = [int]$step.attemptCount
+                        $externalKey = 'REASK-R02-{0:D3}' -f $sequence
+                        $result.finalApproved = $false
+                        $result.issues = @([ordered]@{ issueKey = $externalKey; targetDocumentId = 'merged'; category = 'preference'; severity = 'major'; claim = "결정 검토 $sequence 뒤 새 선택이 필요합니다."; evidence = @(); proposal = "새 방향 $sequence 을 선택하세요."; requiresUser = $true; blockingProposal = $true })
+                        $result.openQuestions = @([ordered]@{ issueKey = $externalKey; title = "새 선택 $sequence"; question = "새 방향 $sequence 을 선택할까요?"; options = @("방향 $sequence 승인", "방향 $sequence 보류"); recommendedOption = "방향 $sequence 승인"; reasonNow = '이전 답변을 반영한 검토에서 새 갈림길이 생겼습니다.'; plainExplanation = '앞선 결정을 반영하면서 추가 선택이 필요해졌습니다.'; codexOpinion = '첫 방향을 권합니다.'; claudeOpinion = '첫 방향에 동의합니다.'; estimatedCost = '즉시'; reversibility = 'easy'; confidence = 'high'; impactIfDeferred = '최종 검증이 멈춥니다.'; safeDefault = "방향 $sequence 승인"; experimentPossible = $false })
+                    }
+                    return $result
+                }
+                Invoke-DuoForgeStageEngine -RunDirectory $runDirectory -ProviderInvoker $callback
+            } $directory $controlState
+        }.GetNewClosure()
+
+        $firstGate = & $invokeCycle $run.runDirectory $control
+        Assert-Equal $firstGate.status 'AWAITING_USER' ($firstGate | ConvertTo-Json -Depth 20 -Compress)
+        Assert-Equal $firstGate.decisionReviewCycle 1
+        Assert-Equal $firstGate.maxDecisionReviewCycles 3
+        Assert-False ([bool]$firstGate.limitReached)
+        Assert-ThrowsCode -ExpectedCode 'DF-DECISION-PENDING' -Body {
+            & $module {
+                param($runId, $resultsRoot)
+                Invoke-DuoForgeResumeLiveInternal -RunId $runId -ResultsRoot $resultsRoot -LiveConsent $true
+            } $run.runId $workspace
+        }
+
+        $seenIssueIds = [System.Collections.Generic.List[string]]::new()
+        for ($cycle = 1; $cycle -le 3; $cycle++) {
+            $pending = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'decisions\pending.json') | ConvertFrom-Json -Depth 50
+            Assert-Equal @($pending.questions).Count 1
+            $issueId = [string]$pending.questions[0].issueKey
+            Assert-False ($issueId -in @($seenIssueIds)) "질문 검토 $cycle 회차가 이미 답한 쟁점을 다시 사용했습니다."
+            $seenIssueIds.Add($issueId)
+            $answered = Set-DuoForgeIssueAnswer -RunId $run.runId -IssueId $issueId -Choice 1 -ResultsRoot $workspace
+            Assert-Equal $answered.status 'PAUSED_USER'
+            $reviewed = & $invokeCycle $run.runDirectory $control
+            if ($cycle -lt 3) {
+                Assert-Equal $reviewed.status 'AWAITING_USER'
+                Assert-Equal $reviewed.decisionReviewCycle ($cycle + 1)
+                Assert-False ([bool]$reviewed.limitReached)
+            }
+            else {
+                Assert-Equal $reviewed.status 'QUESTION_LIMIT_REACHED'
+                Assert-Equal $reviewed.decisionReviewCycle 3
+                Assert-Equal $reviewed.maxDecisionReviewCycles 3
+                Assert-True ([bool]$reviewed.limitReached)
+            }
+        }
+
+        $limitedState = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'state.json') | ConvertFrom-Json -Depth 50
+        Assert-Equal $limitedState.status 'QUESTION_LIMIT_REACHED'
+        Assert-Equal $limitedState.decisionReviewCycle 3
+        Assert-Equal $limitedState.maxDecisionReviewCycles 3
+        Assert-True ([bool]$limitedState.decisionReviewLimitReached)
+        $limitedPending = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'decisions\pending.json') | ConvertFrom-Json -Depth 50
+        Assert-Equal @($limitedPending.questions).Count 1
+        Assert-False ([string]$limitedPending.questions[0].issueKey -in @($seenIssueIds)) '한도에서 보존한 새 질문이 이전 질문과 구분되지 않았습니다.'
+        Assert-ThrowsCode -ExpectedCode 'DF-DECISION-TERMINAL' -Body {
+            Set-DuoForgeIssueAnswer -RunId $run.runId -IssueId ([string]$limitedPending.questions[0].issueKey) -Choice 1 -ResultsRoot $workspace
+        }
+        $callsBeforeBlockedResume = [int]$control.calls
+        $blockedResume = & $invokeCycle $run.runDirectory $control
+        Assert-Equal $blockedResume.status 'QUESTION_LIMIT_REACHED'
+        Assert-Equal $blockedResume.invoked 0
+        Assert-Equal $control.calls $callsBeforeBlockedResume
+        $cycleEvents = @(Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ForEach-Object { $_ | ConvertFrom-Json -Depth 50 })
+        Assert-Equal @($cycleEvents | Where-Object { $_.type -eq 'DECISION_REVIEW_CYCLE_OPENED' }).Count 3
+        Assert-Equal @($cycleEvents | Where-Object { $_.type -eq 'DECISION_REVIEW_LIMIT_REACHED' }).Count 1
+        $limitedMenu = & $module {
+            param($runId, $runDirectory)
+            $capture = [ordered]@{ items = @() }
+            $menuInvoker = {
+                param($items, $title, $escapeValue, $initialSelectedIndex)
+                $capture.items = @($items)
+                return 'B'
+            }.GetNewClosure()
+            Invoke-DuoForgeInteractiveRun -RunRecord ([ordered]@{ runId = $runId; runDirectory = $runDirectory }) -MenuInvoker $menuInvoker
+            [ordered]@{
+                items = @($capture.items)
+                stateLabel = Get-DuoForgeDisplayStateLabelInternal -Status 'QUESTION_LIMIT_REACHED'
+            }
+        } $run.runId $run.runDirectory
+        Assert-Equal $limitedMenu.stateLabel '질문 검토 한도 도달'
+        Assert-Equal (@($limitedMenu.items | ForEach-Object { [string]$_.value }) -join ',') 'I,O,B'
+
+        $earlyWorkspace = Join-Path $tempRoot 'decision-review-early-results'
+        $earlyRequest = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $earlyWorkspace -DocumentType prd
+        $earlyValidation = Test-DuoForgeStartRequest -Request $earlyRequest -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $earlyWorkspace)
+        $earlyRun = New-DuoForgeRun -ValidationResult $earlyValidation
+        $invokeEarly = {
+            param($directory)
+            & $module {
+                param($runDirectory)
+                $callback = {
+                    param($step)
+                    $result = New-DuoForgeFakeStageResult -Step $step
+                    if ([string]$step.stage -eq 'final-validation' -and [int]$step.attemptCount -eq 1) {
+                        $result.finalApproved = $false
+                        $result.issues = @([ordered]@{ issueKey = 'EARLY-R02-001'; targetDocumentId = 'merged'; category = 'preference'; severity = 'major'; claim = '한 번만 결정하면 됩니다.'; evidence = @(); proposal = '권장 방향을 승인하세요.'; requiresUser = $true; blockingProposal = $true })
+                        $result.openQuestions = @([ordered]@{ issueKey = 'EARLY-R02-001'; title = '한 번의 결정'; question = '권장 방향을 승인할까요?'; options = @('승인', '유지'); recommendedOption = '승인'; reasonNow = '최종 완료 전에 한 번 확인합니다.'; plainExplanation = '한 번의 선택으로 끝나는 문제입니다.'; codexOpinion = '승인을 권합니다.'; claudeOpinion = '승인에 동의합니다.'; estimatedCost = '즉시'; reversibility = 'easy'; confidence = 'high'; impactIfDeferred = '완료가 멈춥니다.'; safeDefault = '승인'; experimentPossible = $false })
+                    }
+                    return $result
+                }
+                Invoke-DuoForgeStageEngine -RunDirectory $runDirectory -ProviderInvoker $callback
+            } $directory
+        }.GetNewClosure()
+        $earlyGate = & $invokeEarly $earlyRun.runDirectory
+        Assert-Equal $earlyGate.status 'AWAITING_USER'
+        Assert-Equal $earlyGate.decisionReviewCycle 1
+        $earlyPending = Get-Content -Raw -LiteralPath (Join-Path $earlyRun.runDirectory 'decisions\pending.json') | ConvertFrom-Json -Depth 50
+        $null = Set-DuoForgeIssueAnswer -RunId $earlyRun.runId -IssueId ([string]$earlyPending.questions[0].issueKey) -Choice 1 -ResultsRoot $earlyWorkspace
+        $earlyCompleted = & $invokeEarly $earlyRun.runDirectory
+        Assert-Equal $earlyCompleted.status 'COMPLETED'
+        Assert-Equal $earlyCompleted.decisionReviewCycle 1
+        Assert-False ([bool]$earlyCompleted.limitReached)
     }
 
     Test-Case '최신 사용자 결정은 과거 라운드의 동일 질문을 확정 처리한다' {

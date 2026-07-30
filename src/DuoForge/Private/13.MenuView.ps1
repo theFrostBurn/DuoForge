@@ -50,6 +50,7 @@ function Get-DuoForgeDisplayStateLabelInternal {
         'AWAITING_EVIDENCE' { '추가 자료 대기' }
         'COMPLETED' { '완료' }
         'COMPLETED_PARTIAL' { '일부 범위만 완료' }
+        'QUESTION_LIMIT_REACHED' { '질문 검토 한도 도달' }
         'RESUMABLE_ERROR' { '오류 발생 · 이어서 가능' }
         'SOURCE_DRIFT' { '원본 파일이 변경됨' }
         'FAILED_STAGE' { '작업 실패' }

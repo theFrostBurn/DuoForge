@@ -755,7 +755,8 @@ function New-DuoForgeInteractiveQuestionCardRowsInternal {
     )
 
     $lineWidth = [Math]::Max(20, $Width - 1)
-    $estimatedMenuLines = @($Presentation.options).Count + 8
+    # 질문 검토 회차와 마지막 회차 경고까지 포함해 작은 터미널의 카드 높이를 예약한다.
+    $estimatedMenuLines = @($Presentation.options).Count + 10
     $budget = [Math]::Max(8, $Height - $estimatedMenuLines)
     $rows = [System.Collections.Generic.List[object]]::new()
     $add = {
@@ -901,10 +902,14 @@ function Invoke-DuoForgeInteractiveQuestion {
 
     $questions = @(Get-DuoForgeInteractivePendingQuestionsInternal -RunDirectory ([string]$Run.runDirectory))
     if ($questions.Count -eq 0) { Write-Host '답변 대기 중인 질문이 없습니다.'; return }
+    $reviewProgress = Get-DuoForgeDecisionReviewProgressInternal -RunDirectory ([string]$Run.runDirectory) -State $Run.state -InferPendingGate
     $issueLedger = Get-DuoForgeObjectValue -Object $Run -Name 'issues'
     $runIssues = if ($null -ne $issueLedger) { @(Get-DuoForgeObjectValue -Object $issueLedger -Name 'issues' -Default @()) } else { @() }
     $batch = Get-DuoForgePendingQuestionBatchInternal -Questions $questions
-    Write-Host ("현재 질문 배치 {0}개, 이 배치 뒤 남은 질문 {1}개" -f $batch.batchSize, $batch.remainingAfterBatch) -ForegroundColor DarkGray
+    Write-Host ("질문 검토 {0}/{1} · 현재 배치 {2}개 · 뒤에 {3}개" -f $reviewProgress.cycle, $reviewProgress.maximum, $batch.batchSize, $batch.remainingAfterBatch) -ForegroundColor DarkGray
+    if ([int]$reviewProgress.cycle -ge [int]$reviewProgress.maximum) {
+        Write-Host '마지막 검토입니다. 이후 새 질문은 자동으로 묻지 않습니다.' -ForegroundColor Yellow
+    }
     if ($batch.batchSize -gt 1) {
         $batchItems = [System.Collections.Generic.List[object]]::new()
         for ($index = 0; $index -lt $batch.batchSize; $index++) {
@@ -1115,8 +1120,11 @@ function Invoke-DuoForgeInteractiveRun {
         Write-Host ("{0} · {1}" -f $run.manifest.name, (Get-DuoForgeDisplayStateLabelInternal -Status ([string]$run.state.status)))
         Write-Host ("마지막 완료 단계: {0}" -f (Get-DuoForgeDisplayStageLabelInternal -Stage ([string]$run.state.lastCompletedStage)) )
         Write-Host ("남은 검토 항목 {0}개, 진행을 막는 항목 {1}개" -f @($run.state.openIssues).Count, @($run.state.blockingIssues).Count)
+        $reviewProgress = Get-DuoForgeDecisionReviewProgressInternal -RunDirectory ([string]$run.runDirectory) -State $run.state -InferPendingGate
+        if ([int]$reviewProgress.cycle -gt 0) { Write-Host ("질문 검토 회차: {0}/{1}" -f $reviewProgress.cycle, $reviewProgress.maximum) -ForegroundColor DarkGray }
+        if ([bool]$reviewProgress.limitReached) { Write-Host '세 차례의 질문·답변·검토 뒤에도 새 차단 질문이 남아 자동 재질문을 종료했습니다. 검토 항목과 결과 문서를 확인해 주세요.' -ForegroundColor Yellow }
         $menuItems = [System.Collections.Generic.List[object]]::new()
-        $terminalStates = @('COMPLETED', 'COMPLETED_PARTIAL', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED')
+        $terminalStates = @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED')
         $pendingQuestions = @(Get-DuoForgeInteractivePendingQuestionsInternal -RunDirectory ([string]$run.runDirectory))
         $pendingQuestionCount = $pendingQuestions.Count
         if ($pendingQuestionCount -gt 0 -and [string]$run.state.status -notin $terminalStates) {
@@ -1148,9 +1156,9 @@ function Invoke-DuoForgeInteractiveRun {
         if ($choice -ieq 'B') { return }
         if ($choice -ieq 'A' -and $pendingQuestionCount -gt 0 -and [string]$run.state.status -notin $terminalStates) { Invoke-DuoForgeInteractiveQuestion -Run $run -InputReader $InputReader -MenuInvoker $MenuInvoker; continue }
         if ($choice -ieq 'E' -and [string]$run.state.status -eq 'AWAITING_EVIDENCE') { Invoke-DuoForgeInteractiveEvidence -Run $run -InputReader $InputReader -MenuInvoker $MenuInvoker; continue }
-        if ($choice -ieq 'D' -and $decisionRecords.Count -gt 0 -and [string]$run.state.status -notin @('COMPLETED', 'COMPLETED_PARTIAL', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED')) { Invoke-DuoForgeInteractiveDecisionChangeInternal -Run $run -InputReader $InputReader -MenuInvoker $MenuInvoker; continue }
+        if ($choice -ieq 'D' -and $decisionRecords.Count -gt 0 -and [string]$run.state.status -notin @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED')) { Invoke-DuoForgeInteractiveDecisionChangeInternal -Run $run -InputReader $InputReader -MenuInvoker $MenuInvoker; continue }
         if ($choice -ieq 'R' -and $pendingQuestionCount -eq 0 -and [string]$run.state.status -notin @('AWAITING_EVIDENCE') -and [string]$run.state.status -notin $terminalStates) { Invoke-DuoForgeInteractiveLiveResume -Run $run -InputReader $InputReader; continue }
-        if ($choice -ieq 'P' -and [string]$run.state.status -notin @('PAUSED_USER', 'COMPLETED', 'COMPLETED_PARTIAL', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED')) {
+        if ($choice -ieq 'P' -and [string]$run.state.status -notin @('PAUSED_USER', 'COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED')) {
             $pause = Request-DuoForgePauseInternal -RunId ([string]$run.state.runId) -ResultsRoot $resultsRoot
             if ($pause.alreadyRequested) { Write-Host ('이미 일시정지가 요청되어 있습니다: {0}' -f $pause.requestId) }
             else { Write-Host '일시정지를 요청했습니다. 현재 호출이 완료된 뒤 다음 호출 전에 멈춥니다.' -ForegroundColor Green }
@@ -1183,7 +1191,7 @@ function Invoke-DuoForgeInteractiveHome {
     $setupReport = & $invokeSetup $false
     while ($true) {
         $runs = @(if ($null -ne $RunsInvoker) { & $RunsInvoker } else { Get-DuoForgeRunsInternal })
-        $activeCount = @($runs | Where-Object { $_.status -notin @('COMPLETED', 'COMPLETED_PARTIAL', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED') }).Count
+        $activeCount = @($runs | Where-Object { $_.status -notin @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED') }).Count
         $choice = Invoke-DuoForgeMenuInternal -Title 'DuoForge' -EscapeValue 'Q' -InputReader $InputReader -MenuInvoker $MenuInvoker -Items @(
             [ordered]@{ value = '1'; label = '새 작업 시작'; shortcuts = @('1'); enabled = $true }
             [ordered]@{ value = '2'; label = "진행 중인 작업 보기 ($activeCount)"; shortcuts = @('2'); enabled = $true }
@@ -1202,10 +1210,10 @@ function Invoke-DuoForgeInteractiveHome {
             '^(2|3)$' {
                 if ($runs.Count -eq 0) { Write-Host '저장된 실행이 없습니다.'; continue }
                 $candidates = if ($choice -eq '2') {
-                    @($runs | Where-Object { $_.status -notin @('COMPLETED', 'COMPLETED_PARTIAL', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED') })
+                    @($runs | Where-Object { $_.status -notin @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED') })
                 }
                 else {
-                    @($runs | Where-Object { $_.status -in @('COMPLETED', 'COMPLETED_PARTIAL') })
+                    @($runs | Where-Object { $_.status -in @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED') })
                 }
                 $selected = Select-DuoForgeInteractiveRun -Runs $candidates -Prompt '작업을 선택해 주세요.' -InputReader $InputReader -MenuInvoker $MenuInvoker
                 if ($null -ne $selected) { Invoke-DuoForgeInteractiveRun -RunRecord $selected -InputReader $InputReader -MenuInvoker $MenuInvoker }

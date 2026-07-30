@@ -425,6 +425,10 @@ function Invoke-DuoForgeStageEngine {
         $state = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'state.json')
         $graph = Initialize-DuoForgeStageGraph -RunDirectory $RunDirectory
         $stepsPath = Join-Path $RunDirectory 'steps.json'
+        if ([string]$state.status -eq 'QUESTION_LIMIT_REACHED') {
+            $reviewProgress = Get-DuoForgeDecisionReviewProgressInternal -RunDirectory $RunDirectory -State (ConvertTo-DuoForgeHashtable -InputObject $state) -InferPendingGate
+            return [ordered]@{ status = 'QUESTION_LIMIT_REACHED'; invoked = 0; decisionReviewCycle = $reviewProgress.cycle; maxDecisionReviewCycles = $reviewProgress.maximum; limitReached = $true }
+        }
         $artifactRepair = Repair-DuoForgeCorruptedStageArtifactsInternal -RunDirectory $RunDirectory -Graph $graph
         $interruptedSteps = @(Repair-DuoForgeInterruptedStartedStepsInternal -Graph $graph -RunDirectory $RunDirectory -Manifest $manifest -State $state)
         if ([bool]$artifactRepair.repaired -or $interruptedSteps.Count -gt 0) { Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph }
@@ -663,7 +667,7 @@ function Invoke-DuoForgeStageEngine {
 
         try {
             $rendered = if ($null -ne $FinalRenderer) { & $FinalRenderer $RunDirectory $graph } else { Render-DuoForgeFinalArtifacts -RunDirectory $RunDirectory -Graph $graph }
-            Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'FINAL_ARTIFACTS_RENDERED' -Status 'RUNNING' -Data ([ordered]@{ files = @($rendered.files | ForEach-Object { [System.IO.Path]::GetFileName($_) }) })
+            Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'FINAL_ARTIFACTS_RENDERED' -Status 'RUNNING' -Data ([ordered]@{ files = @($rendered.files | ForEach-Object { [System.IO.Path]::GetFileName($_) }); questionCount = @((Get-DuoForgeObjectValue -Object $rendered -Name 'questions' -Default @())).Count })
         }
         catch {
             $rendererCode = if ($_.Exception.Data.Contains('DuoForgeCode')) { [string]$_.Exception.Data['DuoForgeCode'] } else { 'DF-FINAL-RENDERER' }
@@ -686,6 +690,18 @@ function Invoke-DuoForgeStageEngine {
             $awaitingEvidence = @($ledger.issues | Where-Object {
                 [bool]$_.blocking -and [string]$_.resolutionStatus -eq 'AWAITING_EVIDENCE'
             }).Count -gt 0
+            $renderedQuestions = @((Get-DuoForgeObjectValue -Object $rendered -Name 'questions' -Default @()))
+            if (-not $awaitingEvidence -and $renderedQuestions.Count -gt 0) {
+                $reviewGate = Register-DuoForgeDecisionReviewGateInternal -RunDirectory $RunDirectory -QuestionCount $renderedQuestions.Count
+                if (-not [bool]$reviewGate.allowed) {
+                    $state = Set-DuoForgeRunStateInternal -RunDirectory $RunDirectory -Status 'QUESTION_LIMIT_REACHED' -LastCompletedStage $state.lastCompletedStage
+                    Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'DECISION_REVIEW_LIMIT_REACHED' -Status 'QUESTION_LIMIT_REACHED' -Data ([ordered]@{ cycle = [int]$reviewGate.cycle; maximum = [int]$reviewGate.maximum; questionCount = [int]$reviewGate.questionCount })
+                    $finalResult = [ordered]@{ status = 'QUESTION_LIMIT_REACHED'; invoked = $invoked; totalSteps = @($graph.steps).Count; decisionReviewCycle = [int]$reviewGate.cycle; maxDecisionReviewCycles = [int]$reviewGate.maximum; limitReached = $true }
+                    Invoke-DuoForgeProgressObserverInternal -Observer $ProgressObserver -Type 'RUN_FINISHED' -RunDirectory $RunDirectory -Data $finalResult
+                    return $finalResult
+                }
+                Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'DECISION_REVIEW_CYCLE_OPENED' -Status 'RUNNING' -Data ([ordered]@{ cycle = [int]$reviewGate.cycle; maximum = [int]$reviewGate.maximum; questionCount = [int]$reviewGate.questionCount })
+            }
             $waitingStatus = if ($awaitingEvidence) { 'AWAITING_EVIDENCE' } else { 'AWAITING_USER' }
             $state = Set-DuoForgeRunStateInternal -RunDirectory $RunDirectory -Status $waitingStatus -LastCompletedStage $state.lastCompletedStage
         }
@@ -695,7 +711,8 @@ function Invoke-DuoForgeStageEngine {
             $finalStatus = if ($contextStatus -eq 'COMPLETED_PARTIAL') { 'COMPLETED_PARTIAL' } else { [string]$completion.status }
             $state = Set-DuoForgeRunStateInternal -RunDirectory $RunDirectory -Status $finalStatus -LastCompletedStage $state.lastCompletedStage
         }
-        $finalResult = [ordered]@{ status = $state.status; invoked = $invoked; totalSteps = @($graph.steps).Count }
+        $reviewProgress = Get-DuoForgeDecisionReviewProgressInternal -RunDirectory $RunDirectory -State (ConvertTo-DuoForgeHashtable -InputObject $state)
+        $finalResult = [ordered]@{ status = $state.status; invoked = $invoked; totalSteps = @($graph.steps).Count; decisionReviewCycle = $reviewProgress.cycle; maxDecisionReviewCycles = $reviewProgress.maximum; limitReached = [bool]$reviewProgress.limitReached }
         Invoke-DuoForgeProgressObserverInternal -Observer $ProgressObserver -Type 'RUN_FINISHED' -RunDirectory $RunDirectory -Data $finalResult
         return $finalResult
     }

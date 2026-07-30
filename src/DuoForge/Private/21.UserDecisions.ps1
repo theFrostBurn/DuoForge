@@ -20,6 +20,69 @@ function Resolve-DuoForgeDecisionChoice {
     return [ordered]@{ code = [char]([int][char]'A' + $index); option = [string]$Options[$index] }
 }
 
+function Get-DuoForgeDecisionReviewProgressInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RunDirectory,
+        [System.Collections.IDictionary]$State,
+        [switch]$InferPendingGate
+    )
+
+    $currentState = if ($null -eq $State) {
+        ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'state.json'))
+    }
+    else {
+        $State
+    }
+    $maximum = 3
+    $cycle = [int](Get-DuoForgeObjectValue -Object $currentState -Name 'decisionReviewCycle' -Default 0)
+    $cycle = [Math]::Max(0, [Math]::Min($maximum, $cycle))
+    if ($cycle -eq 0) {
+        $answerRecords = @(Read-DuoForgeJsonLines -Path (Join-Path $RunDirectory 'decisions\user-answers.jsonl') -AllowMissing | Where-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'action' -Default '') -eq 'ANSWER' })
+        if ($answerRecords.Count -gt 0) {
+            $cycle = 1
+        }
+        elseif ($InferPendingGate) {
+            $pendingPath = Join-Path $RunDirectory 'decisions\pending.json'
+            $pendingQuestions = if (Test-Path -LiteralPath $pendingPath -PathType Leaf) { @((Read-DuoForgeJson -Path $pendingPath).questions) } else { @() }
+            if ($pendingQuestions.Count -gt 0) { $cycle = 1 }
+        }
+    }
+    return [ordered]@{
+        cycle = $cycle
+        maximum = $maximum
+        remaining = [Math]::Max(0, $maximum - $cycle)
+        limitReached = [bool](Get-DuoForgeObjectValue -Object $currentState -Name 'decisionReviewLimitReached' -Default $false)
+    }
+}
+
+function Register-DuoForgeDecisionReviewGateInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RunDirectory,
+        [ValidateRange(1, 1000)][int]$QuestionCount
+    )
+
+    $statePath = Join-Path $RunDirectory 'state.json'
+    $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $statePath)
+    $progress = Get-DuoForgeDecisionReviewProgressInternal -RunDirectory $RunDirectory -State $state
+    $state.maxDecisionReviewCycles = 3
+    if ([int]$progress.cycle -ge [int]$progress.maximum) {
+        $state.decisionReviewCycle = [int]$progress.maximum
+        $state.decisionReviewLimitReached = $true
+        $state.updatedAt = Get-DuoForgeUtcNow
+        Write-DuoForgeJsonAtomic -Path $statePath -Value $state
+        return [ordered]@{ allowed = $false; cycle = [int]$progress.maximum; maximum = [int]$progress.maximum; questionCount = $QuestionCount; limitReached = $true }
+    }
+
+    $nextCycle = [int]$progress.cycle + 1
+    $state.decisionReviewCycle = $nextCycle
+    $state.decisionReviewLimitReached = $false
+    $state.updatedAt = Get-DuoForgeUtcNow
+    Write-DuoForgeJsonAtomic -Path $statePath -Value $state
+    return [ordered]@{ allowed = $true; cycle = $nextCycle; maximum = [int]$progress.maximum; questionCount = $QuestionCount; limitReached = $false }
+}
+
 function Reset-DuoForgeDecisionAffectedSteps {
     [CmdletBinding()]
     param(
@@ -96,7 +159,7 @@ function Set-DuoForgeUserDecisionInternal {
         $directory = [string]$run.runDirectory
         $statePath = Join-Path $directory 'state.json'
         $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $statePath)
-        if ([string]$state.status -in @('COMPLETED', 'COMPLETED_PARTIAL', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED')) {
+        if ([string]$state.status -in @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED')) {
             throw (New-DuoForgeException -Code 'DF-DECISION-TERMINAL' -Message '종료된 실행의 쟁점은 변경할 수 없습니다.')
         }
 

@@ -31,7 +31,7 @@ function Request-DuoForgePauseInternal {
     )
 
     $run = Get-DuoForgeRunInternal -RunId $RunId -ResultsRoot $ResultsRoot
-    $terminal = @('COMPLETED', 'COMPLETED_PARTIAL', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED')
+    $terminal = @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED')
     if ([string]$run.state.status -in $terminal) {
         throw (New-DuoForgeException -Code 'DF-PAUSE-TERMINAL' -Message '종료된 실행에는 일시정지를 요청할 수 없습니다.')
     }

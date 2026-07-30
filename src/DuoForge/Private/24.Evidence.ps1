@@ -22,7 +22,7 @@ function Add-DuoForgeIssueEvidenceInternal {
         $null = Assert-DuoForgeStagePromptPolicyInternal -Manifest $run.manifest
         $statePath = Join-Path $directory 'state.json'
         $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $statePath)
-        if ([string]$state.status -in @('COMPLETED', 'COMPLETED_PARTIAL', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED')) {
+        if ([string]$state.status -in @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED')) {
             throw (New-DuoForgeException -Code 'DF-EVIDENCE-TERMINAL' -Message '종료된 실행에는 근거를 추가할 수 없습니다.')
         }
 
