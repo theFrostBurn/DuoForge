@@ -61,6 +61,23 @@ function Assert-ThrowsCode {
     throw "예상한 오류 '$ExpectedCode'가 발생하지 않았습니다."
 }
 
+function Assert-RegularArtifactHistoryFile {
+    param(
+        [Parameter(Mandatory)]$Step,
+        [Parameter(Mandatory)]$Entry
+    )
+
+    $hashToken = [string]$Entry.previousArtifactHash -replace '^(?i)sha256:', ''
+    $expectedName = '{0}-{1}.json' -f [string]$Step.stepKey, $hashToken.Substring(0, [Math]::Min(12, $hashToken.Length)).ToLowerInvariant()
+    $preservedPath = [string]$Entry.preservedPath
+    $leaf = Split-Path -Leaf $preservedPath
+    Assert-Equal $leaf $expectedName
+    Assert-False $leaf.Contains(':') 'history 파일명에 NTFS ADS 구분자가 남아 있습니다.'
+    Assert-True (Test-Path -LiteralPath $preservedPath -PathType Leaf) 'history 보존 파일이 없습니다.'
+    Assert-True ((Get-Item -LiteralPath $preservedPath).Length -gt 0) 'history 보존 파일이 비어 있습니다.'
+    Assert-Equal @(Get-ChildItem -LiteralPath (Split-Path -Parent $preservedPath) -File | Where-Object Name -eq $leaf).Count 1
+}
+
 function Test-Case {
     param([string]$Name, [scriptblock]$Body)
     try {
@@ -233,10 +250,12 @@ try {
             param($path, $help)
             $codex = Get-DuoForgeProviderSelectionOptionsInternal -Provider codex -CodexModelCachePath $path
             $claude = Get-DuoForgeProviderSelectionOptionsInternal -Provider claude -ClaudeHelpText $help
+            $claudeWithoutEffortLevels = ConvertFrom-DuoForgeClaudeHelpInternal -HelpText ($help -replace '\(low, medium, high, xhigh, max\)', 'Use a supported level.')
             [ordered]@{
                 codex = $codex
                 claude = $claude
                 lunaEfforts = @(Get-DuoForgeReasoningEffortsForModelInternal -Options $codex -Model 'gpt-5.6-luna')
+                claudeWithoutEffortLevels = $claudeWithoutEffortLevels
             }
         } $cachePath $claudeHelp
 
@@ -250,6 +269,7 @@ try {
         Assert-Equal $menu.claude.suggestedModels[0].displayName 'Opus'
         Assert-Equal $menu.claude.recommendedModel 'opus'
         Assert-Equal $menu.claude.recommendedReasoningEffort 'high'
+        Assert-True ($null -eq $menu.claudeWithoutEffortLevels) '추론 단계 목록이 없는 Claude 도움말은 예외 없이 폴백되어야 합니다.'
     }
 
     Test-Case 'CLI 카탈로그 변경 시 사라진 모델과 추론 정도에는 권장을 붙이지 않는다' {
@@ -327,6 +347,29 @@ try {
             Write-DuoForgeJsonAtomic -Path $manifestPath -Value $manifest
         } $run.runDirectory
         Assert-ThrowsCode -ExpectedCode 'DF-PROVIDER-SELECTION-REQUIRED' -Body {
+            & $module {
+                param($runId, $resultsRoot)
+                Invoke-DuoForgeResumeLiveInternal -RunId $runId -ResultsRoot $resultsRoot -LiveConsent $true
+            } $run.runId $workspace
+        }
+    }
+
+    Test-Case '미답변 질문이 0개면 재개 사전 검사가 다음 안전 게이트로 진행한다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'empty-pending-resume\input\brief.md')
+        $workspace = Join-Path $tempRoot 'empty-pending-resume-results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $pending = Get-Content -LiteralPath (Join-Path $run.runDirectory 'decisions\pending.json') -Raw | ConvertFrom-Json -Depth 20
+        Assert-Equal @($pending.questions).Count 0
+        & $module {
+            param($directory)
+            $manifestPath = Join-Path $directory 'manifest.json'
+            $manifest = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $manifestPath)
+            $manifest.Remove('artifactVisibilityPolicy')
+            Write-DuoForgeJsonAtomic -Path $manifestPath -Value $manifest
+        } $run.runDirectory
+        Assert-ThrowsCode -ExpectedCode 'DF-PROMPT-VISIBILITY-POLICY' -Body {
             & $module {
                 param($runId, $resultsRoot)
                 Invoke-DuoForgeResumeLiveInternal -RunId $runId -ResultsRoot $resultsRoot -LiveConsent $true
@@ -4653,6 +4696,18 @@ try {
     }
 
     Test-Case '사용자 결정 검토는 필요할 때만 재질문하고 최대 세 회차에서 종료한다' {
+        $emptyGateDirectory = Join-Path $tempRoot 'decision-review-empty-gate'
+        [System.IO.Directory]::CreateDirectory((Join-Path $emptyGateDirectory 'decisions')) | Out-Null
+        & $module {
+            param($directory)
+            Write-DuoForgeJsonAtomic -Path (Join-Path $directory 'decisions\pending.json') -Value ([ordered]@{ schemaVersion = 1; questions = @() })
+        } $emptyGateDirectory
+        $emptyGateProgress = & $module {
+            param($directory)
+            Get-DuoForgeDecisionReviewProgressInternal -RunDirectory $directory -State ([ordered]@{ decisionReviewCycle = 0 }) -InferPendingGate
+        } $emptyGateDirectory
+        Assert-Equal $emptyGateProgress.cycle 0
+
         $input = New-MarkdownFile -Path (Join-Path $tempRoot 'decision-review-cycle\input\brief.md')
         $workspace = Join-Path $tempRoot 'decision-review-cycle-results'
         $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
@@ -5019,9 +5074,13 @@ try {
             [ordered]@{
                 reset = $reset
                 affectedHistories = @($graph.steps | Where-Object { [int]$_.round -eq 3 -and [string]$_.stage -in @('synthesis', 'final-validation') } | ForEach-Object { @($_.history).Count })
+                preservedRecords = @($graph.steps | Where-Object { [int]$_.round -eq 3 -and [string]$_.stage -in @('synthesis', 'final-validation') } | ForEach-Object { [ordered]@{ step = $_; entry = @($_.history)[-1] } })
             }
         } $run.runDirectory
         Assert-True (@($repeatedInvalidation.affectedHistories | Where-Object { $_ -eq 2 }).Count -eq 2) '반복 무효화 이력이 두 최종 단계에 누적되지 않았습니다.'
+        foreach ($preservedRecord in @($repeatedInvalidation.preservedRecords)) {
+            Assert-RegularArtifactHistoryFile -Step $preservedRecord.step -Entry $preservedRecord.entry
+        }
     }
 
     Test-Case 'Markdown 구조 맵은 의미 경계와 UTF-8 원본 범위를 결정론적으로 보존한다' {
@@ -5607,6 +5666,7 @@ Setext 결론
         Assert-Equal @($graphAfter.steps | Where-Object { $_.stepKey -eq 'r01-claude-independent-draft' })[0].artifactHash $unaffectedHash
         Assert-True ((Get-ChildItem -LiteralPath (Join-Path $run.runDirectory 'history\stages') -File).Count -gt 0)
         $recoveredStep = @($graphAfter.steps | Where-Object { $_.stepKey -eq 'r01-codex-independent-draft' })[0]
+        Assert-RegularArtifactHistoryFile -Step $recoveredStep -Entry (@($recoveredStep.history)[-1])
         [System.IO.File]::WriteAllText([string]$recoveredStep.artifactPath, '{broken-again', [System.Text.UTF8Encoding]::new($false))
         $secondRecovery = & $module {
             param($directory)

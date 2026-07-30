@@ -168,3 +168,18 @@ function Get-DuoForgeSha256 {
 
     return 'sha256:' + [Convert]::ToHexString($hashBytes).ToLowerInvariant()
 }
+
+function Get-DuoForgeArtifactHistorySuffixInternal {
+    [CmdletBinding()]
+    param([AllowNull()][AllowEmptyString()][string]$ArtifactHash)
+
+    $token = [string]$ArtifactHash
+    if ($token.StartsWith('sha256:', [System.StringComparison]::OrdinalIgnoreCase)) {
+        $token = $token.Substring('sha256:'.Length)
+    }
+    $token = [regex]::Replace($token, '[^A-Za-z0-9._-]', '-').Trim([char[]]'.-_')
+    if ([string]::IsNullOrWhiteSpace($token)) {
+        return [Guid]::NewGuid().ToString('N').Substring(0, 12)
+    }
+    return $token.Substring(0, [Math]::Min(12, $token.Length)).ToLowerInvariant()
+}

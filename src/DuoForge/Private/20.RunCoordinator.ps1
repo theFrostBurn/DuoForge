@@ -94,7 +94,10 @@ function Invoke-DuoForgeResumeLiveInternal {
         return [ordered]@{ status = [string]$run.state.status; invoked = 0 }
     }
     $pendingPath = Join-Path $directory 'decisions\pending.json'
-    $pendingQuestions = if (Test-Path -LiteralPath $pendingPath -PathType Leaf) { @((Read-DuoForgeJson -Path $pendingPath).questions) } else { @() }
+    $pendingQuestions = @()
+    if (Test-Path -LiteralPath $pendingPath -PathType Leaf) {
+        $pendingQuestions = @((Read-DuoForgeJson -Path $pendingPath).questions)
+    }
     if ($pendingQuestions.Count -gt 0) {
         throw (New-DuoForgeException -Code 'DF-DECISION-PENDING' -Message ("아직 답하지 않은 질문이 {0}개 있습니다. 모두 답한 뒤 다시 검토할 수 있습니다." -f $pendingQuestions.Count))
     }

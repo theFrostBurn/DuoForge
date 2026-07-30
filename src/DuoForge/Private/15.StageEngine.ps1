@@ -320,7 +320,7 @@ function Repair-DuoForgeCorruptedStageArtifactsInternal {
             preservedPath = $null
         }
         if (-not [string]::IsNullOrWhiteSpace($oldPath) -and (Test-Path -LiteralPath $oldPath -PathType Leaf)) {
-            $suffix = if ([string]::IsNullOrWhiteSpace([string]$step.artifactHash)) { [Guid]::NewGuid().ToString('N').Substring(0, 12) } else { ([string]$step.artifactHash).Substring(0, [Math]::Min(12, ([string]$step.artifactHash).Length)) }
+            $suffix = Get-DuoForgeArtifactHistorySuffixInternal -ArtifactHash ([string]$step.artifactHash)
             $preservedPath = Join-Path $historyDirectory ("{0}-{1}.json" -f [string]$step.stepKey, $suffix)
             [System.IO.File]::Copy($oldPath, $preservedPath, $true)
             $historyRecord.preservedPath = $preservedPath

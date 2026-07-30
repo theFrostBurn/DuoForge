@@ -338,10 +338,10 @@ function ConvertFrom-DuoForgeClaudeHelpInternal {
             Select-Object -Unique
     )
     $effortMatch = [regex]::Match($effortBlock.Groups['body'].Value, '\((?<levels>[a-z0-9_, -]+)\)')
-    $efforts = if ($effortMatch.Success) {
-        @($effortMatch.Groups['levels'].Value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { Test-DuoForgeReasoningEffortIdentifierInternal -Effort $_ } | Select-Object -Unique)
+    $efforts = @()
+    if ($effortMatch.Success) {
+        $efforts = @($effortMatch.Groups['levels'].Value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { Test-DuoForgeReasoningEffortIdentifierInternal -Effort $_ } | Select-Object -Unique)
     }
-    else { @() }
     if ($advertisedAliases.Count -eq 0 -or $efforts.Count -eq 0) { return $null }
 
     $orderedAliases = [System.Collections.Generic.List[string]]::new()

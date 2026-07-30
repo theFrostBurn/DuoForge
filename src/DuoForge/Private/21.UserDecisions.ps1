@@ -44,7 +44,10 @@ function Get-DuoForgeDecisionReviewProgressInternal {
         }
         elseif ($InferPendingGate) {
             $pendingPath = Join-Path $RunDirectory 'decisions\pending.json'
-            $pendingQuestions = if (Test-Path -LiteralPath $pendingPath -PathType Leaf) { @((Read-DuoForgeJson -Path $pendingPath).questions) } else { @() }
+            $pendingQuestions = @()
+            if (Test-Path -LiteralPath $pendingPath -PathType Leaf) {
+                $pendingQuestions = @((Read-DuoForgeJson -Path $pendingPath).questions)
+            }
             if ($pendingQuestions.Count -gt 0) { $cycle = 1 }
         }
     }
@@ -114,7 +117,7 @@ function Reset-DuoForgeDecisionAffectedSteps {
         if ([string]$step.status -eq 'COMMITTED' -and -not [string]::IsNullOrWhiteSpace([string]$step.artifactPath) -and (Test-Path -LiteralPath ([string]$step.artifactPath) -PathType Leaf)) {
             $historyDirectory = Join-Path $RunDirectory 'history\decisions'
             [System.IO.Directory]::CreateDirectory($historyDirectory) | Out-Null
-            $suffix = if ([string]::IsNullOrWhiteSpace([string]$step.artifactHash)) { [Guid]::NewGuid().ToString('N').Substring(0, 12) } else { ([string]$step.artifactHash).Substring(0, [Math]::Min(12, ([string]$step.artifactHash).Length)) }
+            $suffix = Get-DuoForgeArtifactHistorySuffixInternal -ArtifactHash ([string]$step.artifactHash)
             $preservedPath = Join-Path $historyDirectory ("{0}-{1}.json" -f [string]$step.stepKey, $suffix)
             [System.IO.File]::Copy([string]$step.artifactPath, $preservedPath, $true)
             $history = [System.Collections.Generic.List[object]]::new()
