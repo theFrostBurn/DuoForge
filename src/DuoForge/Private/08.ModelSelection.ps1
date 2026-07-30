@@ -612,12 +612,15 @@ function Read-DuoForgeModelChoiceInternal {
         }
         $customNumber = @($options.suggestedModels).Count + 1
         $items.Add([ordered]@{ value = 'custom'; label = '모델명 직접 입력'; shortcuts = @([string]$customNumber); enabled = $true })
-        $items.Add([ordered]@{ value = 'B'; label = '이전으로'; shortcuts = @('B'); enabled = $true })
-        $choice = Invoke-DuoForgeMenuInternal -Items @($items) -Title ("{0} 모델을 선택해 주세요." -f $options.displayName) -EscapeValue 'B' -InitialSelectedIndex $recommendedIndex -InputReader $InputReader -MenuInvoker $MenuInvoker
-        if ($choice -ieq 'B') { return $null }
+        $items.Add([ordered]@{ value = 'back'; label = '이전으로'; shortcuts = @('B'); enabled = $true })
+        $interaction = Invoke-DuoForgeMenuInteractionInternal -Items @($items) -Title ("{0} 모델을 선택해 주세요." -f $options.displayName) -ReturnTarget parent -CancelReturnTarget home -InterruptReturnTarget home -InitialSelectedIndex $recommendedIndex -InputReader $InputReader -MenuInvoker $MenuInvoker
+        if ([string]$interaction.action -ne 'submit') { return $null }
+        $choice = [string]$interaction.value
         if ($choice -like 'model:*') { return [string]$options.suggestedModels[[int]$choice.Substring(6)].value }
         if ($choice -eq 'custom') {
-            $model = $(if ($null -ne $InputReader) { [string](& $InputReader 'CLI에 전달할 정확한 모델명') } else { [string](Read-Host 'CLI에 전달할 정확한 모델명') }).Trim()
+            $modelInteraction = Read-DuoForgeFreeTextInteractionInternal -Prompt 'CLI에 전달할 정확한 모델명' -ReturnTarget parent -InputReader $InputReader
+            if ([string]$modelInteraction.action -ne 'submit') { return $null }
+            $model = ([string]$modelInteraction.value).Trim()
             if (Test-DuoForgeModelIdentifierInternal -Model $model) { return $model }
             Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '모델명 형식이 올바르지 않습니다.' -Message '영문자나 숫자로 시작하고 영문자, 숫자, 점, 밑줄, 콜론, 슬래시, 대괄호, 하이픈만 사용할 수 있습니다.' -Layout $layout) -Layout $layout
             Write-DuoForgeDisplaySpacerInternal -Layout $layout
@@ -649,10 +652,10 @@ function Read-DuoForgeReasoningEffortChoiceInternal {
             if (-not [string]::IsNullOrWhiteSpace($recommended)) { $recommendedIndex = $index }
             $items.Add([ordered]@{ value = [string]$reasoningEfforts[$index]; label = ([string]$reasoningEfforts[$index] + $recommended); shortcuts = @([string]($index + 1)); enabled = $true })
         }
-        $items.Add([ordered]@{ value = 'B'; label = '이전으로'; shortcuts = @('B'); enabled = $true })
-        $choice = Invoke-DuoForgeMenuInternal -Items @($items) -Title ("{0} 분석 깊이를 선택해 주세요. (모델: {1})" -f $options.displayName, $Model) -EscapeValue 'B' -InitialSelectedIndex $recommendedIndex -InputReader $InputReader -MenuInvoker $MenuInvoker
-        if ($choice -ieq 'B') { return $null }
-        return [string]$choice
+        $items.Add([ordered]@{ value = 'back'; label = '이전으로'; shortcuts = @('B'); enabled = $true })
+        $interaction = Invoke-DuoForgeMenuInteractionInternal -Items @($items) -Title ("{0} 분석 깊이를 선택해 주세요. (모델: {1})" -f $options.displayName, $Model) -ReturnTarget parent -CancelReturnTarget home -InterruptReturnTarget home -InitialSelectedIndex $recommendedIndex -InputReader $InputReader -MenuInvoker $MenuInvoker
+        if ([string]$interaction.action -ne 'submit') { return $null }
+        return [string]$interaction.value
     }
 }
 

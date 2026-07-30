@@ -52,14 +52,33 @@ function Select-DuoForgeWindowsPath {
         [ValidateSet('File', 'Directory')]
         [string]$Type,
 
-        [string]$Title = 'DuoForge 입력 선택'
+        [string]$Title = 'DuoForge 입력 선택',
+        [ValidateSet('parent', 'work-menu', 'home', 'shell')][string]$ReturnTarget = 'parent',
+        [scriptblock]$HostProbe,
+        [scriptblock]$DialogInvoker
     )
 
-    if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) {
-        return $null
+    $interactive = if ($null -ne $HostProbe) { [bool](& $HostProbe) } else { [bool][Environment]::UserInteractive }
+    $inputRedirected = if ($null -ne $HostProbe) { $false } else { [bool][Console]::IsInputRedirected }
+    if (-not $interactive -or $inputRedirected) {
+        $unavailable = New-DuoForgeInteractionResultInternal -Action unavailable -Source dialog -ReturnTarget $ReturnTarget
+        $unavailable['reason'] = 'non-interactive'
+        return $unavailable
     }
 
     try {
+        if ($null -ne $DialogInvoker) {
+            $dialogResult = & $DialogInvoker $Type $Title
+            if ($dialogResult -is [System.Collections.IDictionary] -and -not [string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $dialogResult -Name 'action'))) { return $dialogResult }
+            if ($dialogResult -is [System.Collections.IDictionary]) {
+                $resultName = [string](Get-DuoForgeObjectValue -Object $dialogResult -Name 'result')
+                $selectedPath = [string](Get-DuoForgeObjectValue -Object $dialogResult -Name 'path')
+                if ($resultName -ieq 'OK' -and -not [string]::IsNullOrWhiteSpace($selectedPath)) { return New-DuoForgeInteractionResultInternal -Action submit -Value $selectedPath -Source dialog -ReturnTarget $ReturnTarget }
+                return New-DuoForgeInteractionResultInternal -Action back -Source dialog -ReturnTarget $ReturnTarget
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$dialogResult)) { return New-DuoForgeInteractionResultInternal -Action back -Source dialog -ReturnTarget $ReturnTarget }
+            return New-DuoForgeInteractionResultInternal -Action submit -Value ([string]$dialogResult) -Source dialog -ReturnTarget $ReturnTarget
+        }
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
         if ($Type -eq 'File') {
             $dialog = [System.Windows.Forms.OpenFileDialog]::new()
@@ -76,17 +95,19 @@ function Select-DuoForgeWindowsPath {
 
         try {
             if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-                if ($Type -eq 'File') { return $dialog.FileName }
-                return $dialog.SelectedPath
+                $selectedPath = if ($Type -eq 'File') { $dialog.FileName } else { $dialog.SelectedPath }
+                return New-DuoForgeInteractionResultInternal -Action submit -Value $selectedPath -Source dialog -ReturnTarget $ReturnTarget
             }
-            return $null
+            return New-DuoForgeInteractionResultInternal -Action back -Source dialog -ReturnTarget $ReturnTarget
         }
         finally {
             $dialog.Dispose()
         }
     }
     catch {
-        return $null
+        $unavailable = New-DuoForgeInteractionResultInternal -Action unavailable -Source dialog -ReturnTarget $ReturnTarget
+        $unavailable['reason'] = 'launch-failed'
+        return $unavailable
     }
 }
 
@@ -96,32 +117,43 @@ function Read-DuoForgePathChoice {
         [Parameter(Mandatory)][string]$Prompt,
         [Parameter(Mandatory)][string]$Role,
         [ValidateSet('File', 'Directory')][string]$Type = 'File',
+        [ValidateSet('parent', 'work-menu', 'home', 'shell')][string]$CancelReturnTarget = 'home',
+        [ValidateSet('parent', 'work-menu', 'home', 'shell')][string]$InterruptReturnTarget = $CancelReturnTarget,
         [scriptblock]$InputReader,
         [scriptblock]$MenuInvoker,
-        [scriptblock]$PathPicker
+        [scriptblock]$PathPicker,
+        [scriptblock]$RecentPathWriter
     )
 
     while ($true) {
-        $choice = Invoke-DuoForgeMenuInternal -Title $Prompt -EscapeValue 'B' -InputReader $InputReader -MenuInvoker $MenuInvoker -Items @(
+        $choiceInteraction = Invoke-DuoForgeMenuInteractionInternal -Title $Prompt -ReturnTarget parent -CancelReturnTarget $CancelReturnTarget -InterruptReturnTarget $InterruptReturnTarget -InputReader $InputReader -MenuInvoker $MenuInvoker -Items @(
             [ordered]@{ value = '1'; label = 'Windows 선택창 열기'; shortcuts = @('1'); enabled = $true }
             [ordered]@{ value = '2'; label = '경로 붙여넣기 또는 파일 끌어놓기'; shortcuts = @('2'); enabled = $true }
             [ordered]@{ value = '3'; label = '최근 사용 경로'; shortcuts = @('3'); enabled = $true }
-            [ordered]@{ value = 'B'; label = '이전으로'; shortcuts = @('B'); enabled = $true }
+            [ordered]@{ value = 'back'; label = '이전으로'; shortcuts = @('B'); enabled = $true }
         )
-        if ($choice -ieq 'B') { return $null }
+        if ([string]$choiceInteraction.action -ne 'submit') { return $null }
+        $choice = [string]$choiceInteraction.value
 
         $path = $null
         if ($choice -eq '1') {
-            $path = if ($null -ne $PathPicker) { & $PathPicker $Type $Prompt } else { Select-DuoForgeWindowsPath -Type $Type -Title $Prompt }
-            if ([string]::IsNullOrWhiteSpace($path)) {
+            $pickerResult = if ($null -ne $PathPicker) { & $PathPicker $Type $Prompt } else { Select-DuoForgeWindowsPath -Type $Type -Title $Prompt }
+            if ($pickerResult -isnot [System.Collections.IDictionary]) {
+                throw (New-DuoForgeException -Code 'DF-INTERACTION-RESULT' -Message 'Windows 경로 선택기는 구조화 interaction 결과를 반환해야 합니다.')
+            }
+            if ([string]$pickerResult.action -eq 'back') { continue }
+            if ([string]$pickerResult.action -ne 'submit') {
                 $layout = Get-DuoForgeDisplayLayoutInternal
-                Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '선택창에서 경로를 받지 못했습니다.' -NextAction '직접 입력하거나 최근 경로를 선택해 주세요.' -Layout $layout) -Layout $layout
+                Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title 'Windows 선택창을 열 수 없습니다.' -Message '선택창 취소가 아니라 실행 환경에서 선택창을 사용할 수 없는 상태입니다.' -NextAction '경로를 직접 입력하거나 최근 경로를 선택해 주세요.' -Layout $layout) -Layout $layout
                 Write-DuoForgeDisplaySpacerInternal -Layout $layout
                 continue
             }
+            $path = [string]$pickerResult.value
         }
         elseif ($choice -eq '2') {
-            $path = if ($null -ne $InputReader) { [string](& $InputReader '경로') } else { [string](Read-Host '경로') }
+            $pathInteraction = Read-DuoForgeFreeTextInteractionInternal -Prompt '경로' -ReturnTarget parent -InputReader $InputReader
+            if ([string]$pathInteraction.action -ne 'submit') { return $null }
+            $path = [string]$pathInteraction.value
         }
         elseif ($choice -eq '3') {
             $recent = @(Get-DuoForgeRecentPaths -Role $Role)
@@ -133,9 +165,11 @@ function Read-DuoForgePathChoice {
             }
             $recentItems = [System.Collections.Generic.List[object]]::new()
             for ($index = 0; $index -lt $recent.Count; $index++) { $recentItems.Add([ordered]@{ value = [string]$index; label = [string]$recent[$index].path; shortcuts = @([string]($index + 1)); enabled = $true }) }
-            $recentItems.Add([ordered]@{ value = 'B'; label = '이전으로'; shortcuts = @('B'); enabled = $true })
-            $recentChoice = Invoke-DuoForgeMenuInternal -Items @($recentItems) -Title '최근 사용 경로' -EscapeValue 'B' -InputReader $InputReader -MenuInvoker $MenuInvoker
-            if ($recentChoice -ieq 'B') { continue }
+            $recentItems.Add([ordered]@{ value = 'back'; label = '이전으로'; shortcuts = @('B'); enabled = $true })
+            $recentInteraction = Invoke-DuoForgeMenuInteractionInternal -Items @($recentItems) -Title '최근 사용 경로' -ReturnTarget parent -CancelReturnTarget $CancelReturnTarget -InterruptReturnTarget $InterruptReturnTarget -InputReader $InputReader -MenuInvoker $MenuInvoker
+            if ([string]$recentInteraction.action -eq 'back') { continue }
+            if ([string]$recentInteraction.action -ne 'submit') { return $null }
+            $recentChoice = [string]$recentInteraction.value
             $path = [string]$recent[[int]$recentChoice].path
         }
         else {
@@ -147,7 +181,8 @@ function Read-DuoForgePathChoice {
 
         try {
             $resolved = Resolve-DuoForgePathInternal -Path $path -ExpectedType $Type
-            Add-DuoForgeRecentPath -Path $resolved -Role $Role
+            if ($null -ne $RecentPathWriter) { & $RecentPathWriter $resolved $Role }
+            else { Add-DuoForgeRecentPath -Path $resolved -Role $Role }
             return $resolved
         }
         catch {

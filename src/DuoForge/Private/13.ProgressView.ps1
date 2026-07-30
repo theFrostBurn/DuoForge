@@ -787,13 +787,14 @@ function New-DuoForgeProgressFrameInternal {
     }
     $pauseRequestStatus = if ($null -eq $ViewState) { '' } else { [string](Get-DuoForgeObjectValue -Object $ViewState -Name 'pauseRequestStatus' -Default '') }
     $footer = if ($null -ne $ViewState -and [bool](Get-DuoForgeObjectValue -Object $ViewState -Name 'waitForInput' -Default $false)) {
-        if ([string](Get-DuoForgeObjectValue -Object $ViewState -Name 'returnTarget' -Default 'shell') -eq 'menu') { 'Enter 키를 누르면 작업 메뉴로 돌아갑니다.' } else { 'Enter 키를 누르면 셸 프롬프트로 돌아갑니다.' }
+        if ([string](Get-DuoForgeObjectValue -Object $ViewState -Name 'returnTarget' -Default 'shell') -eq 'work-menu') { 'Enter 키 또는 Esc를 누르면 작업 메뉴로 돌아갑니다.' } else { 'Enter 키 또는 Esc를 누르면 셸 프롬프트로 돌아갑니다.' }
     }
     elseif ($pauseRequestStatus -eq 'requested') { '멈추기 요청됨 · 현재 AI 작업이 끝난 뒤 멈춥니다.' }
     elseif ($pauseRequestStatus -eq 'failed') { '일시정지 요청을 저장하지 못했습니다 · P 키로 다시 시도하세요.' }
+    elseif (-not [string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $ViewState -Name 'controlNotice' -Default ''))) { [string]$ViewState.controlNotice }
     elseif ($screenMode -eq 'detail') { 'PgUp/PgDn 스크롤 · Home/End · Esc 개요 · P 현재 작업 후 멈추기' }
-    elseif ($recentCommitted.Count -gt 0) { '↑↓ 또는 J/K 항목 이동 · D 상세 보기 · P 현재 작업 후 멈추기' }
-    else { 'P 현재 작업 후 멈추기' }
+    elseif ($recentCommitted.Count -gt 0) { 'P 현재 작업 후 멈추기 · ↑↓ 또는 J/K 이동 · D 상세 · Esc/Q 안내' }
+    else { 'P 현재 작업 후 멈추기 · Esc/Q는 AI를 중단하지 않고 안내' }
 
     $tailLines = [System.Collections.Generic.List[string]]::new()
     if ($diagnosticLines.Count -gt 0) { $tailLines.Add('── 작업 오류') }
@@ -1028,7 +1029,7 @@ function Read-DuoForgeProgressActionsInternal {
     else {
         try {
             $buffer = [System.Collections.Generic.List[object]]::new()
-            while ([Console]::KeyAvailable) { $buffer.Add([Console]::ReadKey($true)) }
+            foreach ($availableKey in @(Read-DuoForgeAvailableConsoleKeysInternal)) { $buffer.Add($availableKey) }
             $rawKeys = @($buffer)
         }
         catch { return @() }
@@ -1036,12 +1037,14 @@ function Read-DuoForgeProgressActionsInternal {
 
     $actions = [System.Collections.Generic.List[string]]::new()
     foreach ($rawKey in $rawKeys) {
-        $key = ConvertTo-DuoForgeMenuKeyInternal -Key $rawKey
+        $key = ConvertTo-DuoForgeInteractionKeyInternal -Key $rawKey
         switch ([string]$key.action) {
             'Up' { $actions.Add('Up') }
             'Down' { $actions.Add('Down') }
             'Home' { $actions.Add('Home') }
             'End' { $actions.Add('End') }
+            'Enter' { $actions.Add('Enter') }
+            'Interrupt' { $actions.Add('Interrupt') }
             'Escape' { $actions.Add('Escape') }
             'PageUp' { $actions.Add('PageUp') }
             'PageDown' { $actions.Add('PageDown') }
@@ -1051,6 +1054,7 @@ function Read-DuoForgeProgressActionsInternal {
                     { $_ -ieq 'K' } { $actions.Add('Up'); break }
                     { $_ -ieq 'D' } { $actions.Add('Detail'); break }
                     { $_ -ieq 'P' } { $actions.Add('Pause'); break }
+                    { $_ -ieq 'Q' } { $actions.Add('Cancel'); break }
                 }
             }
         }
@@ -1076,6 +1080,7 @@ function Invoke-DuoForgeProgressControlInputInternal {
     if ([string]$View.mode -eq 'log' -and [string]$View.pauseRequestStatus -eq 'requested') { return }
     $actions = @(Read-DuoForgeProgressActionsInternal -KeyReader $KeyReader)
     foreach ($action in $actions) {
+        $View.controlNotice = ''
         if ($action -eq 'Pause') {
             if ($null -eq $PauseRequester -or [string]$View.pauseRequestStatus -eq 'requested') { continue }
             try {
@@ -1097,6 +1102,17 @@ function Invoke-DuoForgeProgressControlInputInternal {
         }
         if ([string]$View.mode -eq 'log') { continue }
 
+        $returnTarget = [string](Get-DuoForgeObjectValue -Object $View -Name 'returnTarget' -Default 'shell')
+        if ($action -eq 'Interrupt') {
+            $View.lastInteraction = New-DuoForgeInteractionResultInternal -Action interrupt -Source key -ReturnTarget $returnTarget
+            $View.controlNotice = '긴급 중단 입력을 확인했습니다. 현재 체크포인트 보존 경계에서 처리합니다.'
+            continue
+        }
+        if ($action -eq 'Cancel' -or $action -eq 'Enter') {
+            $View.controlNotice = 'AI 작업은 계속됩니다. 안전하게 멈추려면 P를 누르세요.'
+            continue
+        }
+
         $recordCount = [Math]::Max(0, [int](Get-DuoForgeObjectValue -Object $View -Name 'recentCommittedCount' -Default 0))
         $screenMode = [string](Get-DuoForgeObjectValue -Object $View -Name 'screenMode' -Default 'overview')
         if ($screenMode -eq 'detail') {
@@ -1112,6 +1128,10 @@ function Invoke-DuoForgeProgressControlInputInternal {
             }
             continue
         }
+        if ($action -eq 'Escape') {
+            $View.controlNotice = 'AI 작업은 계속됩니다. 안전하게 멈추려면 P를 누르세요.'
+            continue
+        }
         if ($recordCount -le 0) { continue }
         $selected = [int](Get-DuoForgeObjectValue -Object $View -Name 'selectedCommittedIndex' -Default ($recordCount - 1))
         switch ($action) {
@@ -1120,6 +1140,27 @@ function Invoke-DuoForgeProgressControlInputInternal {
             'Home' { $View.selectedCommittedIndex = 0; $View.detailScrollOffset = 0 }
             'End' { $View.selectedCommittedIndex = $recordCount - 1; $View.detailScrollOffset = 0 }
             'Detail' { $View.screenMode = 'detail'; $View.detailScrollOffset = 0 }
+        }
+    }
+}
+
+function Read-DuoForgeProgressCompletionInteractionInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('work-menu', 'shell')][string]$ReturnTarget,
+        [scriptblock]$KeyReader
+    )
+
+    while ($true) {
+        $rawKey = Read-DuoForgeConsoleKeyInternal -KeyReader $KeyReader
+        $key = ConvertTo-DuoForgeInteractionKeyInternal -Key $rawKey
+        switch ([string]$key.action) {
+            'Enter' { return New-DuoForgeInteractionResultInternal -Action submit -Source key -ReturnTarget $ReturnTarget }
+            'Escape' { return New-DuoForgeInteractionResultInternal -Action back -Source key -ReturnTarget $ReturnTarget }
+            'Interrupt' { return New-DuoForgeInteractionResultInternal -Action interrupt -Source key -ReturnTarget $ReturnTarget }
+            'Character' {
+                if ([string]$key.character -ieq 'Q') { return New-DuoForgeInteractionResultInternal -Action cancel -Source key -ReturnTarget $ReturnTarget }
+            }
         }
     }
 }
@@ -1212,7 +1253,7 @@ function Close-DuoForgeProgressViewInternal {
     }
     if ([string]$View.mode -eq 'fullscreen') {
         if ($View.waitForInput) {
-            try { while ([Console]::KeyAvailable) { $null = [Console]::ReadKey($true) } } catch { }
+            Clear-DuoForgeConsoleInputBufferInternal
         }
         Write-DuoForgeProgressFrameInternal -View $View
         $escape = [char]27
@@ -1220,14 +1261,7 @@ function Close-DuoForgeProgressViewInternal {
             if ([string]$View.mode -eq 'fullscreen' -and [bool]$View.enteredAlternateScreen) {
                 [Console]::Write("$escape[?25h")
                 if ($View.waitForInput) {
-                    while ($true) {
-                        $rawKey = if ($null -ne $View.keyReader) { & $View.keyReader } else { [Console]::ReadKey($true) }
-                        $key = ConvertTo-DuoForgeMenuKeyInternal -Key $rawKey
-                        if ([string]$key.action -eq 'Enter') { break }
-                        $singleKeyReader = { $rawKey }.GetNewClosure()
-                        Invoke-DuoForgeProgressControlInputInternal -View $View -KeyReader $singleKeyReader -PauseRequester $View.pauseRequester
-                        Write-DuoForgeProgressFrameInternal -View $View
-                    }
+                    $View.completionInteraction = Read-DuoForgeProgressCompletionInteractionInternal -ReturnTarget ([string](Get-DuoForgeObjectValue -Object $View -Name 'returnTarget' -Default 'shell')) -KeyReader $View.keyReader
                 }
             }
             elseif ($null -ne $Result) {
@@ -1244,7 +1278,7 @@ function Close-DuoForgeProgressViewInternal {
     }
     elseif ($null -ne $Result) {
         $layout = Get-DuoForgeDisplayLayoutInternal
-        Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title ('작업 종료 · {0}' -f (Get-DuoForgeProgressStateLabelInternal -Status ([string]$Result.status))) -Message ('이번에 진행한 단계 {0}개' -f $Result.invoked) -Layout $layout) -Layout $layout
+        Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title ('작업 종료 · {0}' -f (Get-DuoForgeProgressStateLabelInternal -Status ([string]$Result.status))) -Message ('이번에 진행한 단계 {0}개 · 누적 로그 모드는 입력을 기다리지 않고 {1}(으)로 돌아갑니다.' -f $Result.invoked, $(if ([string]$View.returnTarget -eq 'work-menu') { '작업 메뉴' } else { '셸 프롬프트' })) -Layout $layout) -Layout $layout
         if (-not [string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $Result -Name 'diagnosticId'))) { Write-DuoForgeDiagnosticReferenceInternal -Source $Result -RunDirectory ([string]$View.runDirectory) }
     }
 }
@@ -1255,7 +1289,7 @@ function Invoke-DuoForgeResumeWithProgressInternal {
         [Parameter(Mandatory)][string]$RunId,
         [string]$ResultsRoot,
         [switch]$WaitForAcknowledgement,
-        [ValidateSet('menu', 'shell')][string]$ReturnTarget = 'shell'
+        [ValidateSet('work-menu', 'shell')][string]$ReturnTarget = 'shell'
     )
 
     $run = Get-DuoForgeRunInternal -RunId $RunId -ResultsRoot $ResultsRoot
@@ -1270,6 +1304,9 @@ function Invoke-DuoForgeResumeWithProgressInternal {
     try {
         $result = Invoke-DuoForgeResumeLiveInternal -RunId $RunId -ResultsRoot $ResultsRoot -LiveConsent $true -ProgressObserver $view.observer
         return $result
+    }
+    catch [System.Management.Automation.PipelineStoppedException] {
+        throw
     }
     catch {
         if (-not $_.Exception.Data.Contains('DuoForgeDiagnosticId')) {

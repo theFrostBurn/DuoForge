@@ -440,7 +440,7 @@ try {
                 $frames = [System.Collections.Generic.List[string]]::new()
                 $reader = { $queue.Dequeue() }.GetNewClosure()
                 $writer = { param($lines) $frames.Add((@($lines) -join "`n")) }.GetNewClosure()
-                $result = Invoke-DuoForgeMenuSelectionInternal -Items $Items -Title '합성 메뉴' -EscapeValue 'back' -InitialSelectedIndex $Initial -KeyReader $reader -FrameWriter $writer -CapabilityProbe { $true }
+                $result = Read-DuoForgeMenuInteractionInternal -Items $Items -Title '합성 메뉴' -ReturnTarget parent -CancelReturnTarget home -InterruptReturnTarget shell -InitialSelectedIndex $Initial -KeyReader $reader -FrameWriter $writer -CapabilityProbe { $true }
                 [ordered]@{ result = $result; frames = @($frames) }
             }
             $items = @(
@@ -454,9 +454,10 @@ try {
             )
             $fallback = [ordered]@{ inputCalls = 0 }
             $fallbackReader = { param($prompt) $fallback.inputCalls++; '2' }.GetNewClosure()
-            $fallbackResult = Invoke-DuoForgeMenuSelectionInternal -Items $items -Title '폴백' -EscapeValue 'back' -KeyReader { 'Enter' } -FrameWriter { throw 'synthetic-render-failure' } -CapabilityProbe { $true } -InputReader $fallbackReader
+            $fallbackResult = Read-DuoForgeMenuInteractionInternal -Items $items -Title '폴백' -ReturnTarget parent -CancelReturnTarget home -InterruptReturnTarget shell -KeyReader { 'Enter' } -FrameWriter { throw 'synthetic-render-failure' } -CapabilityProbe { $true } -InputReader $fallbackReader
+            $fallbackDefaultResult = Read-DuoForgeMenuInteractionInternal -Items $items -Title '폴백 기본값' -ReturnTarget parent -CancelReturnTarget home -InterruptReturnTarget shell -InitialSelectedIndex 2 -CapabilityProbe { $false } -InputReader { '' }
             $unattended = [ordered]@{ inputCalls = 0 }
-            $unattendedResult = Invoke-DuoForgeMenuSelectionInternal -Items $items -EscapeValue 'back' -CapabilityProbe { [ordered]@{ cursor = $false; reason = 'non-interactive' } } -InputReader $null
+            $unattendedResult = Read-DuoForgeMenuInteractionInternal -Items $items -ReturnTarget parent -CancelReturnTarget home -InterruptReturnTarget shell -CapabilityProbe { [ordered]@{ cursor = $false; reason = 'non-interactive' } } -InputReader $null
             [ordered]@{
                 down = Invoke-WithKeys -Keys @('Down', 'Down', 'Enter') -Items $items
                 upWrap = Invoke-WithKeys -Keys @('Up', 'Enter') -Items $items
@@ -465,9 +466,10 @@ try {
                 escape = Invoke-WithKeys -Keys @('Escape') -Items $items
                 shortcut = Invoke-WithKeys -Keys @('a') -Items $items
                 one = Invoke-WithKeys -Keys @('Enter') -Items @($items[0])
-                zero = Invoke-DuoForgeMenuSelectionInternal -Items @() -EscapeValue 'back' -KeyReader { throw '입력기를 호출하면 안 됩니다.' } -FrameWriter { throw '렌더러를 호출하면 안 됩니다.' } -CapabilityProbe { $true }
+                zero = Read-DuoForgeMenuInteractionInternal -Items @() -ReturnTarget parent -CancelReturnTarget home -InterruptReturnTarget shell -KeyReader { throw '입력기를 호출하면 안 됩니다.' } -FrameWriter { throw '렌더러를 호출하면 안 됩니다.' } -CapabilityProbe { $true }
                 disabled = Invoke-WithKeys -Keys @('Down', 'Enter', 'Down', 'Enter') -Items $disabled
                 fallbackResult = $fallbackResult
+                fallbackDefaultResult = $fallbackDefaultResult
                 fallbackCalls = $fallback.inputCalls
                 unattendedResult = $unattendedResult
                 unattendedCalls = $unattended.inputCalls
@@ -479,19 +481,24 @@ try {
                 cursorRendererLineAttributes = @((Get-Command Write-DuoForgeCursorMenuFrameInternal).Parameters['Lines'].Attributes | ForEach-Object { $_.GetType().Name })
             }
         }
-        Assert-Equal $surface.down.result 'c'
-        Assert-Equal $surface.upWrap.result 'c'
-        Assert-Equal $surface.end.result 'c'
-        Assert-Equal $surface.home.result 'a'
-        Assert-Equal $surface.escape.result 'back'
-        Assert-Equal $surface.shortcut.result 'a'
-        Assert-Equal $surface.one.result 'a'
-        Assert-Equal $surface.zero 'back'
-        Assert-Equal $surface.disabled.result 'a'
+        Assert-Equal $surface.down.result.action 'submit'
+        Assert-Equal $surface.down.result.value 'c'
+        Assert-Equal $surface.upWrap.result.value 'c'
+        Assert-Equal $surface.end.result.value 'c'
+        Assert-Equal $surface.home.result.value 'a'
+        Assert-Equal $surface.escape.result.action 'back'
+        Assert-Equal $surface.escape.result.returnTarget 'parent'
+        Assert-Equal $surface.shortcut.result.value 'a'
+        Assert-Equal $surface.one.result.value 'a'
+        Assert-Equal $surface.zero.action 'unavailable'
+        Assert-Equal $surface.zero.returnTarget 'home'
+        Assert-Equal $surface.disabled.result.value 'a'
         Assert-ContainsText ($surface.disabled.frames -join "`n") '안전 조건이 아직 충족되지 않았습니다.'
-        Assert-Equal $surface.fallbackResult 'b'
+        Assert-Equal $surface.fallbackResult.value 'b'
+        Assert-Equal $surface.fallbackDefaultResult.value 'c' '줄 입력 폴백의 빈 Enter가 커서 모드와 같은 초기 권장 항목을 선택하지 않았습니다.'
         Assert-Equal $surface.fallbackCalls 1
-        Assert-Equal $surface.unattendedResult 'back'
+        Assert-Equal $surface.unattendedResult.action 'unavailable'
+        Assert-Equal $surface.unattendedResult.returnTarget 'home'
         Assert-Equal $surface.unattendedCalls 0
         Assert-Equal $surface.renderModes.virtualTerminal 'ansi'
         Assert-Equal $surface.renderModes.nativeConsole 'console'
@@ -574,15 +581,42 @@ try {
         Assert-True ($surface.transitionMenu.Count -le $surface.regularMenu.Count) '작은 화면의 전환 메뉴가 기존 메뉴보다 커졌습니다.'
     }
 
-    Test-Case '안전 확인 토큰은 공통 메뉴와 분리된 대소문자 구분 텍스트 계약으로 남는다' {
-        $interactiveSource = Get-Content -LiteralPath (Join-Path $projectRoot 'src\DuoForge\Private\14.Interactive.ps1') -Raw
-        foreach ($token in @('LIVE', 'PARTIAL', 'ROUND', 'APPLY')) {
-            Assert-True ($interactiveSource -match ("-cne\s+'{0}'" -f $token)) "$token 정확 입력 계약이 없습니다."
+    Test-Case '공통 interaction 결과는 정확 확인과 자유 입력의 B/Q를 분리한다' {
+        $surface = & $module {
+            $freeB = Read-DuoForgeLineInteractionInternal -Prompt '자유 입력' -InputReader { 'B' }
+            $freeQ = Read-DuoForgeLineInteractionInternal -Prompt '자유 입력' -InputReader { 'Q' }
+            $exact = Resolve-DuoForgeExactTokenInputInternal -Value 'LIVE' -Token 'LIVE' -ReturnTarget work-menu
+            $spaced = Resolve-DuoForgeExactTokenInputInternal -Value ' LIVE ' -Token 'LIVE' -ReturnTarget work-menu
+            $lower = Resolve-DuoForgeExactTokenInputInternal -Value 'live' -Token 'LIVE' -ReturnTarget work-menu
+            $back = Resolve-DuoForgeExactTokenInputInternal -Value 'B' -Token 'LIVE' -ReturnTarget parent -CancelReturnTarget work-menu
+            $cancel = Resolve-DuoForgeExactTokenInputInternal -Value 'Q' -Token 'LIVE' -ReturnTarget parent -CancelReturnTarget work-menu
+            $unavailable = Read-DuoForgeExactConfirmationInternal -Token 'LIVE' -Prompt '확인' -ReturnTarget shell -CapabilityProbe { [ordered]@{ cursor = $false; reason = 'redirected' } } -InputReader $null
+            [ordered]@{
+                freeB = $freeB
+                freeQ = $freeQ
+                exact = $exact
+                spaced = $spaced
+                lower = $lower
+                back = $back
+                cancel = $cancel
+                unavailable = $unavailable
+                interrupt = ConvertTo-DuoForgeInteractionKeyInternal -Key ([ConsoleKeyInfo]::new([char]3, [ConsoleKey]::C, $false, $false, $true))
+            }
         }
-        $menuSource = Get-Content -LiteralPath (Join-Path $projectRoot 'src\DuoForge\Private\13.MenuView.ps1') -Raw
-        foreach ($token in @('LIVE', 'PARTIAL', 'ROUND', 'APPLY')) {
-            Assert-False ($menuSource -match ("-cne\s+'{0}'" -f $token)) "공통 메뉴가 $token 확인 계약을 소유하면 안 됩니다."
-        }
+        Assert-Equal $surface.freeB.action 'submit'
+        Assert-Equal $surface.freeB.value 'B'
+        Assert-Equal $surface.freeQ.action 'submit'
+        Assert-Equal $surface.freeQ.value 'Q'
+        Assert-Equal $surface.exact.action 'submit'
+        Assert-Equal $surface.spaced.action 'invalid'
+        Assert-Equal $surface.lower.action 'invalid'
+        Assert-Equal $surface.back.action 'back'
+        Assert-Equal $surface.back.returnTarget 'parent'
+        Assert-Equal $surface.cancel.action 'cancel'
+        Assert-Equal $surface.cancel.returnTarget 'work-menu'
+        Assert-Equal $surface.unavailable.action 'unavailable'
+        Assert-Equal $surface.unavailable.returnTarget 'shell'
+        Assert-Equal $surface.interrupt.action 'Interrupt'
     }
 
     Test-Case '모드 2와 3의 공개 요청은 정규 A/B 필드만 기록한다' {
@@ -2187,7 +2221,7 @@ try {
         Assert-ContainsText ($rendered.narrow -join "`n") '지금 상태  완료'
         Assert-ContainsText ($rendered.narrow -join "`n") '작업 종료 · 완료'
         Assert-ContainsText ($rendered.narrow -join "`n") '확인할 내용'
-        Assert-ContainsText ($rendered.narrow -join "`n") 'Enter 키를 누르면'
+        Assert-ContainsText ($rendered.narrow -join "`n") 'Enter 키 또는 Esc를 누르면'
         Assert-ContainsText ($rendered.active -join "`n") '답변 도착 · 형식 확인 중'
         Assert-ContainsText ($rendered.active -join "`n") 'P 현재 작업 후 멈추기'
         Assert-ContainsText ($rendered.pauseRequested -join "`n") '멈추기 요청됨 · 현재 AI 작업이 끝난 뒤 멈춥니다.'
@@ -4274,7 +4308,7 @@ try {
         Assert-Equal $cardResult.alternativeItems[1].value 'round'
         Assert-ContainsText $cardResult.alternativeItems[2].label '보충 조건'
         Assert-ContainsText $cardResult.alternativeItems[2].detail '현재 질문의 답을 대신하지 않고'
-        Assert-Equal $cardResult.alternativeItems[-1].value 'back-to-question'
+        Assert-Equal $cardResult.alternativeItems[-1].value 'back'
         foreach ($frame in @($cardResult.frames)) {
             Assert-True ($frame.lines.Count -le [int]$frame.height) "$($frame.width)x$($frame.height) 질문 카드가 화면 높이를 넘었습니다."
             Assert-True ([int]$frame.maximumWidth -lt [int]$frame.width) "$($frame.width)x$($frame.height) 질문 카드가 화면 폭을 넘었습니다."
@@ -4400,9 +4434,9 @@ try {
             }
             $capture = [ordered]@{ items = @() }
             $menuInvoker = {
-                param($items, $title, $escapeValue, $initialSelectedIndex)
+                param($items, $title, $initialSelectedIndex, $returnTarget)
                 $capture.items = @($items)
-                return 'B'
+                return [ordered]@{ action = 'back'; value = $null; source = 'line'; returnTarget = $returnTarget }
             }.GetNewClosure()
             Invoke-DuoForgeInteractiveEvidence -Run ([ordered]@{ issues = [ordered]@{ issues = @($issue) } }) -MenuInvoker $menuInvoker
             $frames = foreach ($width in @(72, 80, 100, 120, 160)) {
@@ -4466,18 +4500,19 @@ try {
             $currentRun = ConvertTo-DuoForgeHashtable -InputObject (Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $resultsRoot)
             $capture = [ordered]@{ questionMenus = 0; titles = [System.Collections.Generic.List[string]]::new() }
             $menuInvoker = {
-                param($items, $title, $escapeValue, $initialSelectedIndex)
+                param($items, $title, $initialSelectedIndex, $returnTarget)
                 $capture.titles.Add([string]$title)
-                if ([string]$title -eq '먼저 확인할 요청을 선택해 주세요.') { return '0' }
+                $value = if ([string]$title -eq '먼저 확인할 요청을 선택해 주세요.') { '0' }
                 if ([string]$title -like '*번호로 선택하거나 O로 내 의견을 입력해 주세요.*') {
                     $capture.questionMenus = [int]$capture.questionMenus + 1
-                    if ([int]$capture.questionMenus -eq 1) { return 'other' }
-                    if ([int]$capture.questionMenus -eq 2) { return 'answer:A' }
-                    return 'back'
+                    if ([int]$capture.questionMenus -eq 1) { $value = 'other' }
+                    elseif ([int]$capture.questionMenus -eq 2) { $value = 'answer:A' }
+                    else { return [ordered]@{ action = 'back'; value = $null; source = 'line'; returnTarget = $returnTarget } }
                 }
-                if ([string]$title -eq '다른 방법을 선택해 주세요.') { return 'detail' }
-                if ([string]$title -eq '질문 내용을 모두 확인했습니다.') { return 'back' }
-                return $escapeValue
+                elseif ([string]$title -eq '다른 방법을 선택해 주세요.') { $value = 'detail' }
+                elseif ([string]$title -eq '질문 내용을 모두 확인했습니다.') { return [ordered]@{ action = 'back'; value = $null; source = 'line'; returnTarget = $returnTarget } }
+                if ([string]::IsNullOrWhiteSpace([string]$value)) { return [ordered]@{ action = 'back'; value = $null; source = 'line'; returnTarget = $returnTarget } }
+                return [ordered]@{ action = 'submit'; value = $value; source = 'line'; returnTarget = $returnTarget }
             }.GetNewClosure()
             Invoke-DuoForgeInteractiveQuestion -Run $currentRun -MenuInvoker $menuInvoker
             $pendingQuestions = @(Get-DuoForgeInteractivePendingQuestionsInternal -RunDirectory ([string]$currentRun.runDirectory))
@@ -4494,9 +4529,9 @@ try {
             param($runId, $runDirectory, $resultsRoot)
             $capture = [ordered]@{ items = @() }
             $menuInvoker = {
-                param($items, $title, $escapeValue, $initialSelectedIndex)
+                param($items, $title, $initialSelectedIndex, $returnTarget)
                 $capture.items = @($items)
-                return 'B'
+                return [ordered]@{ action = 'back'; value = $null; source = 'line'; returnTarget = $returnTarget }
             }.GetNewClosure()
             Invoke-DuoForgeInteractiveRun -RunRecord ([ordered]@{ runId = $runId; runDirectory = $runDirectory }) -MenuInvoker $menuInvoker
             return @($capture.items)
@@ -4548,7 +4583,7 @@ try {
             $answerInputs.Enqueue('  항상   별도의 로컬 오프라인 엔진으로 처리한다.  ')
             $answerInputs.Enqueue('APPLY')
             $answerReader = { param($prompt) return $answerInputs.Dequeue() }.GetNewClosure()
-            $answerMenu = { param($items, $title, $escapeValue, $initialSelectedIndex) return 'answer' }
+            $answerMenu = { param($items, $title, $initialSelectedIndex, $returnTarget) return [ordered]@{ action = 'submit'; value = 'answer'; source = 'line'; returnTarget = $returnTarget } }
             $answer = Invoke-DuoForgeInteractiveCustomDecisionInternal -Run $currentRun -IssueId $firstIssueId -InputReader $answerReader -MenuInvoker $answerMenu
             $pendingAfterAnswer = @(Get-DuoForgeInteractivePendingQuestionsInternal -RunDirectory ([string]$currentRun.runDirectory))
 
@@ -4556,7 +4591,7 @@ try {
             $constraintInputs.Enqueue('기기 기본 기능 대신 별도 로컬 엔진을 모든 음성 질문의 공통 전제로 사용한다.')
             $constraintInputs.Enqueue('APPLY')
             $constraintReader = { param($prompt) return $constraintInputs.Dequeue() }.GetNewClosure()
-            $constraintMenu = { param($items, $title, $escapeValue, $initialSelectedIndex) return 'common' }
+            $constraintMenu = { param($items, $title, $initialSelectedIndex, $returnTarget) return [ordered]@{ action = 'submit'; value = 'common'; source = 'line'; returnTarget = $returnTarget } }
             $constraint = Invoke-DuoForgeInteractiveCustomDecisionInternal -Run $currentRun -IssueId $secondIssueId -InputReader $constraintReader -MenuInvoker $constraintMenu
             $pendingAfterConstraint = @(Get-DuoForgeInteractivePendingQuestionsInternal -RunDirectory ([string]$currentRun.runDirectory))
 
@@ -4703,9 +4738,9 @@ try {
             param($runId, $runDirectory)
             $capture = [ordered]@{ items = @() }
             $menuInvoker = {
-                param($items, $title, $escapeValue, $initialSelectedIndex)
+                param($items, $title, $initialSelectedIndex, $returnTarget)
                 $capture.items = @($items)
-                return 'B'
+                return [ordered]@{ action = 'back'; value = $null; source = 'line'; returnTarget = $returnTarget }
             }.GetNewClosure()
             Invoke-DuoForgeInteractiveRun -RunRecord ([ordered]@{ runId = $runId; runDirectory = $runDirectory }) -MenuInvoker $menuInvoker
             [ordered]@{
@@ -4714,7 +4749,7 @@ try {
             }
         } $run.runId $run.runDirectory
         Assert-Equal $limitedMenu.stateLabel '사용자 확인을 3번 거친 뒤 멈춤'
-        Assert-Equal (@($limitedMenu.items | ForEach-Object { [string]$_.value }) -join ',') 'I,O,B'
+        Assert-Equal (@($limitedMenu.items | ForEach-Object { [string]$_.value }) -join ',') 'I,O,back'
 
         $earlyWorkspace = Join-Path $tempRoot 'decision-review-early-results'
         $earlyRequest = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $earlyWorkspace -DocumentType prd
@@ -4809,16 +4844,18 @@ try {
             $currentRun = ConvertTo-DuoForgeHashtable -InputObject (Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $resultsRoot)
             $capture = [ordered]@{ calls = 0; listItems = @(); optionItems = @(); optionTitle = ''; initialIndex = -1 }
             $menuInvoker = {
-                param($items, $title, $escapeValue, $initialSelectedIndex)
+                param($items, $title, $initialSelectedIndex, $returnTarget)
                 $capture.calls++
                 if ($capture.calls -eq 1) {
                     $capture.listItems = @($items)
-                    return '0'
+                    return [ordered]@{ action = 'submit'; value = '0'; source = 'line'; returnTarget = $returnTarget }
                 }
-                $capture.optionItems = @($items)
-                $capture.optionTitle = [string]$title
-                $capture.initialIndex = [int]$initialSelectedIndex
-                return ''
+                if ($capture.calls -eq 2) {
+                    $capture.optionItems = @($items)
+                    $capture.optionTitle = [string]$title
+                    $capture.initialIndex = [int]$initialSelectedIndex
+                }
+                return [ordered]@{ action = 'back'; value = $null; source = 'line'; returnTarget = $returnTarget }
             }.GetNewClosure()
             Invoke-DuoForgeInteractiveDecisionChangeInternal -Run $currentRun -MenuInvoker $menuInvoker
 
@@ -5583,6 +5620,7 @@ Setext 결론
         Assert-Equal @($events | Where-Object { $_.type -eq 'COMPLETED_OUTPUT_CORRUPTION_DETECTED' }).Count 2
     }
 
+    . (Join-Path $PSScriptRoot 'Test-Interaction.ps1')
     . (Join-Path $PSScriptRoot 'Test-Diagnostics.ps1')
 }
 finally {

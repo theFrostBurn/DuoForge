@@ -4,14 +4,19 @@ function Invoke-DuoForgeCliCoreInternal {
         [string[]]$Arguments = @(),
         [scriptblock]$InputReader,
         [scriptblock]$ResumeInvoker,
+        [scriptblock]$ProviderInvoker,
+        [scriptblock]$ValidationInvoker,
+        [scriptblock]$RunInvoker,
+        [scriptblock]$DecisionInvoker,
         [scriptblock]$InteractiveHostProbe,
-        [scriptblock]$InteractiveHomeInvoker
+        [scriptblock]$InteractiveHomeInvoker,
+        [scriptblock]$ConfirmationKeyReader,
+        [scriptblock]$ConfirmationFrameWriter,
+        [scriptblock]$ConfirmationCapabilityProbe
     )
 
     if ($null -eq $Arguments) { $Arguments = @() }
     $isInteractive = { if ($null -ne $InteractiveHostProbe) { return [bool](& $InteractiveHostProbe) }; return [bool](Test-DuoForgeInteractiveHost) }
-    $readInput = { param([string]$Prompt) if ($null -ne $InputReader) { return [string](& $InputReader $Prompt) }; return [string](Read-Host $Prompt) }
-
     if ($Arguments.Count -eq 0) {
         if (& $isInteractive) {
             if ($null -ne $InteractiveHomeInvoker) { & $InteractiveHomeInvoker }
@@ -126,9 +131,9 @@ function Invoke-DuoForgeCliCoreInternal {
             foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '이번 요청' -Value ('{0}회' -f $requiredCalls) -Layout $layout -KeyWidth 12 -Role 'warning')) { $confirmationRows.Add($row) }
             foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '요청 가능' -Value ('{0}회' -f $existing.budget.remaining) -Layout $layout -KeyWidth 12 -Role 'warning')) { $confirmationRows.Add($row) }
             Write-DuoForgeDisplayRowsInternal -Rows @($confirmationRows) -Layout $layout
-            $confirmation = ([string](& $readInput 'AI에 설명을 요청하려면 LIVE를 입력하세요')).Trim()
-            if ($confirmation -cne 'LIVE') { Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '설명 요청을 취소했습니다.' -Layout $layout) -Layout $layout; return }
-            $result = Invoke-DuoForgeIssueExplanationInternal -RunId $runId -IssueId $issueId -Provider $provider -Level $level -Focus $focus -ResultsRoot $workspace -LiveConsent $true
+            $confirmation = Read-DuoForgeExactConfirmationInternal -Token 'LIVE' -Prompt 'AI에 설명을 요청하려면 LIVE를 입력하세요' -ReturnTarget shell -InputReader $InputReader -KeyReader $ConfirmationKeyReader -FrameWriter $ConfirmationFrameWriter -CapabilityProbe $ConfirmationCapabilityProbe
+            if ([string]$confirmation.action -ne 'submit') { Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '설명을 요청하지 않았습니다.' -Message '공급자 호출 또는 설명 기록 변경이 발생하지 않았습니다.' -Layout $layout) -Layout $layout; return }
+            $result = Invoke-DuoForgeIssueExplanationInternal -RunId $runId -IssueId $issueId -Provider $provider -Level $level -Focus $focus -ResultsRoot $workspace -LiveConsent $true -ProviderInvoker $ProviderInvoker
             Write-DuoForgeExplanationRecords -Records @($result.explanations)
             Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '새 설명을 받았습니다.' -Message ('사용 {0}/{1}회 · 추가 요청 가능 {2}회' -f $result.budget.used, $result.budget.maximum, $result.budget.remaining) -Layout $layout) -Layout $layout
             return
@@ -192,12 +197,17 @@ function Invoke-DuoForgeCliCoreInternal {
             $confirmed = [bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'confirm-partial' -Default $false)
             if (-not $confirmed) {
                 if (-not (& $isInteractive)) { throw (New-DuoForgeException -Code 'DF-DEFER-CONFIRM' -Message '비대화형 보류에는 --confirm-partial이 필요합니다.') }
-                $confirmation = ([string](& $readInput '반드시 확인할 내용을 보류하면 일부 범위만 완료됩니다. DEFER를 입력하세요')).Trim()
-                $confirmed = $confirmation -ceq 'DEFER'
+                $confirmation = Read-DuoForgeExactConfirmationInternal -Token 'DEFER' -Prompt '반드시 확인할 내용을 보류하면 일부 범위만 완료됩니다. DEFER를 입력하세요' -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -InputReader $InputReader -KeyReader $ConfirmationKeyReader -FrameWriter $ConfirmationFrameWriter -CapabilityProbe $ConfirmationCapabilityProbe
+                $confirmed = [string]$confirmation.action -eq 'submit'
             }
-            if (-not $confirmed) { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '보류를 취소했습니다.' -Layout $layout) -Layout $layout; return }
+            if (-not $confirmed) { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '보류를 적용하지 않았습니다.' -Message '답변·파일·단계 상태를 변경하지 않았습니다.' -Layout $layout) -Layout $layout; return $confirmation }
             $workspace = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')
-            $result = Set-DuoForgeUserDecisionInternal -RunId $runId -IssueId $issueId -Action defer -ResultsRoot $workspace -ConfirmPartial
+            $result = if ($null -ne $DecisionInvoker) {
+                & $DecisionInvoker $runId $issueId 'defer' $workspace $true
+            }
+            else {
+                Set-DuoForgeUserDecisionInternal -RunId $runId -IssueId $issueId -Action defer -ResultsRoot $workspace -ConfirmPartial
+            }
             $result | ConvertTo-Json -Depth 30
             return
         }
@@ -254,8 +264,8 @@ function Invoke-DuoForgeCliCoreInternal {
             foreach ($row in @(New-DuoForgeFieldRowsInternal -Label 'Codex' -Value (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Codex' -ProviderBudget $budget.providers.codex) -Layout $layout -KeyWidth 8 -Role 'warning' -PreserveParagraphs)) { $confirmationRows.Add($row) }
             foreach ($row in @(New-DuoForgeFieldRowsInternal -Label 'Claude' -Value (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Claude' -ProviderBudget $budget.providers.claude) -Layout $layout -KeyWidth 8 -Role 'warning' -PreserveParagraphs)) { $confirmationRows.Add($row) }
             Write-DuoForgeDisplayRowsInternal -Rows @($confirmationRows) -Layout $layout
-            $confirmation = ([string](& $readInput '문서 전송과 AI 작업 시작에 동의하면 LIVE를 입력하세요')).Trim()
-            if ($confirmation -cne 'LIVE') { Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title 'AI 작업 시작을 취소했습니다.' -Layout $layout) -Layout $layout; return }
+            $confirmation = Read-DuoForgeExactConfirmationInternal -Token 'LIVE' -Prompt '문서 전송과 AI 작업 시작에 동의하면 LIVE를 입력하세요' -ReturnTarget shell -InputReader $InputReader -KeyReader $ConfirmationKeyReader -FrameWriter $ConfirmationFrameWriter -CapabilityProbe $ConfirmationCapabilityProbe
+            if ([string]$confirmation.action -ne 'submit') { Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title 'AI 작업을 시작하지 않았습니다.' -Message '재개, 공급자 호출 또는 실행 기록 변경이 발생하지 않았습니다.' -Layout $layout) -Layout $layout; return }
             $result = if ($null -ne $ResumeInvoker) { & $ResumeInvoker $runId $workspace $true } else { Invoke-DuoForgeResumeWithProgressInternal -RunId $runId -ResultsRoot $workspace -WaitForAcknowledgement -ReturnTarget shell }
             $result | ConvertTo-Json -Depth 30
             return
@@ -311,16 +321,22 @@ function Invoke-DuoForgeCliCoreInternal {
                 -AllowPartial ([bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'allow-partial' -Default $false)) `
                 -Name ([string](Get-DuoForgeCliOption -Parsed $parsed -Name 'name' -Default ''))
             $validation = Test-DuoForgeStartRequestInternal -Request $request
-            $validation = Confirm-DuoForgeInteractivePartialAnalysisInternal -Validation $validation
+            $partialConfirmation = Confirm-DuoForgeInteractivePartialAnalysisInternal -Validation $validation -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -InputReader $InputReader -ValidationInvoker $ValidationInvoker -ConfirmationKeyReader $ConfirmationKeyReader -ConfirmationFrameWriter $ConfirmationFrameWriter -ConfirmationCapabilityProbe $ConfirmationCapabilityProbe
+            $validation = $partialConfirmation.validation
+            if ($null -ne $partialConfirmation.interaction -and [string]$partialConfirmation.interaction.action -ne 'submit') {
+                $layout = Get-DuoForgeDisplayLayoutInternal
+                Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '부분 분석 동의를 적용하지 않았습니다.' -Message '새 작업, 문서 사본 또는 실행 기록을 만들지 않았습니다.' -Layout $layout) -Layout $layout
+                return $partialConfirmation.interaction
+            }
             if (-not $validation.valid) { Write-DuoForgeValidationErrors -Validation $validation; throw (New-DuoForgeException -Code 'DF-START-BLOCKED' -Message '실행 전 검증에 실패했습니다.') }
             Write-DuoForgeExecutionPlan -Validation $validation
             if ([bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'plan-only' -Default $false)) { return }
             if (-not (& $isInteractive)) {
                 throw (New-DuoForgeException -Code 'DF-CONFIRM-NONINTERACTIVE' -Message '새 작업을 만들기 전에 대화형 사용자 확인이 필요합니다. 비대화형 환경에서는 --plan-only를 사용해 주세요.')
             }
-            $confirmation = ([string](& $readInput '선택한 문서를 작업 폴더에 복사하고 새 작업을 만들까요? [Y/N]')).Trim()
-            if ($confirmation -notin @('Y', 'y')) { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '작업 생성을 취소했습니다.' -Message '문서 사본과 작업 기록을 만들지 않았습니다.' -Layout $layout) -Layout $layout; return }
-            $run = New-DuoForgeRunInternal -ValidationResult $validation
+            $creation = Invoke-DuoForgeRunCreationBoundaryInternal -Validation $validation -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -InputReader $InputReader -RunInvoker $RunInvoker -ConfirmationKeyReader $ConfirmationKeyReader -ConfirmationFrameWriter $ConfirmationFrameWriter -ConfirmationCapabilityProbe $ConfirmationCapabilityProbe
+            if ([string]$creation.interaction.action -ne 'submit') { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '작업 생성을 취소했습니다.' -Message '문서 사본과 작업 기록을 만들지 않았습니다.' -Layout $layout) -Layout $layout; return $creation.interaction }
+            $run = $creation.run
             $run | ConvertTo-Json -Depth 20
             return
         }
@@ -335,6 +351,9 @@ function Invoke-DuoForgeCli {
     if ($null -eq $Arguments) { $Arguments = @() }
     try {
         return Invoke-DuoForgeCliCoreInternal -Arguments $Arguments
+    }
+    catch [System.Management.Automation.PipelineStoppedException] {
+        throw
     }
     catch {
         $originalError = $_
