@@ -190,6 +190,8 @@ function Set-DuoForgeUserDecisionInternal {
             choiceCode = $null
             selectedOption = $null
             questionOptions = @()
+            questionTitle = $null
+            questionText = $null
             recommendedOption = $null
             revision = if ($null -eq $previousDecision) { 1 } else { [int](Get-DuoForgeObjectValue -Object $previousDecision -Name 'revision' -Default 1) + 1 }
             supersedesDecisionId = if ($null -eq $previousDecision) { $null } else { [string]$previousDecision.decisionId }
@@ -214,6 +216,8 @@ function Set-DuoForgeUserDecisionInternal {
             $decisionRecord.choiceCode = [string]$resolvedChoice.code
             $decisionRecord.selectedOption = [string]$resolvedChoice.option
             $decisionRecord.questionOptions = $options
+            $decisionRecord.questionTitle = if ($question.Count -eq 1) { [string](Get-DuoForgeObjectValue -Object $question[0] -Name 'title' -Default '') } else { [string](Get-DuoForgeObjectValue -Object $previousDecision -Name 'questionTitle' -Default '') }
+            $decisionRecord.questionText = if ($question.Count -eq 1) { [string](Get-DuoForgeObjectValue -Object $question[0] -Name 'question' -Default '') } else { [string](Get-DuoForgeObjectValue -Object $previousDecision -Name 'questionText' -Default '') }
             $decisionRecord.recommendedOption = if ($question.Count -eq 1) { [string]$question[0].recommendedOption } else { [string]$previousDecision.recommendedOption }
             Add-DuoForgeJsonLine -Path (Join-Path $directory 'decisions\user-answers.jsonl') -Value $decisionRecord
 

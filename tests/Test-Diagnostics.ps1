@@ -225,11 +225,12 @@ Test-Case '단계 실패는 diagnostics steps events observer result와 화면�
     Assert-ContainsText ($rendered.wide -join "`n") $result.code
     Assert-ContainsText ($rendered.wide -join "`n") $result.diagnosticId
     Assert-ContainsText ($rendered.wide -join "`n") $result.diagnosticsPath
-    Assert-ContainsText (($rendered.narrow -join '') -replace '\s+$','') $result.diagnosticsPath
+    Assert-ContainsText ((($rendered.narrow -join '') -replace '\s+', '')) (($result.diagnosticsPath) -replace '\s+', '')
     foreach ($surface in @([string]$rendered.log, [string]$rendered.return)) {
         Assert-ContainsText $surface $result.code
         Assert-ContainsText $surface $result.diagnosticId
-        Assert-ContainsText $surface $result.diagnosticsPath
+        Assert-ContainsText $surface ([System.IO.Path]::GetFileName([string]$result.diagnosticsPath))
+        Assert-ContainsText (($surface -replace '\s+', '')) (($result.diagnosticsPath) -replace '\s+', '')
     }
     $allSurfaces = ($record | ConvertTo-Json -Depth 100 -Compress) + ($durable | ConvertTo-Json -Depth 100 -Compress) + ($observerEvents | ConvertTo-Json -Depth 100 -Compress) + ($rendered.wide -join "`n") + $rendered.log + $rendered.return
     foreach ($canary in $diagnosticCanaries) { Assert-NotContainsText $allSurfaces $canary }
@@ -410,9 +411,11 @@ Test-Case '메뉴 복귀 화면과 명시적 resume --live JSON은 같은 진단
         [ordered]@{ menu = $menuText; cli = [string]$cliOutput[-1] }
     } $run $fake ([System.IO.Path]::GetDirectoryName($run.runDirectory))
 
-    foreach ($value in @($fake.code, $fake.diagnosticId, $fake.diagnosticsPath)) {
+    foreach ($value in @($fake.code, $fake.diagnosticId)) {
         Assert-ContainsText $surfaces.menu $value
     }
+    Assert-ContainsText $surfaces.menu ([System.IO.Path]::GetFileName([string]$fake.diagnosticsPath))
+    Assert-ContainsText (($surfaces.menu -replace '\s+', '')) (($fake.diagnosticsPath) -replace '\s+', '')
     $cliResult = $surfaces.cli | ConvertFrom-Json -Depth 100
     Assert-Equal $cliResult.code $fake.code
     Assert-Equal $cliResult.diagnosticId $fake.diagnosticId

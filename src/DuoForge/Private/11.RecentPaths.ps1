@@ -114,7 +114,8 @@ function Read-DuoForgePathChoice {
         if ($choice -eq '1') {
             $path = if ($null -ne $PathPicker) { & $PathPicker $Type $Prompt } else { Select-DuoForgeWindowsPath -Type $Type -Title $Prompt }
             if ([string]::IsNullOrWhiteSpace($path)) {
-                Write-Host '선택창을 취소했거나 열 수 없습니다. 다른 방식을 선택해 주세요.' -ForegroundColor Yellow
+                $layout = Get-DuoForgeDisplayLayoutInternal
+                Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '선택창에서 경로를 받지 못했습니다.' -NextAction '직접 입력하거나 최근 경로를 선택해 주세요.' -Layout $layout) -Layout $layout
                 continue
             }
         }
@@ -124,7 +125,8 @@ function Read-DuoForgePathChoice {
         elseif ($choice -eq '3') {
             $recent = @(Get-DuoForgeRecentPaths -Role $Role)
             if ($recent.Count -eq 0) {
-                Write-Host '최근 경로가 없습니다.' -ForegroundColor Yellow
+                $layout = Get-DuoForgeDisplayLayoutInternal
+                Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '이 역할에 저장된 최근 경로가 없습니다.' -NextAction '선택창을 열거나 경로를 직접 입력해 주세요.' -Layout $layout) -Layout $layout
                 continue
             }
             $recentItems = [System.Collections.Generic.List[object]]::new()
@@ -135,7 +137,8 @@ function Read-DuoForgePathChoice {
             $path = [string]$recent[[int]$recentChoice].path
         }
         else {
-            Write-Host '올바른 항목을 선택해 주세요.' -ForegroundColor Yellow
+            $layout = Get-DuoForgeDisplayLayoutInternal
+            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '현재 가능한 경로 입력 방식을 선택해 주세요.' -Layout $layout) -Layout $layout
             continue
         }
 
@@ -145,7 +148,8 @@ function Read-DuoForgePathChoice {
             return $resolved
         }
         catch {
-            Write-Host $_.Exception.Message -ForegroundColor Red
+            $layout = Get-DuoForgeDisplayLayoutInternal
+            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind error -Title '선택한 경로를 사용할 수 없습니다.' -Message ([string]$_.Exception.Message) -Layout $layout) -Layout $layout
         }
     }
 }

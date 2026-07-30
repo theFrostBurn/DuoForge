@@ -244,20 +244,27 @@ function ConvertTo-DuoForgeMenuItemsInternal {
     return @($normalized)
 }
 
-function New-DuoForgeMenuFrameInternal {
+function New-DuoForgeMenuFrameRowsInternal {
     [CmdletBinding()]
     param(
         [AllowEmptyCollection()][Parameter(Mandatory)][object[]]$Items,
         [AllowEmptyString()][string]$Title,
         [ValidateRange(0, 10000)][int]$SelectedIndex = 0,
         [AllowEmptyString()][string]$Message,
-        [AllowEmptyString()][string]$Footer = '↑/↓ 이동 · Home/End · Enter 선택 · Esc 이전'
+        [AllowEmptyString()][string]$Footer = '↑/↓ 이동 · Home/End · Enter 선택 · Esc 이전',
+        [ValidateRange(0, 1000)][int]$Width = 0,
+        [ValidateRange(0, 1000)][int]$Height = 0,
+        [switch]$Ascii,
+        [switch]$ExpandAllDetails
     )
 
-    $lines = [System.Collections.Generic.List[string]]::new()
-    if (-not [string]::IsNullOrWhiteSpace($Title)) { $lines.Add($Title); $lines.Add('') }
+    $layout = Get-DuoForgeDisplayLayoutInternal -Width $Width -Height $Height -Ascii:$Ascii -NoColor
+    $rows = [System.Collections.Generic.List[object]]::new()
+    if (-not [string]::IsNullOrWhiteSpace($Title)) {
+        foreach ($row in @(New-DuoForgePageHeaderRowsInternal -Title $Title -Layout $layout -NoTrailingSpacer:([bool]$layout.compact))) { $rows.Add($row) }
+    }
     if ($Items.Count -eq 0) {
-        $lines.Add('선택할 수 있는 항목이 없습니다.')
+        foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind info -Title '선택할 수 있는 항목이 없습니다.' -Layout $layout)) { $rows.Add($row) }
     }
     else {
         $selected = [Math]::Max(0, [Math]::Min($SelectedIndex, $Items.Count - 1))
@@ -265,18 +272,57 @@ function New-DuoForgeMenuFrameInternal {
             $item = $Items[$index]
             $prefix = if ($index -eq $selected) { '> ' } else { '  ' }
             $shortcut = if (@($item.shortcuts).Count -gt 0) { '[{0}] ' -f [string]$item.shortcuts[0] } else { '' }
-            $suffix = if ([bool]$item.enabled) { '' } else { ' — 비활성화' }
-            $lines.Add(('{0}{1}{2}{3}' -f $prefix, $shortcut, [string]$item.label, $suffix))
-            if ($index -eq $selected -and -not [string]::IsNullOrWhiteSpace([string]$item.detail)) { $lines.Add(('    {0}' -f [string]$item.detail)) }
-            if ($index -eq $selected -and -not [bool]$item.enabled) {
+            $suffix = if ([bool]$item.enabled) { '' } else { ' · 비활성' }
+            $itemPrefix = $prefix + $shortcut
+            $prefixWidth = Get-DuoForgeProgressTextWidthInternal -Text $itemPrefix
+            $itemWidth = [Math]::Max(8, [int]$layout.lineWidth - $prefixWidth)
+            $itemMaximumLines = if ($ExpandAllDetails) { 1000 } elseif ([int]$layout.height -ge 32) { 3 } else { 2 }
+            $itemLines = @(Split-DuoForgeDisplayTextInternal -Text (([string]$item.label) + $suffix) -Width $itemWidth -MaximumLines $itemMaximumLines)
+            for ($lineIndex = 0; $lineIndex -lt $itemLines.Count; $lineIndex++) {
+                $linePrefix = if ($lineIndex -eq 0) { $itemPrefix } else { ' ' * $prefixWidth }
+                $rows.Add((New-DuoForgeDisplayRowInternal -Text ($linePrefix + [string]$itemLines[$lineIndex]) -Role $(if ($index -eq $selected) { 'warning' } else { 'list' })))
+            }
+            $showDetail = ($index -eq $selected -or $ExpandAllDetails) -and -not [string]::IsNullOrWhiteSpace([string]$item.detail)
+            if ($showDetail) {
+                $detailMaximumLines = if ($ExpandAllDetails) { 1000 } elseif ([int]$layout.height -le 24) { 2 } else { 3 }
+                foreach ($row in @(New-DuoForgeTextRowsInternal -Text ([string]$item.detail) -Layout $layout -Indent 4 -MaximumLines $detailMaximumLines -Role 'meta')) { $rows.Add($row) }
+            }
+            if (($index -eq $selected -or $ExpandAllDetails) -and -not [bool]$item.enabled) {
                 $reason = if ([string]::IsNullOrWhiteSpace([string]$item.disabledReason)) { '현재 사용할 수 없는 항목입니다.' } else { [string]$item.disabledReason }
-                $lines.Add(('    사용할 수 없는 이유: {0}' -f $reason))
+                foreach ($row in @(New-DuoForgeTextRowsInternal -Text '! 사용할 수 없는 이유' -Layout $layout -Indent 4 -MaximumLines 1 -Role 'warning')) { $rows.Add($row) }
+                $reasonMaximumLines = if ($ExpandAllDetails) { 1000 } else { 3 }
+                foreach ($row in @(New-DuoForgeTextRowsInternal -Text $reason -Layout $layout -Indent 6 -MaximumLines $reasonMaximumLines -Role 'text')) { $rows.Add($row) }
             }
         }
     }
-    if (-not [string]::IsNullOrWhiteSpace($Message)) { $lines.Add(''); $lines.Add($Message) }
-    if (-not [string]::IsNullOrWhiteSpace($Footer)) { $lines.Add(''); $lines.Add($Footer) }
-    return @($lines)
+    if (-not [string]::IsNullOrWhiteSpace($Message)) {
+        $rows.Add((New-DuoForgeDisplayRowInternal -Text '' -Role 'spacer'))
+        foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title $Message -Layout $layout)) { $rows.Add($row) }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Footer)) {
+        if (-not [bool]$layout.compact) { $rows.Add((New-DuoForgeDisplayRowInternal -Text '' -Role 'spacer')) }
+        foreach ($row in @(New-DuoForgeTextRowsInternal -Text $Footer -Layout $layout -MaximumLines 2 -Role 'meta')) { $rows.Add($row) }
+    }
+    return @($rows)
+}
+
+function New-DuoForgeMenuFrameInternal {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()][Parameter(Mandatory)][object[]]$Items,
+        [AllowEmptyString()][string]$Title,
+        [ValidateRange(0, 10000)][int]$SelectedIndex = 0,
+        [AllowEmptyString()][string]$Message,
+        [AllowEmptyString()][string]$Footer = '↑/↓ 이동 · Home/End · Enter 선택 · Esc 이전',
+        [ValidateRange(0, 1000)][int]$Width = 0,
+        [ValidateRange(0, 1000)][int]$Height = 0,
+        [switch]$Ascii
+    )
+
+    return @(
+        New-DuoForgeMenuFrameRowsInternal -Items $Items -Title $Title -SelectedIndex $SelectedIndex -Message $Message -Footer $Footer -Width $Width -Height $Height -Ascii:$Ascii |
+            ForEach-Object { [string]$_.text }
+    )
 }
 
 function Write-DuoForgeAnsiMenuFrameInternal {
@@ -411,14 +457,13 @@ function Invoke-DuoForgeLineMenuSelectionInternal {
         [scriptblock]$InputReader
     )
 
-    if (-not [string]::IsNullOrWhiteSpace($Title)) { Write-Host ''; Write-Host $Title }
-    if ($Items.Count -eq 0) { Write-Host '선택할 수 있는 항목이 없습니다.' -ForegroundColor Yellow; return $EscapeValue }
-    foreach ($item in $Items) {
-        $shortcut = if (@($item.shortcuts).Count -gt 0) { [string]$item.shortcuts[0] } else { '' }
-        $prefix = if ([string]::IsNullOrWhiteSpace($shortcut)) { '-' } else { "[$shortcut]" }
-        $suffix = if ([bool]$item.enabled) { '' } else { ' — 비활성화' }
-        Write-Host ('{0} {1}{2}' -f $prefix, [string]$item.label, $suffix)
+    $layout = Get-DuoForgeDisplayLayoutInternal -NoColor
+    if ($Items.Count -eq 0) {
+        Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '선택할 수 있는 항목이 없습니다.' -Layout $layout) -Layout $layout
+        return $EscapeValue
     }
+    $lineRows = @(New-DuoForgeMenuFrameRowsInternal -Items $Items -Title $Title -Footer '' -Width ([int]$layout.width) -Height ([int]$layout.height) -ExpandAllDetails)
+    Write-DuoForgeDisplayRowsInternal -Rows $lineRows -Layout $layout
     while ($true) {
         $choice = if ($null -ne $InputReader) { [string](& $InputReader $Prompt) } else { [string](Read-Host $Prompt) }
         $choice = $choice.Trim()
@@ -427,10 +472,10 @@ function Invoke-DuoForgeLineMenuSelectionInternal {
             $selected = Find-DuoForgeMenuItemByShortcutInternal -Items $Items -Shortcut $choice
             if ($null -eq $selected -and ($choice -ieq 'Esc' -or $choice -ieq 'Escape')) { return $EscapeValue }
         }
-        if ($null -eq $selected) { Write-Host '현재 가능한 항목을 선택해 주세요.' -ForegroundColor Yellow; continue }
+        if ($null -eq $selected) { Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '현재 가능한 항목을 선택해 주세요.' -Layout $layout) -Layout $layout; continue }
         if (-not [bool]$selected.enabled) {
             $reason = if ([string]::IsNullOrWhiteSpace([string]$selected.disabledReason)) { '현재 사용할 수 없는 항목입니다.' } else { [string]$selected.disabledReason }
-            Write-Host $reason -ForegroundColor DarkYellow
+            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '이 항목은 지금 사용할 수 없습니다.' -Message $reason -Layout $layout) -Layout $layout
             continue
         }
         return [string]$selected.value
@@ -472,7 +517,10 @@ function Invoke-DuoForgeMenuSelectionInternal {
     }
     try {
         while ($true) {
-            $frame = @(New-DuoForgeMenuFrameInternal -Items $menuItems -Title $Title -SelectedIndex $selectedIndex -Message $message -Footer $Footer)
+            $frameWidth = 0
+            $frameHeight = 0
+            try { $frameWidth = [int][Console]::WindowWidth; $frameHeight = [int][Console]::WindowHeight } catch { }
+            $frame = @(New-DuoForgeMenuFrameInternal -Items $menuItems -Title $Title -SelectedIndex $selectedIndex -Message $message -Footer $Footer -Width $frameWidth -Height $frameHeight)
             if ($null -ne $FrameWriter) { & $FrameWriter ([string[]]$frame) }
             else { Write-DuoForgeCursorMenuFrameInternal -Lines $frame -RenderState $renderState }
             $message = ''

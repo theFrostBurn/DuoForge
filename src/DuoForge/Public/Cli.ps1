@@ -44,16 +44,22 @@ function Invoke-DuoForgeCliCoreInternal {
             $runs = @(Get-DuoForgeRunsInternal -ResultsRoot $workspace)
             if ([bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'json' -Default $false)) { $runs | ConvertTo-Json -Depth 20 }
             else {
-                $rows = foreach ($item in $runs) {
-                    [pscustomobject][ordered]@{
-                        '작업 ID' = $item.runId
-                        '이름' = $item.name
-                        '작업 방식' = Get-DuoForgeDisplayModeLabelInternal -Mode ([string]$item.mode)
-                        '상태' = Get-DuoForgeDisplayStateLabelInternal -Status ([string]$item.status)
-                        '최근 변경' = $item.updatedAt
-                    }
+                $layout = Get-DuoForgeDisplayLayoutInternal
+                if ($runs.Count -eq 0) {
+                    Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '저장된 작업이 없습니다.' -NextAction '새 작업을 시작하거나 다른 --workspace를 확인해 주세요.' -Layout $layout) -Layout $layout
                 }
-                $rows | Format-Table -AutoSize | Out-Host
+                else {
+                    $displayRows = [System.Collections.Generic.List[object]]::new()
+                    foreach ($row in @(New-DuoForgePageHeaderRowsInternal -Title '저장된 작업' -Tag ("{0}개" -f $runs.Count) -Layout $layout)) { $displayRows.Add($row) }
+                    for ($index = 0; $index -lt $runs.Count; $index++) {
+                        $item = $runs[$index]
+                        foreach ($row in @(New-DuoForgeSectionRowsInternal -Title ("{0} · {1}" -f $item.name, (Get-DuoForgeDisplayStateLabelInternal -Status ([string]$item.status))) -Body '' -Layout $layout -First:($index -eq 0))) { $displayRows.Add($row) }
+                        foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '작업 방식' -Value (Get-DuoForgeDisplayModeLabelInternal -Mode ([string]$item.mode)) -Layout $layout -KeyWidth 12)) { $displayRows.Add($row) }
+                        foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '최근 변경' -Value ([string]$item.updatedAt) -Layout $layout -KeyWidth 12)) { $displayRows.Add($row) }
+                        foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '작업 ID' -Value ([string]$item.runId) -Layout $layout -KeyWidth 12 -Role 'meta')) { $displayRows.Add($row) }
+                    }
+                    Write-DuoForgeDisplayRowsInternal -Rows @($displayRows) -Layout $layout
+                }
             }
             return
         }
@@ -64,14 +70,15 @@ function Invoke-DuoForgeCliCoreInternal {
             $run = Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace
             if ([bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'json' -Default $false)) { $run | ConvertTo-Json -Depth 100 }
             else {
-                [pscustomobject][ordered]@{
-                    '작업 ID' = $run.state.runId
-                    '이름' = $run.manifest.name
-                    '작업 방식' = Get-DuoForgeDisplayModeLabelInternal -Mode ([string]$run.state.mode)
-                    '상태' = Get-DuoForgeDisplayStateLabelInternal -Status ([string]$run.state.status)
-                    '토론 회차' = $run.state.round
-                    '마지막 완료 단계' = Get-DuoForgeDisplayStageLabelInternal -Stage ([string]$run.state.lastCompletedStage)
-                } | Format-List | Out-Host
+                $layout = Get-DuoForgeDisplayLayoutInternal
+                $displayRows = [System.Collections.Generic.List[object]]::new()
+                foreach ($row in @(New-DuoForgePageHeaderRowsInternal -Title ([string]$run.manifest.name) -Tag (Get-DuoForgeDisplayStateLabelInternal -Status ([string]$run.state.status)) -Layout $layout)) { $displayRows.Add($row) }
+                foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '현재 상태' -Body '' -Layout $layout -First)) { $displayRows.Add($row) }
+                foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '작업 방식' -Value (Get-DuoForgeDisplayModeLabelInternal -Mode ([string]$run.state.mode)) -Layout $layout -KeyWidth 18)) { $displayRows.Add($row) }
+                foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '토론 회차' -Value ([string]$run.state.round) -Layout $layout -KeyWidth 18)) { $displayRows.Add($row) }
+                foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '마지막 완료 단계' -Value (Get-DuoForgeDisplayStageLabelInternal -Stage ([string]$run.state.lastCompletedStage)) -Layout $layout -KeyWidth 18)) { $displayRows.Add($row) }
+                foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '작업 ID' -Value ([string]$run.state.runId) -Layout $layout -KeyWidth 18 -Role 'meta')) { $displayRows.Add($row) }
+                Write-DuoForgeDisplayRowsInternal -Rows @($displayRows) -Layout $layout
             }
             return
         }
@@ -100,22 +107,28 @@ function Invoke-DuoForgeCliCoreInternal {
             $existing = Get-DuoForgeIssueExplanationsInternal -RunId $runId -IssueId $issueId -ResultsRoot $workspace
             if (-not [bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'live' -Default $false)) {
                 Write-DuoForgeExplanationRecords -Records @($existing.explanations)
-                Write-Host ('설명 호출 예산: 사용 {0}/{1}, 남음 {2}' -f $existing.budget.used, $existing.budget.maximum, $existing.budget.remaining)
-                Write-Host '새 설명을 요청하려면 --live를 추가해 다시 실행해 주세요.' -ForegroundColor Yellow
+                $layout = Get-DuoForgeDisplayLayoutInternal
+                Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title ('설명 호출 예산 · 사용 {0}/{1}, 남음 {2}' -f $existing.budget.used, $existing.budget.maximum, $existing.budget.remaining) -NextAction '새 설명을 요청하려면 --live를 추가해 다시 실행해 주세요.' -Layout $layout) -Layout $layout
                 return
             }
             if (-not (& $isInteractive)) { throw (New-DuoForgeException -Code 'DF-LIVE-NONINTERACTIVE' -Message '라이브 설명은 대화형 PowerShell에서만 확인할 수 있습니다.') }
             $run = Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace
             $requiredCalls = if ($provider -eq 'both') { 2 } else { 1 }
             if ([int]$existing.budget.remaining -lt $requiredCalls) { throw (New-DuoForgeException -Code 'DF-EXPLANATION-LIMIT' -Message '설명 호출 잔여 예산이 부족합니다.') }
-            Write-Host ('검토 항목 {0}에 {1} 관점, {2} 수준, {3} 초점으로 설명을 요청합니다.' -f $issueId, $provider, $level, $focus) -ForegroundColor Yellow
-            Write-DuoForgeProviderSelectionSummary -ProviderSelections $run.manifest.providerSelections
-            Write-Host ('이번 설명 호출 수: {0}, 실행 전체 잔여 예산: {1}' -f $requiredCalls, $existing.budget.remaining) -ForegroundColor Yellow
+            $layout = Get-DuoForgeDisplayLayoutInternal
+            $confirmationRows = [System.Collections.Generic.List[object]]::new()
+            foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '새 AI 설명 호출을 시작하려고 합니다.' -Message ('검토 항목 {0} · {1} 관점 · {2} 수준 · {3} 초점' -f $issueId, $provider, $level, $focus) -NextAction '아래 선택과 예산을 확인한 뒤 정확히 LIVE를 입력해 주세요.' -Layout $layout)) { $confirmationRows.Add($row) }
+            foreach ($row in @(New-DuoForgeSectionRowsInternal -Title 'AI 선택' -Body '' -Layout $layout)) { $confirmationRows.Add($row) }
+            foreach ($row in @(New-DuoForgeProviderSelectionRowsInternal -ProviderSelections $run.manifest.providerSelections -Layout $layout)) { $confirmationRows.Add($row) }
+            foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '호출 예산' -Body '' -Layout $layout)) { $confirmationRows.Add($row) }
+            foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '이번 호출' -Value ('{0}회' -f $requiredCalls) -Layout $layout -KeyWidth 12 -Role 'warning')) { $confirmationRows.Add($row) }
+            foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '남은 예산' -Value ('{0}회' -f $existing.budget.remaining) -Layout $layout -KeyWidth 12 -Role 'warning')) { $confirmationRows.Add($row) }
+            Write-DuoForgeDisplayRowsInternal -Rows @($confirmationRows) -Layout $layout
             $confirmation = ([string](& $readInput '실제 설명 호출을 시작하려면 LIVE를 입력하세요')).Trim()
-            if ($confirmation -cne 'LIVE') { Write-Host '설명 호출을 취소했습니다.'; return }
+            if ($confirmation -cne 'LIVE') { Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '설명 호출을 취소했습니다.' -Layout $layout) -Layout $layout; return }
             $result = Invoke-DuoForgeIssueExplanationInternal -RunId $runId -IssueId $issueId -Provider $provider -Level $level -Focus $focus -ResultsRoot $workspace -LiveConsent $true
             Write-DuoForgeExplanationRecords -Records @($result.explanations)
-            Write-Host ('설명 호출 예산: 사용 {0}/{1}, 남음 {2}' -f $result.budget.used, $result.budget.maximum, $result.budget.remaining)
+            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '설명 호출을 완료했습니다.' -Message ('예산 사용 {0}/{1} · 남음 {2}' -f $result.budget.used, $result.budget.maximum, $result.budget.remaining) -Layout $layout) -Layout $layout
             return
         }
         'evidence' {
@@ -180,7 +193,7 @@ function Invoke-DuoForgeCliCoreInternal {
                 $confirmation = ([string](& $readInput '중요 검토 항목을 보류하면 일부 범위만 완료됩니다. DEFER를 입력하세요')).Trim()
                 $confirmed = $confirmation -ceq 'DEFER'
             }
-            if (-not $confirmed) { Write-Host '보류를 취소했습니다.'; return }
+            if (-not $confirmed) { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '보류를 취소했습니다.' -Layout $layout) -Layout $layout; return }
             $workspace = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')
             $result = Set-DuoForgeUserDecisionInternal -RunId $runId -IssueId $issueId -Action defer -ResultsRoot $workspace -ConfirmPartial
             $result | ConvertTo-Json -Depth 30
@@ -191,9 +204,10 @@ function Invoke-DuoForgeCliCoreInternal {
             if ([string]::IsNullOrWhiteSpace($runId)) { throw (New-DuoForgeException -Code 'DF-CLI-RUN' -Message 'pause에는 --run <실행 ID>가 필요합니다.') }
             $workspace = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')
             $result = Request-DuoForgePauseInternal -RunId $runId -ResultsRoot $workspace
-            if ($result.alreadyPaused) { Write-Host '이미 사용자 일시정지 상태입니다.' }
-            elseif ($result.alreadyRequested) { Write-Host ('이미 일시정지가 요청되어 있습니다: {0}' -f $result.requestId) }
-            else { Write-Host ('일시정지를 요청했습니다. 현재 모델 호출이 있다면 완료 후 다음 호출 전에 멈춥니다: {0}' -f $result.requestId) -ForegroundColor Green }
+            $layout = Get-DuoForgeDisplayLayoutInternal
+            if ($result.alreadyPaused) { Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '이미 사용자 일시정지 상태입니다.' -Layout $layout) -Layout $layout }
+            elseif ($result.alreadyRequested) { Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '이미 일시정지가 요청되어 있습니다.' -Code ([string]$result.requestId) -Layout $layout) -Layout $layout }
+            else { Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '일시정지를 요청했습니다.' -Message '현재 모델 호출이 있다면 완료한 뒤 다음 호출 전에 멈춥니다.' -Code ([string]$result.requestId) -Layout $layout) -Layout $layout }
             return
         }
         'resume' {
@@ -203,14 +217,21 @@ function Invoke-DuoForgeCliCoreInternal {
             $run = Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace
             $budget = Get-DuoForgeRemainingCallBudget -RunDirectory ([string]$run.runDirectory)
             if (-not [bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'live' -Default $false)) {
-                Write-Host ("현재 상태: {0}" -f (Get-DuoForgeDisplayStateLabelInternal -Status ([string]$run.state.status)))
-                if ([string]$run.state.status -eq 'AWAITING_EVIDENCE') { Write-Host '요청된 Markdown 자료를 evidence 명령으로 추가한 뒤 계속해 주세요.' -ForegroundColor Yellow }
-                elseif ([string]$run.state.status -eq 'PAUSED_QUOTA') { Write-Host '사용 한도가 회복되고 구독 로그인이 유효한 뒤 계속해 주세요. API 과금 방식으로 자동 전환하지 않습니다.' -ForegroundColor Yellow }
-                elseif ([string]$run.state.status -eq 'BLOCKED_PREFLIGHT') { Write-Host 'doctor와 Codex·Claude 구독 로그인을 다시 확인한 뒤 계속해 주세요.' -ForegroundColor Yellow }
-                elseif ([string]$run.state.status -eq 'PAUSED_USER') { Write-Host '마지막 완료 지점부터 계속할 수 있습니다.' -ForegroundColor Yellow }
-                Write-Host (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Codex' -ProviderBudget $budget.providers.codex)
-                Write-Host (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Claude' -ProviderBudget $budget.providers.claude)
-                Write-Host '실제 구독 기반 CLI 호출을 시작하려면 --live를 추가해 다시 실행해 주세요.' -ForegroundColor Yellow
+                $layout = Get-DuoForgeDisplayLayoutInternal
+                $displayRows = [System.Collections.Generic.List[object]]::new()
+                foreach ($row in @(New-DuoForgePageHeaderRowsInternal -Title '작업 재개 안내' -Tag (Get-DuoForgeDisplayStateLabelInternal -Status ([string]$run.state.status)) -Layout $layout)) { $displayRows.Add($row) }
+                foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '현재 상태' -Body '' -Layout $layout -First)) { $displayRows.Add($row) }
+                $nextAction = '상태를 확인한 뒤 계속할 수 있습니다.'
+                if ([string]$run.state.status -eq 'AWAITING_EVIDENCE') { $nextAction = '요청된 Markdown 자료를 evidence 명령으로 추가한 뒤 계속해 주세요.' }
+                elseif ([string]$run.state.status -eq 'PAUSED_QUOTA') { $nextAction = '사용 한도가 회복되고 구독 로그인이 유효한 뒤 계속해 주세요. API 과금 방식으로 자동 전환하지 않습니다.' }
+                elseif ([string]$run.state.status -eq 'BLOCKED_PREFLIGHT') { $nextAction = 'doctor와 Codex·Claude 구독 로그인을 다시 확인한 뒤 계속해 주세요.' }
+                elseif ([string]$run.state.status -eq 'PAUSED_USER') { $nextAction = '마지막 완료 지점부터 계속할 수 있습니다.' }
+                foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind info -Title (Get-DuoForgeDisplayStateLabelInternal -Status ([string]$run.state.status)) -NextAction $nextAction -Layout $layout)) { $displayRows.Add($row) }
+                foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '남은 호출 예산' -Body '' -Layout $layout)) { $displayRows.Add($row) }
+                foreach ($row in @(New-DuoForgeFieldRowsInternal -Label 'Codex' -Value (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Codex' -ProviderBudget $budget.providers.codex) -Layout $layout -KeyWidth 8)) { $displayRows.Add($row) }
+                foreach ($row in @(New-DuoForgeFieldRowsInternal -Label 'Claude' -Value (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Claude' -ProviderBudget $budget.providers.claude) -Layout $layout -KeyWidth 8)) { $displayRows.Add($row) }
+                foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '아직 실제 AI 호출을 시작하지 않았습니다.' -NextAction '실제 구독 기반 CLI 호출을 시작하려면 --live를 추가해 다시 실행해 주세요.' -Layout $layout)) { $displayRows.Add($row) }
+                Write-DuoForgeDisplayRowsInternal -Rows @($displayRows) -Layout $layout
                 return
             }
             if ([string]$run.state.status -eq 'AWAITING_EVIDENCE') {
@@ -220,12 +241,17 @@ function Invoke-DuoForgeCliCoreInternal {
                 throw (New-DuoForgeException -Code 'DF-LIVE-NONINTERACTIVE' -Message '라이브 실행은 대화형 PowerShell에서만 확인할 수 있습니다.')
             }
             $selections = Get-DuoForgeRunProviderSelectionsInternal -RunDirectory ([string]$run.runDirectory)
-            Write-Host '선택한 입력 사본 내용이 Codex와 Claude에 전송됩니다.' -ForegroundColor Yellow
-            Write-DuoForgeProviderSelectionSummary -ProviderSelections $selections
-            Write-Host (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Codex' -ProviderBudget $budget.providers.codex) -ForegroundColor Yellow
-            Write-Host (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Claude' -ProviderBudget $budget.providers.claude) -ForegroundColor Yellow
+            $layout = Get-DuoForgeDisplayLayoutInternal
+            $confirmationRows = [System.Collections.Generic.List[object]]::new()
+            foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title 'LIVE 공급자 호출을 시작하려고 합니다.' -Message '선택한 입력 사본 내용이 Codex와 Claude에 전송됩니다.' -NextAction '아래 선택과 남은 예산을 확인한 뒤 정확히 LIVE를 입력해 주세요.' -Layout $layout)) { $confirmationRows.Add($row) }
+            foreach ($row in @(New-DuoForgeSectionRowsInternal -Title 'AI 선택' -Body '' -Layout $layout)) { $confirmationRows.Add($row) }
+            foreach ($row in @(New-DuoForgeProviderSelectionRowsInternal -ProviderSelections $selections -Layout $layout)) { $confirmationRows.Add($row) }
+            foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '남은 호출 예산' -Body '' -Layout $layout)) { $confirmationRows.Add($row) }
+            foreach ($row in @(New-DuoForgeFieldRowsInternal -Label 'Codex' -Value (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Codex' -ProviderBudget $budget.providers.codex) -Layout $layout -KeyWidth 8 -Role 'warning')) { $confirmationRows.Add($row) }
+            foreach ($row in @(New-DuoForgeFieldRowsInternal -Label 'Claude' -Value (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Claude' -ProviderBudget $budget.providers.claude) -Layout $layout -KeyWidth 8 -Role 'warning')) { $confirmationRows.Add($row) }
+            Write-DuoForgeDisplayRowsInternal -Rows @($confirmationRows) -Layout $layout
             $confirmation = ([string](& $readInput '실제 공급자 호출을 시작하려면 LIVE를 입력하세요')).Trim()
-            if ($confirmation -cne 'LIVE') { Write-Host '라이브 실행을 취소했습니다.'; return }
+            if ($confirmation -cne 'LIVE') { Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '라이브 실행을 취소했습니다.' -Layout $layout) -Layout $layout; return }
             $result = if ($null -ne $ResumeInvoker) { & $ResumeInvoker $runId $workspace $true } else { Invoke-DuoForgeResumeWithProgressInternal -RunId $runId -ResultsRoot $workspace -WaitForAcknowledgement -ReturnTarget shell }
             $result | ConvertTo-Json -Depth 30
             return
@@ -253,7 +279,7 @@ function Invoke-DuoForgeCliCoreInternal {
             $selectionValidation = Test-DuoForgeProviderSelectionsInternal -Selections $providerSelections
             if (-not $selectionValidation.valid -and (& $isInteractive)) {
                 $providerSelections = Complete-DuoForgeInteractiveProviderSelectionsInternal -InitialSelections $providerSelections
-                if ($null -eq $providerSelections) { Write-Host '모델 선택을 취소했습니다.'; return }
+                if ($null -eq $providerSelections) { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '모델 선택을 취소했습니다.' -Layout $layout) -Layout $layout; return }
             }
             $request = New-DuoForgeStartRequestInternal `
                 -Mode $mode `
@@ -289,7 +315,7 @@ function Invoke-DuoForgeCliCoreInternal {
                 throw (New-DuoForgeException -Code 'DF-CONFIRM-NONINTERACTIVE' -Message 'v1은 확정 실행 전에 대화형 사용자 확인이 필요합니다. 비대화형 환경에서는 --plan-only를 사용해 주세요.')
             }
             $confirmation = ([string](& $readInput '스냅샷과 실행 기록을 만들까요? [Y/N]')).Trim()
-            if ($confirmation -notin @('Y', 'y')) { Write-Host '취소했습니다. 확정 실행은 생성하지 않았습니다.'; return }
+            if ($confirmation -notin @('Y', 'y')) { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '작업 생성을 취소했습니다.' -Message '확정 실행과 입력 사본은 생성하지 않았습니다.' -Layout $layout) -Layout $layout; return }
             $run = New-DuoForgeRunInternal -ValidationResult $validation
             $run | ConvertTo-Json -Depth 20
             return

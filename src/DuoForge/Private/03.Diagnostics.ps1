@@ -308,10 +308,23 @@ function Write-DuoForgeDiagnosticReferenceInternal {
     $relativePath = [string](Get-DuoForgeObjectValue -Object $Source -Name 'diagnosticsRelativePath')
     $diagnosticsPath = Resolve-DuoForgeDiagnosticsPathInternal -RunDirectory $RunDirectory -Location $location -RelativePath $relativePath -DiagnosticsPath ([string](Get-DuoForgeObjectValue -Object $Source -Name 'diagnosticsPath'))
     $warningCode = ConvertTo-DuoForgeDiagnosticTokenInternal -Value (Get-DuoForgeObjectValue -Object $Source -Name 'diagnosticWarningCode')
-    Write-Host ("오류 코드: {0}" -f $code) -ForegroundColor Red
-    if (-not [string]::IsNullOrWhiteSpace($diagnosticId)) { Write-Host ("진단 ID: {0}" -f $diagnosticId) }
-    if (-not [string]::IsNullOrWhiteSpace($diagnosticsPath)) { Write-Host ("진단 파일: {0}" -f $diagnosticsPath) }
-    if ($warningCode -eq 'DF-DIAGNOSTIC-WRITE') { Write-Host '진단 기록 실패: DF-DIAGNOSTIC-WRITE' -ForegroundColor Yellow }
+    $layout = Get-DuoForgeDisplayLayoutInternal
+    $rows = [System.Collections.Generic.List[object]]::new()
+    $publicSummary = [string](Get-DuoForgeObjectValue -Object $Source -Name 'publicSummary' -Default '')
+    if ([string]::IsNullOrWhiteSpace($publicSummary)) { $publicSummary = Get-DuoForgeDiagnosticPublicSummaryInternal -Code $code }
+    foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind error -Title $publicSummary -NextAction '오류 코드와 진단 ID를 확인하고, 진단 파일이 있으면 지원 요청에 함께 제공해 주세요.' -Layout $layout)) { $rows.Add($row) }
+    foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '진단 참조' -Body '' -Layout $layout)) { $rows.Add($row) }
+    foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '오류 코드' -Value $code -Layout $layout -KeyWidth 12 -Role 'error')) { $rows.Add($row) }
+    if (-not [string]::IsNullOrWhiteSpace($diagnosticId)) {
+        foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '진단 ID' -Value $diagnosticId -Layout $layout -KeyWidth 12 -Role 'meta')) { $rows.Add($row) }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($diagnosticsPath)) {
+        foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '진단 파일' -Value $diagnosticsPath -Layout $layout -KeyWidth 12 -Role 'meta')) { $rows.Add($row) }
+    }
+    if ($warningCode -eq 'DF-DIAGNOSTIC-WRITE') {
+        foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '진단 기록을 저장하지 못했습니다.' -Code 'DF-DIAGNOSTIC-WRITE' -Layout $layout)) { $rows.Add($row) }
+    }
+    Write-DuoForgeDisplayRowsInternal -Rows @($rows) -Layout $layout
 }
 
 function Get-DuoForgeDiagnosticSourceFromExceptionInternal {

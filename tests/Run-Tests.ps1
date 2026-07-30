@@ -498,6 +498,57 @@ try {
         Assert-True ('AllowEmptyStringAttribute' -in @($surface.cursorRendererLineAttributes)) '제목과 안내 사이의 빈 줄이 커서 렌더러 바인딩에서 거부되었습니다.'
     }
 
+    Test-Case '공통 표시 renderer는 폭 인식 줄바꿈과 hanging indent, 문단, ASCII 무색 폴백을 보존한다' {
+        $surface = & $module {
+            $matrix = [ordered]@{}
+            foreach ($width in @(48, 72, 80, 100, 120)) {
+                $layout = Get-DuoForgeDisplayLayoutInternal -Width $width -Height 24 -NoColor
+                $rows = [System.Collections.Generic.List[object]]::new()
+                foreach ($row in @(New-DuoForgePageHeaderRowsInternal -Title 'DuoForge 표시 계약' -Tag '선택 요청' -Layout $layout)) { $rows.Add($row) }
+                foreach ($row in @(New-DuoForgeSectionRowsInternal -Title (('폭을 인식하는 긴 동적 섹션 제목 ' * 4) + '섹션끝표식') -Body '' -Layout $layout -First)) { $rows.Add($row) }
+                foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '검증 대상' -Body "한글 English v1.2.3 emoji 👩‍💻 e$([char]0x0301)`n`n둘째 문단은 빈 줄 뒤에 유지됩니다." -Layout $layout -First -PreserveParagraphs)) { $rows.Add($row) }
+                foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '긴 경로' -Value ('D:\workspace\' + ('nested-folder\' * 8) + 'diagnostics.jsonl') -Layout $layout -KeyWidth 9)) { $rows.Add($row) }
+                foreach ($row in @(New-DuoForgeListRowsInternal -Items @('첫 항목은 줄이 넘어가도 표식 아래가 아니라 본문 열에서 이어지는 긴 설명입니다.' * 2) -Layout $layout)) { $rows.Add($row) }
+                foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title (('폭을 인식하는 긴 알림 제목 ' * 4) + '알림끝표식') -Message (('제어 문자' + [char]7 + '는 화면에 그대로 노출하지 않습니다.')) -NextAction '합성 fixture를 검토합니다.' -Layout $layout)) { $rows.Add($row) }
+                $texts = @($rows | ForEach-Object { [string]$_.text })
+                $matrix[[string]$width] = [ordered]@{
+                    lines = $texts
+                    maximumWidth = (@($texts | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text $_ }) | Measure-Object -Maximum).Maximum
+                    fieldRows = @($texts | Where-Object { $_ -like '*diagnostics.jsonl*' -or $_ -like '*nested-folder*' })
+                }
+            }
+            $asciiLayout = Get-DuoForgeDisplayLayoutInternal -Width 72 -Height 20 -Ascii -NoColor
+            $asciiRows = @(
+                New-DuoForgePageHeaderRowsInternal -Title 'ASCII fallback' -Tag 'LIVE' -Layout $asciiLayout
+                New-DuoForgeNoticeRowsInternal -Kind success -Title '완료 ✓' -Message '↑/↓ · ● ◐ ○ ↻ › █░ …' -Layout $asciiLayout
+            )
+            $asciiText = (& { Write-DuoForgeDisplayRowsInternal -Rows $asciiRows -Layout $asciiLayout } 6>&1 | Out-String)
+            [ordered]@{ matrix = $matrix; asciiText = $asciiText }
+        }
+
+        foreach ($width in @(48, 72, 80, 100, 120)) {
+            $entry = $surface.matrix[[string]$width]
+            Assert-True ([int]$entry.maximumWidth -le ($width - 1)) "$width 열 renderer가 화면 폭을 넘었습니다."
+            Assert-ContainsText ($entry.lines -join "`n") '── 검증 대상'
+            Assert-ContainsText ($entry.lines -join "`n") '섹션끝표식'
+            Assert-ContainsText ($entry.lines -join "`n") '알림끝표식'
+            $sectionTitleRows = @($entry.lines | Where-Object { $_ -like '*동적 섹션 제목*' -or $_ -like '*섹션끝표식*' })
+            $noticeTitleRows = @($entry.lines | Where-Object { $_ -like '*긴 알림 제목*' -or $_ -like '*알림끝표식*' })
+            Assert-True ($sectionTitleRows.Count -ge 2) "$width 열에서 긴 섹션 제목이 줄바꿈되지 않았습니다."
+            Assert-True (($sectionTitleRows[1].Length - $sectionTitleRows[1].TrimStart().Length) -ge 3) "$width 열에서 섹션 제목 hanging indent가 유지되지 않았습니다."
+            Assert-True ($noticeTitleRows.Count -ge 2) "$width 열에서 긴 알림 제목이 줄바꿈되지 않았습니다."
+            Assert-True (($noticeTitleRows[1].Length - $noticeTitleRows[1].TrimStart().Length) -ge 2) "$width 열에서 알림 제목 hanging indent가 유지되지 않았습니다."
+            Assert-True (@($entry.lines | Where-Object { $_ -eq '' }).Count -ge 2) "$width 열에서 섹션 또는 문단 여백이 사라졌습니다."
+            $fieldRows = @($entry.fieldRows)
+            Assert-True ($fieldRows.Count -ge 2) "$width 열에서 긴 필드가 줄바꿈되지 않았습니다."
+            $continuationIndent = $fieldRows[1].Length - $fieldRows[1].TrimStart().Length
+            Assert-True ($continuationIndent -ge 13) "$width 열에서 hanging indent가 유지되지 않았습니다."
+        }
+        Assert-NotContainsText $surface.asciiText "`e["
+        foreach ($glyph in @('✓', '↑', '↓', '●', '◐', '○', '↻', '›', '█', '░', '…', '──', '─')) { Assert-NotContainsText $surface.asciiText $glyph }
+        foreach ($token in @('OK', 'Up/Down', '*', '~', 'o', '>', '#-', '...', '--')) { Assert-ContainsText $surface.asciiText $token }
+    }
+
     Test-Case '안전 확인 토큰은 공통 메뉴와 분리된 대소문자 구분 텍스트 계약으로 남는다' {
         $interactiveSource = Get-Content -LiteralPath (Join-Path $projectRoot 'src\DuoForge\Private\14.Interactive.ps1') -Raw
         foreach ($token in @('LIVE', 'PARTIAL', 'ROUND', 'APPLY')) {
@@ -1509,13 +1560,6 @@ try {
 
     Test-Case '쟁점 목록은 일반 객체와 ordered dictionary의 값과 claim을 표시하고 빈 목록을 안내한다' {
         $rendered = & $module {
-            function Out-Host {
-                [CmdletBinding()]
-                param([Parameter(ValueFromPipeline)]$InputObject)
-
-                process { $InputObject }
-            }
-
             $objectIssues = @([pscustomobject]@{
                 issueId = 'OBJ-001'
                 severity = 'minor'
@@ -1533,8 +1577,8 @@ try {
             $emptyIssues = @()
 
             return [ordered]@{
-                objectText = (& { Write-DuoForgeIssueList -Issues $objectIssues } | Out-String -Width 240)
-                dictionaryText = (& { Write-DuoForgeIssueList -Issues $dictionaryIssues } | Out-String -Width 240)
+                objectText = (& { Write-DuoForgeIssueList -Issues $objectIssues } 6>&1 | Out-String -Width 240)
+                dictionaryText = (& { Write-DuoForgeIssueList -Issues $dictionaryIssues } 6>&1 | Out-String -Width 240)
                 emptyText = (& { Write-DuoForgeIssueList -Issues $emptyIssues } 6>&1 | Out-String)
             }
         }
@@ -1578,8 +1622,10 @@ try {
             $blockedText = (& { Write-DuoForgeDoctorReport -Report $blockedReport } 6>&1 | Out-String)
             return [ordered]@{ ready = $readyText; blocked = $blockedText }
         } $ready $blocked
-        Assert-ContainsText $rendered.ready '문서 작업 준비: 예'
-        Assert-ContainsText $rendered.blocked '문서 작업 준비: 아니요'
+        Assert-ContainsText $rendered.ready '문서 작업'
+        Assert-ContainsText $rendered.ready '준비됨'
+        Assert-ContainsText $rendered.blocked '문서 작업'
+        Assert-ContainsText $rendered.blocked '준비되지 않음'
         Assert-ContainsText $rendered.blocked 'codex login'
     }
 
@@ -1988,7 +2034,7 @@ try {
                 narrowWidths = @($narrow | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) })
                 wideWidths = @($wide | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) })
                 unsafeWidths = @($unsafeFrame | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) })
-                narrowFeedHeaders = @($narrow | Where-Object { [string]$_ -like '최근 완료*✓*' }).Count
+                narrowFeedHeaders = @($narrow | Where-Object { [string]$_ -like '*최근 완료*✓*' }).Count
                 narrowBarriers = @($narrow | Where-Object { [string]$_ -match '^[✓●↻◐○] (준비|[0-9]+차)' }).Count
                 koreanWidth = Get-DuoForgeProgressTextWidthInternal -Text '한글A'
                 safe = ConvertTo-DuoForgeProgressTextInternal -Text ("`e[31m위험`e[0m`n다음")
@@ -2116,8 +2162,8 @@ try {
                     text = $frame -join "`n"
                     rows = $frame.Count
                     maximumWidth = (@($frame | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) }) | Measure-Object -Maximum).Maximum
-                    headers = @($frame | Where-Object { [string]$_ -like '최근 완료*✓*' }).Count
-                    changes = @($frame | Where-Object { [string]$_ -like '  변경 사항*' }).Count
+                    headers = @($frame | Where-Object { [string]$_ -like '*최근 완료*✓*' }).Count
+                    changes = @($frame | Where-Object { [string]$_ -like '*변경 사항*' }).Count
                     barriers = @($frame | Where-Object { [string]$_ -match '^[✓●↻◐○] (준비|[0-9]+차)' }).Count
                     selected = $view.selectedCommittedIndex
                     truncated = [bool]$view.layoutTruncated
@@ -2130,6 +2176,15 @@ try {
                 $frame = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 80 -Height 24 -ViewState $view)
                 $spinnerLines.Add([string](@($frame | Where-Object { [string]$_ -like '지금 작업 중*' })[0]))
             }
+            $asciiLayout = Get-DuoForgeDisplayLayoutInternal -Width 80 -Height 24 -Ascii -NoColor
+            $asciiView = [ordered]@{ screenMode = 'overview'; selectedCommittedIndex = -1; providerElapsedSeconds = 2; unicodeSpinner = $false }
+            $asciiProgressText = @(
+                New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 80 -Height 24 -ViewState $asciiView |
+                    ForEach-Object {
+                        $fallback = ConvertTo-DuoForgeDisplayFallbackTextInternal -Text ([string]$_) -Layout $asciiLayout
+                        ConvertTo-DuoForgeProgressColoredLineInternal -Line $fallback -NoColor
+                    }
+            ) -join "`n"
 
             $detailView = [ordered]@{ mode = 'fullscreen'; screenMode = 'detail'; selectedCommittedIndex = -1; recentCommittedCount = 3; detailScrollOffset = 0; providerElapsedSeconds = 2; unicodeSpinner = $true; pauseRequestStatus = '' }
             $detailFirst = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 72 -Height 20 -ViewState $detailView)
@@ -2168,6 +2223,7 @@ try {
                 spinnerWidths = @($spinnerLines | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text $_ })
                 unicodeFrames = @(0..2 | ForEach-Object { Get-DuoForgeProgressSpinnerFrameInternal -ElapsedSeconds $_ })
                 asciiFrames = @(0..2 | ForEach-Object { Get-DuoForgeProgressSpinnerFrameInternal -ElapsedSeconds $_ -Ascii })
+                asciiProgressText = $asciiProgressText
                 detailText = $detailFirst -join "`n"
                 detailRows = $detailFirst.Count
                 detailMaximumOffset = [int]$detailView.detailMaximumOffset
@@ -2207,6 +2263,9 @@ try {
         Assert-Equal (@($surface.unicodeFrames | Select-Object -Unique).Count) 3
         Assert-Equal (@($surface.asciiFrames | Select-Object -Unique).Count) 3
         foreach ($frame in @($surface.unicodeFrames + $surface.asciiFrames)) { Assert-Equal (& $module { param($text) Get-DuoForgeProgressTextWidthInternal -Text $text } $frame) 1 }
+        Assert-NotContainsText $surface.asciiProgressText "`e["
+        foreach ($glyph in @('✓', '↑', '↓', '●', '◐', '○', '↻', '›', '█', '░', '──', '─')) { Assert-NotContainsText $surface.asciiProgressText $glyph }
+        foreach ($token in @('OK', 'Up/Down', '#', '--')) { Assert-ContainsText $surface.asciiProgressText $token }
         Assert-ContainsText $surface.detailText '요약-3'
         Assert-NotContainsText $surface.detailText '요약-1'
         Assert-NotContainsText $surface.detailText '요약-2'
@@ -2257,7 +2316,8 @@ try {
         $pauseRecord = Get-Content -LiteralPath (Join-Path $run.runDirectory 'control\pause-request.json') -Raw | ConvertFrom-Json -Depth 20
         Assert-Equal $pauseRecord.status 'REQUESTED'
         Assert-Equal $pauseRecord.requestId $control.view.pauseRequestId
-        Assert-ContainsText $screen '일시정지를 요청했습니다. 현재 호출 완료 후 다음 호출 전에 멈춥니다.'
+        Assert-ContainsText $screen '일시정지를 요청했습니다.'
+        Assert-ContainsText $screen '현재 호출 완료 후 다음 호출 전에 멈춥니다.'
     }
 
     Test-Case '확정 피드는 단계 그래프 순서의 유효한 최근 3건을 선택하고 손상 항목을 이전 결과로 채운다' {
@@ -2295,7 +2355,7 @@ try {
                 $copy.latest = if ($count -eq 0) { $null } else { $copy.recentCommitted[-1] }
                 $frame = @(New-DuoForgeProgressFrameInternal -Snapshot $copy -Width 72 -Height 20)
                 $frameCounts[[string]$count] = [ordered]@{
-                    feedHeaders = @($frame | Where-Object { [string]$_ -like '최근 완료*✓*' }).Count
+                    feedHeaders = @($frame | Where-Object { [string]$_ -like '*최근 완료*✓*' }).Count
                     lines = $frame.Count
                     widths = @($frame | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) })
                     barriers = @($frame | Where-Object { [string]$_ -match '^[✓●↻◐○] (준비|[0-9]+차)' }).Count
@@ -2340,7 +2400,7 @@ try {
         Assert-True ($feed.frameCounts['3'].lines -le 19)
         Assert-True (@($feed.frameCounts['3'].widths | Where-Object { [int]$_ -gt 71 }).Count -eq 0)
         Assert-True ($feed.frameCounts['3'].barriers -ge 3)
-        $feed3Headers = @($feed.frameCounts['3'].text -split "`n" | Where-Object { $_ -like '최근 완료*✓*' })
+        $feed3Headers = @($feed.frameCounts['3'].text -split "`n" | Where-Object { $_ -like '*최근 완료*✓*' })
         Assert-ContainsText ([string]$feed3Headers[0]) '검토 의견 판단'
         Assert-ContainsText ([string]$feed3Headers[1]) '공동 문서 작성'
         Assert-ContainsText ([string]$feed3Headers[2]) '최종 확인'
@@ -3968,13 +4028,20 @@ try {
             $presentation = Get-DuoForgeInteractiveQuestionPresentationInternal -Question $presentationQuestion -Issue $presentationIssue
             $presentationMenuItems = @(Get-DuoForgeInteractiveQuestionMenuItemsInternal -Presentation $presentation -MaximumRounds 2)
             $normalizedMenuItems = @(ConvertTo-DuoForgeMenuItemsInternal -Items $presentationMenuItems)
+            $longQuestion = ConvertTo-DuoForgeHashtable -InputObject $presentationQuestion
+            $longQuestion.plainExplanation = (('빌드 버전 하한선과 패키지 하향 금지 조건이 사라졌습니다. ' * 24) + '핵심쟁점끝표식')
+            $longQuestion.question = (('복원 범위와 검증 단계를 함께 결정해야 합니다. ' * 18) + '요청끝표식')
+            $longQuestion.estimatedCost = '관련 문서 단계와 검증 단계를 다시 실행합니다.'
+            $longIssue = ConvertTo-DuoForgeHashtable -InputObject $presentationIssue
+            $longIssue.proposal = (('Gradle, AGP, NDK와 pubspec.yaml 하한선을 복원하고 diff를 확인합니다. ' * 20) + '제안끝표식')
+            $longPresentation = Get-DuoForgeInteractiveQuestionPresentationInternal -Question $longQuestion -Issue $longIssue
             $frames = foreach ($size in @(@(72, 20), @(80, 24), @(100, 30), @(120, 32))) {
                 $width = [int]$size[0]
                 $height = [int]$size[1]
                 foreach ($selectedIndex in 0..($normalizedMenuItems.Count - 1)) {
                     $cardRows = @(New-DuoForgeInteractiveQuestionCardRowsInternal -Question $presentationQuestion -Presentation $presentation -Width $width -Height $height)
-                    $menuLines = @(New-DuoForgeMenuFrameInternal -Items $normalizedMenuItems -Title '승인 요청: 번호로 선택하거나 O로 내 의견을 입력해 주세요.' -SelectedIndex $selectedIndex)
-                    $allLines = @('질문 검토 3/3 · 현재 배치 3개 · 뒤에 2개', '마지막 검토입니다. 이후 새 질문은 자동으로 묻지 않습니다.') + @($cardRows | ForEach-Object { [string]$_.text }) + @($menuLines | ForEach-Object { Limit-DuoForgeProgressTextInternal -Text ([string]$_) -Width ($width - 1) })
+                    $menuLines = @(New-DuoForgeMenuFrameInternal -Items $normalizedMenuItems -Title '승인 요청: 번호로 선택하거나 O로 내 의견을 입력해 주세요.' -SelectedIndex $selectedIndex -Width $width -Height $height)
+                    $allLines = @('질문 검토 3/3 · 현재 배치 3개 · 뒤에 2개', '마지막 검토입니다. 이후 새 질문은 자동으로 묻지 않습니다.') + @($cardRows | ForEach-Object { [string]$_.text }) + @($menuLines)
                     [ordered]@{
                         width = $width
                         height = $height
@@ -3984,6 +4051,16 @@ try {
                     }
                 }
             }
+            $detailFrames = foreach ($size in @(@(72, 20), @(80, 24), @(100, 30), @(120, 32))) {
+                $width = [int]$size[0]
+                $detailRows = @(New-DuoForgeInteractiveQuestionDetailRowsInternal -Question $longQuestion -Presentation $longPresentation -Issue $longIssue -Width $width)
+                [ordered]@{
+                    width = $width
+                    height = [int]$size[1]
+                    lines = @($detailRows | ForEach-Object { [string]$_.text })
+                    maximumWidth = (@($detailRows | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_.text) }) | Measure-Object -Maximum).Maximum
+                }
+            }
             [ordered]@{
                 merged = $merged
                 batch = Get-DuoForgePendingQuestionBatchInternal -Questions @($merged.questions)
@@ -3991,6 +4068,7 @@ try {
                 menuItems = $presentationMenuItems
                 alternativeItems = @(Get-DuoForgeInteractiveQuestionAlternativeMenuItemsInternal -MaximumRounds 2)
                 frames = @($frames)
+                detailFrames = @($detailFrames)
                 disagreement = Get-DuoForgeInteractiveQuestionPresentationInternal -Question $presentationQuestion -Issue $disagreementIssue
                 laterRejected = Get-DuoForgeInteractiveQuestionPresentationInternal -Question $presentationQuestion -Issue $laterRejectedIssue
                 legacy = Get-DuoForgeInteractiveQuestionPresentationInternal -Question $presentationQuestion -Issue $legacyIssue
@@ -4051,9 +4129,12 @@ try {
         Assert-ContainsText $cardResult.menuItems[2].detail '공통으로 적용할 전제'
         Assert-Equal $cardResult.menuItems[3].value 'other'
         Assert-Equal $cardResult.menuItems[3].shortcuts[0] 'M'
-        Assert-Equal $cardResult.alternativeItems[0].value 'round'
-        Assert-ContainsText $cardResult.alternativeItems[1].label '보충 조건'
-        Assert-ContainsText $cardResult.alternativeItems[1].detail '현재 질문의 답을 대신하지 않고'
+        Assert-ContainsText $cardResult.menuItems[3].label '전체 내용'
+        Assert-Equal $cardResult.alternativeItems[0].value 'detail'
+        Assert-ContainsText $cardResult.alternativeItems[0].label '질문 내용 전체 보기'
+        Assert-Equal $cardResult.alternativeItems[1].value 'round'
+        Assert-ContainsText $cardResult.alternativeItems[2].label '보충 조건'
+        Assert-ContainsText $cardResult.alternativeItems[2].detail '현재 질문의 답을 대신하지 않고'
         Assert-Equal $cardResult.alternativeItems[-1].value 'back-to-question'
         foreach ($frame in @($cardResult.frames)) {
             Assert-True ($frame.lines.Count -le [int]$frame.height) "$($frame.width)x$($frame.height) 질문 카드가 화면 높이를 넘었습니다."
@@ -4067,6 +4148,14 @@ try {
             if ([int]$frame.width -eq 72) {
                 Assert-ContainsText ($frame.lines -join ' ') '보장할 수 없습니다' '72x20에서 핵심 쟁점의 결론이 보이지 않습니다.'
             }
+        }
+        foreach ($frame in @($cardResult.detailFrames)) {
+            $detailText = $frame.lines -join ' '
+            Assert-True ([int]$frame.maximumWidth -lt [int]$frame.width) "$($frame.width)x$($frame.height) 질문 전체 내용이 화면 폭을 넘었습니다."
+            Assert-ContainsText $detailText '핵심쟁점끝표식' "$($frame.width)x$($frame.height) 전체 보기에서 핵심 쟁점 끝이 잘렸습니다."
+            Assert-ContainsText $detailText '제안끝표식' "$($frame.width)x$($frame.height) 전체 보기에서 제안 방향 끝이 잘렸습니다."
+            Assert-ContainsText $detailText '요청끝표식' "$($frame.width)x$($frame.height) 전체 보기에서 요청 내용 끝이 잘렸습니다."
+            Assert-ContainsText $detailText '선택지와 결과' "$($frame.width)x$($frame.height) 전체 보기에서 선택 결과가 보이지 않습니다."
         }
         Assert-ContainsText $cardResult.disagreement.aiConsensus '판단이 일치하지 않습니다'
         Assert-False ($cardResult.disagreement.aiConsensus -like '*모두*동의*')
@@ -4086,6 +4175,70 @@ try {
         Assert-Equal $cardResult.numericChoice.code 'A'
         Assert-Equal $cardResult.numericChoice.option $cardResult.legacyChoice.option
         Assert-Equal $cardResult.originalOptions[0] 'A: 제안 내용을 반영하고 마지막 문서 단계부터 다시 검증'
+    }
+
+    Test-Case 'D-040형 긴 질문은 넓은 화면에서 쟁점과 제안을 자르지 않고 섹션 본문을 분리한다' {
+        $surface = & $module {
+            $question = [ordered]@{
+                issueKey = 'D-040'
+                title = '빠진 실기기 검증'
+                question = 'AI가 제안한 해결 방향을 문서에 반영할지 선택해 주세요.'
+                options = @('A: AI가 제안한 수정 방향을 선택', 'B: 제안을 반영하지 않고 기존 요구를 유지')
+                recommendedOption = 'A'
+                safeDefault = 'A'
+                reasonNow = '실기기 검증 범위를 확정해야 문서 B를 다시 검증할 수 있습니다.'
+                plainExplanation = "v1.1 §14 '실기기 필수 검증 체크리스트'가 v1.2에서 통째로 삭제되었고 대체 항목이 없습니다. v1.1은 속삭이듯 작게 말할 때의 인식률, 생활 소음 환경에서의 인식률, 시스템 글자 크기 최대일 때 레이아웃, 구형 저사양 기기에서의 프레임, 스텝 전환 햅틱의 세기를 필수 검증으로 요구한 핵심전체끝"
+                codexOpinion = '실기기 체크리스트 복원을 권합니다.'
+                claudeOpinion = '빠진 검증 범위를 문제로 제기했습니다.'
+                reversibility = 'moderate'
+                confidence = 'high'
+                impactIfDeferred = '실기기 품질을 검증하지 않은 채 완료할 수 있습니다.'
+            }
+            $issue = [ordered]@{
+                issueId = 'D-040'; raisedBy = 'claude'; category = '검증 누락'; severity = 'major'; targetDocumentId = 'B'
+                claim = '실기기 필수 검증 체크리스트가 삭제되었습니다.'
+                proposal = 'v1.1 §14의 실기기 체크리스트를 별도 절로 복원하고, v1.2에서 새로 생긴 빠른·보통·느린 발화별 드리프트 오발동과 오프라인 진입 시 수동 복구 항목을 추가하는 제안전체끝'
+                resolutionStatus = 'AWAITING_USER'; blocking = $true; reviewerVerdicts = @(); editorialDecisions = @()
+            }
+            $presentation = Get-DuoForgeInteractiveQuestionPresentationInternal -Question $question -Issue $issue
+            $items = @(ConvertTo-DuoForgeMenuItemsInternal -Items @(Get-DuoForgeInteractiveQuestionMenuItemsInternal -Presentation $presentation -MaximumRounds 2))
+            $frames = foreach ($size in @(@(120, 32), @(160, 40))) {
+                $width = [int]$size[0]
+                $height = [int]$size[1]
+                $card = @(New-DuoForgeInteractiveQuestionCardRowsInternal -Question $question -Presentation $presentation -Width $width -Height $height | ForEach-Object { [string]$_.text })
+                $detail = @(New-DuoForgeInteractiveQuestionDetailRowsInternal -Question $question -Presentation $presentation -Issue $issue -Width $width | ForEach-Object { [string]$_.text })
+                $menu = @(New-DuoForgeMenuFrameInternal -Items $items -Title '선택 요청: 번호로 선택하거나 O로 내 의견을 입력해 주세요.' -SelectedIndex 0 -Width $width -Height $height)
+                $lines = @($card + $menu)
+                [ordered]@{
+                    width = $width
+                    height = $height
+                    card = $card
+                    detail = $detail
+                    lines = $lines
+                    maximumWidth = (@($lines | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text $_ }) | Measure-Object -Maximum).Maximum
+                }
+            }
+            return @($frames)
+        }
+
+        foreach ($frame in @($surface)) {
+            Assert-True ($frame.lines.Count -le [int]$frame.height) "$($frame.width)x$($frame.height) D-040 화면이 높이를 넘었습니다."
+            Assert-True ([int]$frame.maximumWidth -lt [int]$frame.width) "$($frame.width)x$($frame.height) D-040 화면이 폭을 넘었습니다."
+            $cardText = $frame.card -join "`n"
+            Assert-ContainsText $cardText '핵심전체끝' "$($frame.width)x$($frame.height)에서 핵심 쟁점이 잘렸습니다."
+            Assert-ContainsText $cardText '제안전체끝' "$($frame.width)x$($frame.height)에서 제안 방향이 잘렸습니다."
+            Assert-NotContainsText $cardText '…' "$($frame.width)x$($frame.height) D-040 카드에 불필요한 말줄임표가 있습니다."
+            $coreIndex = [Array]::IndexOf([object[]]$frame.card, '── 핵심 쟁점')
+            $proposalIndex = [Array]::IndexOf([object[]]$frame.card, '── 제안 방향')
+            $requestIndex = [Array]::IndexOf([object[]]$frame.card, '── 사용자에게 필요한 결정')
+            Assert-True ($coreIndex -ge 0 -and [string]$frame.card[$coreIndex + 1] -match '^  \S') '핵심 쟁점 제목과 2칸 들여쓴 본문이 분리되지 않았습니다.'
+            Assert-True ($proposalIndex -ge 0 -and [string]$frame.card[$proposalIndex + 1] -match '^  \S') '제안 방향 제목과 2칸 들여쓴 본문이 분리되지 않았습니다.'
+            Assert-True ($requestIndex -ge 0 -and [string]$frame.card[$requestIndex + 1] -match '^  \S') '결정 요청 제목과 2칸 들여쓴 본문이 분리되지 않았습니다.'
+            Assert-ContainsText ($frame.lines -join "`n") '권장 · 결과:' '카드에서 중복 권장 섹션을 생략해도 메뉴의 권장 정보는 남아야 합니다.'
+            $detailProposalIndex = [Array]::IndexOf([object[]]$frame.detail, '── 제안 방향')
+            Assert-True ($detailProposalIndex -ge 0 -and [string]$frame.detail[$detailProposalIndex + 1] -match '^  \S') '전체 보기에서도 제안 방향이 독립 섹션과 2칸 본문으로 분리되어야 합니다.'
+            Assert-ContainsText ($frame.detail -join "`n") '제안전체끝' '전체 보기에서 제안 방향 끝이 잘렸습니다.'
+        }
     }
 
     Test-Case '한 질문에 답하면 남은 질문으로 이어지고 일시정지 메뉴에서도 다시 들어갈 수 있다' {
@@ -4126,9 +4279,12 @@ try {
                 if ([string]$title -eq '먼저 확인할 요청을 선택해 주세요.') { return '0' }
                 if ([string]$title -like '*번호로 선택하거나 O로 내 의견을 입력해 주세요.*') {
                     $capture.questionMenus = [int]$capture.questionMenus + 1
-                    if ([int]$capture.questionMenus -eq 1) { return 'answer:A' }
+                    if ([int]$capture.questionMenus -eq 1) { return 'other' }
+                    if ([int]$capture.questionMenus -eq 2) { return 'answer:A' }
                     return 'back'
                 }
+                if ([string]$title -eq '다른 방법을 선택해 주세요.') { return 'detail' }
+                if ([string]$title -eq '질문 내용을 모두 확인했습니다.') { return 'back' }
                 return $escapeValue
             }.GetNewClosure()
             Invoke-DuoForgeInteractiveQuestion -Run $currentRun -MenuInvoker $menuInvoker
@@ -4136,10 +4292,11 @@ try {
             $state = Read-DuoForgeJson -Path (Join-Path ([string]$currentRun.runDirectory) 'state.json')
             [ordered]@{ questionMenus = $capture.questionMenus; titles = @($capture.titles); pendingCount = $pendingQuestions.Count; status = [string]$state.status }
         } $run.runId $workspace
-        Assert-Equal $followup.questionMenus 2
+        Assert-Equal $followup.questionMenus 3
         Assert-Equal $followup.pendingCount 1
         Assert-Equal $followup.status 'PAUSED_USER'
-        Assert-True (@($followup.titles | Where-Object { $_ -like '*번호로 선택하거나 O로 내 의견을 입력해 주세요.*' }).Count -eq 2)
+        Assert-True (@($followup.titles | Where-Object { $_ -like '*번호로 선택하거나 O로 내 의견을 입력해 주세요.*' }).Count -eq 3)
+        Assert-True ('질문 내용을 모두 확인했습니다.' -in @($followup.titles))
 
         $pausedMenu = & $module {
             param($runId, $runDirectory, $resultsRoot)
@@ -4431,7 +4588,7 @@ try {
         Assert-Equal @($resolvedIssue.history | Where-Object { $_.event -eq 'USER_DECISION_APPLIED' -and $_.decisionId -eq 'decision-current' }).Count 1
     }
 
-    Test-Case '사용자는 결정을 변경하고 자유 제약을 확인 후 적용하며 3라운드를 추가할 수 있다' {
+    Test-Case '사용자는 이전 질문과 현재 답변을 확인해 결정을 변경하고 자유 제약 및 3라운드를 사용할 수 있다' {
         $input = New-MarkdownFile -Path (Join-Path $tempRoot 'decision-round\input\brief.md')
         $workspace = Join-Path $tempRoot 'decision-round-results'
         $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
@@ -4455,9 +4612,91 @@ try {
         $pending = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'decisions\pending.json') | ConvertFrom-Json -Depth 50
         $issueId = [string]$pending.questions[0].issueKey
         $first = Set-DuoForgeIssueAnswer -RunId $run.runId -IssueId $issueId -Choice A -ResultsRoot $workspace
+        $changeSurface = & $module {
+            param($runId, $resultsRoot)
+            $currentRun = ConvertTo-DuoForgeHashtable -InputObject (Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $resultsRoot)
+            $capture = [ordered]@{ calls = 0; listItems = @(); optionItems = @(); optionTitle = ''; initialIndex = -1 }
+            $menuInvoker = {
+                param($items, $title, $escapeValue, $initialSelectedIndex)
+                $capture.calls++
+                if ($capture.calls -eq 1) {
+                    $capture.listItems = @($items)
+                    return '0'
+                }
+                $capture.optionItems = @($items)
+                $capture.optionTitle = [string]$title
+                $capture.initialIndex = [int]$initialSelectedIndex
+                return ''
+            }.GetNewClosure()
+            Invoke-DuoForgeInteractiveDecisionChangeInternal -Run $currentRun -MenuInvoker $menuInvoker
+
+            $records = @(Read-DuoForgeJsonLines -Path (Join-Path ([string]$currentRun.runDirectory) 'decisions\user-answers.jsonl') -AllowMissing)
+            $decision = @(Get-DuoForgeEffectiveUserDecisionsInternal -Records $records | Where-Object { [string]$_.action -eq 'ANSWER' } | Select-Object -First 1)[0]
+            $issue = @($currentRun.issues.issues | Where-Object { [string]$_.issueId -eq [string]$decision.issueId } | Select-Object -First 1)[0]
+            $context = Get-DuoForgeInteractiveDecisionChangeContextInternal -Decision $decision -Issue $issue
+            $normalizedOptions = @(ConvertTo-DuoForgeMenuItemsInternal -Items @($capture.optionItems))
+            $frames = foreach ($size in @(@(72, 20), @(80, 24), @(100, 30), @(120, 32))) {
+                $width = [int]$size[0]
+                $height = [int]$size[1]
+                $contextRows = @(New-DuoForgeInteractiveDecisionChangeRowsInternal -Context $context -Width $width -Height $height)
+                $menuLines = @(New-DuoForgeMenuFrameInternal -Items $normalizedOptions -Title $capture.optionTitle -SelectedIndex $capture.initialIndex)
+                $allLines = @($contextRows | ForEach-Object { [string]$_.text }) + @($menuLines | ForEach-Object { Limit-DuoForgeProgressTextInternal -Text ([string]$_) -Width ($width - 1) })
+                [ordered]@{
+                    width = $width
+                    height = $height
+                    lines = @($allLines)
+                    maximumWidth = (@($allLines | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) }) | Measure-Object -Maximum).Maximum
+                }
+            }
+            $legacyDecision = [ordered]@{
+                issueId = 'D-LEGACY'; action = 'ANSWER'; revision = 1
+                claim = '오프라인 요구와 기본 음성 인식의 동작이 충돌합니다.'
+                proposal = '사전 기술 시험 뒤 지원 범위를 확정합니다.'
+                choiceCode = 'A'; selectedOption = 'A: 제안 내용을 반영하고 마지막 문서 단계부터 다시 검증'
+                questionOptions = @('A: 제안 내용을 반영하고 마지막 문서 단계부터 다시 검증', 'B: 현재 요구를 유지하고 반대 근거를 고려해 다시 검증')
+                recommendedOption = 'A'
+            }
+            $legacyIssue = [ordered]@{
+                issueId = 'D-LEGACY'; targetDocumentId = 'B'; category = 'consistency/privacy'; raisedBy = 'codex'
+                claim = $legacyDecision.claim; proposal = $legacyDecision.proposal; reviewerVerdicts = @(); resolutionStatus = 'AWAITING_USER'
+                editorialDecisions = @([ordered]@{ performedBy = 'claude'; disposition = 'ACCEPTED'; targetDocumentId = 'B'; locations = @('B §3.1') })
+            }
+            [ordered]@{
+                listItems = @($capture.listItems)
+                optionItems = @($capture.optionItems)
+                optionTitle = $capture.optionTitle
+                initialIndex = $capture.initialIndex
+                context = $context
+                frames = @($frames)
+                legacy = Get-DuoForgeInteractiveDecisionChangeContextInternal -Decision $legacyDecision -Issue $legacyIssue
+            }
+        } $run.runId $workspace
         $changed = Set-DuoForgeIssueAnswer -RunId $run.runId -IssueId $issueId -Choice B -ResultsRoot $workspace -ReplacePrevious
         Assert-Equal $first.revision 1
         Assert-Equal $changed.revision 2
+        Assert-ContainsText ([string]$changeSurface.listItems[0].label) ("{0} · 최종 문서 · 배포 전략" -f $issueId)
+        Assert-ContainsText ([string]$changeSurface.listItems[0].detail) '현재 답변 · 1안 · 점진 배포'
+        Assert-Equal $changeSurface.optionTitle '새 답변을 선택하거나 O로 내 의견을 입력해 주세요.'
+        Assert-Equal $changeSurface.initialIndex 0
+        Assert-ContainsText ([string]$changeSurface.optionItems[0].detail) '현재 답변입니다.'
+        Assert-True ([bool]$changeSurface.context.questionWasStored)
+        Assert-Equal $changeSurface.context.requestPrompt '어떤 전략을 선택할까요?'
+        Assert-Equal $changeSurface.context.currentAnswer '1안 · 점진 배포'
+        foreach ($frame in @($changeSurface.frames)) {
+            Assert-True ($frame.lines.Count -le [int]$frame.height) "$($frame.width)x$($frame.height) 답변 변경 화면이 높이를 넘었습니다."
+            Assert-True ([int]$frame.maximumWidth -lt [int]$frame.width) "$($frame.width)x$($frame.height) 답변 변경 화면이 폭을 넘었습니다."
+            $frameText = $frame.lines -join ' '
+            Assert-ContainsText $frameText '── 원래 질문'
+            Assert-ContainsText $frameText '어떤 전략을 선택할까요?'
+            Assert-ContainsText $frameText '── 핵심 쟁점'
+            Assert-ContainsText $frameText '배포 전략 선택이 필요합니다.'
+            Assert-ContainsText $frameText '── 현재 답변'
+            Assert-ContainsText $frameText '1안 · 점진 배포'
+        }
+        Assert-False ([bool]$changeSurface.legacy.questionWasStored)
+        Assert-ContainsText $changeSurface.legacy.legacyNote '저장된 쟁점과 선택지로 복원'
+        Assert-ContainsText $changeSurface.legacy.requestPrompt '잠정 반영한 수정 방향을 최종 결정으로 승인'
+        Assert-Equal $changeSurface.legacy.currentAnswer '1안 · AI가 잠정 반영한 수정 방향을 승인'
         $decisionAudit = & $module {
             param($directory)
             $records = @(Read-DuoForgeJsonLines -Path (Join-Path $directory 'decisions\user-answers.jsonl') -AllowMissing)
@@ -4466,6 +4705,10 @@ try {
         Assert-Equal @($decisionAudit.records | Where-Object { $_.action -eq 'ANSWER' }).Count 2
         Assert-Equal @($decisionAudit.effective | Where-Object { $_.action -eq 'ANSWER' }).Count 1
         Assert-Equal @($decisionAudit.effective | Where-Object { $_.action -eq 'ANSWER' })[0].selectedOption '일괄 배포'
+        foreach ($answerRecord in @($decisionAudit.records | Where-Object { $_.action -eq 'ANSWER' })) {
+            Assert-Equal $answerRecord.questionTitle '배포 전략'
+            Assert-Equal $answerRecord.questionText '어떤 전략을 선택할까요?'
+        }
         $multipleIssueDecisions = & $module {
             $records = @(
                 [ordered]@{ action = 'ANSWER'; issueId = 'D-001'; revision = 1; selectedOption = '첫 답변'; recordedAt = '2026-07-27T00:00:00Z' },
@@ -4914,8 +5157,10 @@ Setext 결론
         Assert-True ([bool]$allowed.valid) ($allowed.errors | ConvertTo-Json -Depth 20 -Compress)
         Assert-True ($allowed.executionPlan.contextBatchCount -gt 0)
         $planText = & $module { param($validation) (& { Write-DuoForgeExecutionPlan -Validation $validation } 6>&1 | Out-String) } $allowed
-        Assert-ContainsText $planText '나눠서 분석할 묶음:'
-        Assert-ContainsText $planText 'Codex 호출: 기본 '
+        Assert-ContainsText $planText '분석 묶음'
+        Assert-ContainsText $planText '── 호출 예산'
+        Assert-ContainsText $planText 'Codex'
+        Assert-ContainsText $planText '기본 '
         Assert-ContainsText $planText '재시도 최대 '
         Assert-ContainsText $planText '총 최대 '
         Assert-NotContainsText $planText '최악'

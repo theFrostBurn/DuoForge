@@ -595,9 +595,10 @@ function Read-DuoForgeModelChoiceInternal {
 
     $options = if ($null -ne $SelectionOptions) { $SelectionOptions } else { Get-DuoForgeProviderSelectionOptionsInternal -Provider $Provider }
     while ($true) {
-        Write-Host ("목록 출처: {0}" -f $options.catalogSource) -ForegroundColor DarkGray
+        $layout = Get-DuoForgeDisplayLayoutInternal
+        Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeFieldRowsInternal -Label '목록 출처' -Value ([string]$options.catalogSource) -Layout $layout -Indent 0 -KeyWidth 10 -Role 'meta') -Layout $layout
         if ([string]$options.catalogSource -like '*fallback*') {
-            Write-Host 'CLI의 현재 목록을 읽지 못해 제한된 대체 목록을 표시합니다.' -ForegroundColor Yellow
+            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '현재 모델 목록을 읽지 못했습니다.' -Message '검증된 제한 목록으로 선택을 계속합니다.' -Layout $layout) -Layout $layout
         }
         $items = [System.Collections.Generic.List[object]]::new()
         $recommendedIndex = 0
@@ -617,7 +618,7 @@ function Read-DuoForgeModelChoiceInternal {
         if ($choice -eq 'custom') {
             $model = $(if ($null -ne $InputReader) { [string](& $InputReader 'CLI에 전달할 정확한 모델명') } else { [string](Read-Host 'CLI에 전달할 정확한 모델명') }).Trim()
             if (Test-DuoForgeModelIdentifierInternal -Model $model) { return $model }
-            Write-Host '모델명은 영문자나 숫자로 시작하고 영문자, 숫자, 점, 밑줄, 콜론, 슬래시, 대괄호, 하이픈만 사용할 수 있습니다.' -ForegroundColor Yellow
+            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '모델명 형식이 올바르지 않습니다.' -Message '영문자나 숫자로 시작하고 영문자, 숫자, 점, 밑줄, 콜론, 슬래시, 대괄호, 하이픈만 사용할 수 있습니다.' -Layout $layout) -Layout $layout
             continue
         }
     }
@@ -673,7 +674,8 @@ function Complete-DuoForgeInteractiveProviderSelectionsInternal {
             if ($null -eq $model) { return $null }
         }
         else {
-            Write-Host ("{0} 모델: {1}" -f $options.displayName, $model)
+            $layout = Get-DuoForgeDisplayLayoutInternal
+            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeFieldRowsInternal -Label ("{0} 모델" -f $options.displayName) -Value ([string]$model) -Layout $layout -KeyWidth 16) -Layout $layout
         }
 
         $supportedEfforts = @(Get-DuoForgeReasoningEffortsForModelInternal -Options $options -Model $model)
@@ -682,7 +684,7 @@ function Complete-DuoForgeInteractiveProviderSelectionsInternal {
             if ($null -eq $effort) { return $null }
         }
         else {
-            Write-Host ("{0} 분석 깊이: {1}" -f $options.displayName, $effort)
+            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeFieldRowsInternal -Label ("{0} 분석 깊이" -f $options.displayName) -Value ([string]$effort) -Layout $layout -KeyWidth 16) -Layout $layout
         }
 
         $result[$provider] = [ordered]@{
