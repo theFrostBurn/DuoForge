@@ -549,6 +549,30 @@ try {
         foreach ($token in @('OK', 'Up/Down', '*', '~', 'o', '>', '#-', '...', '--')) { Assert-ContainsText $surface.asciiText $token }
     }
 
+    Test-Case '정보 블록과 다음 메뉴 사이에는 중복 없는 전환 여백 한 행을 둔다' {
+        $surface = & $module {
+            $layout = Get-DuoForgeDisplayLayoutInternal -Width 72 -Height 20 -NoColor
+            $contextRows = @(New-DuoForgeTextRowsInternal -Text '현재 답변 본문' -Layout $layout)
+            $once = @(Add-DuoForgeTrailingSpacerRowInternal -Rows $contextRows)
+            $twice = @(Add-DuoForgeTrailingSpacerRowInternal -Rows $once)
+            $items = @(ConvertTo-DuoForgeMenuItemsInternal -Items @(
+                [ordered]@{ value = '1'; label = '첫 번째 선택'; detail = '작은 화면에서도 이 설명은 한 행까지만 사용합니다.'; shortcuts = @('1'); enabled = $true }
+                [ordered]@{ value = 'B'; label = '이전으로'; shortcuts = @('B'); enabled = $true }
+            ))
+            [ordered]@{
+                once = @($once | ForEach-Object { [string]$_.text })
+                twice = @($twice | ForEach-Object { [string]$_.text })
+                regularMenu = @(New-DuoForgeMenuFrameInternal -Items $items -Title '다음 메뉴' -Width 72 -Height 20)
+                transitionMenu = @(New-DuoForgeMenuFrameInternal -Items $items -Title '다음 메뉴' -Width 72 -Height 20 -ContextTransition)
+            }
+        }
+
+        Assert-Equal $surface.once.Count 2
+        Assert-Equal ([string]$surface.once[-1]) ''
+        Assert-Equal $surface.twice.Count 2 '이미 있는 전환 여백이 중복 추가되었습니다.'
+        Assert-True ($surface.transitionMenu.Count -le $surface.regularMenu.Count) '작은 화면의 전환 메뉴가 기존 메뉴보다 커졌습니다.'
+    }
+
     Test-Case '안전 확인 토큰은 공통 메뉴와 분리된 대소문자 구분 텍스트 계약으로 남는다' {
         $interactiveSource = Get-Content -LiteralPath (Join-Path $projectRoot 'src\DuoForge\Private\14.Interactive.ps1') -Raw
         foreach ($token in @('LIVE', 'PARTIAL', 'ROUND', 'APPLY')) {
@@ -4031,6 +4055,13 @@ try {
             $longQuestion = ConvertTo-DuoForgeHashtable -InputObject $presentationQuestion
             $longQuestion.plainExplanation = (('빌드 버전 하한선과 패키지 하향 금지 조건이 사라졌습니다. ' * 24) + '핵심쟁점끝표식')
             $longQuestion.question = (('복원 범위와 검증 단계를 함께 결정해야 합니다. ' * 18) + '요청끝표식')
+            $longQuestion.options = @(
+                'A: ' + (('단계별 복원과 검증을 선택합니다. ' * 24) + '선택지끝표식'),
+                'B: 기존 요구를 유지합니다.'
+            )
+            $longQuestion.codexOpinion = (('Codex는 누락된 조건을 복원해야 한다고 판단했습니다. ' * 20) + '코덱스의견끝표식')
+            $longQuestion.claudeOpinion = (('Claude는 데이터 스키마와 검증 규칙을 함께 복원해야 한다고 판단했습니다. ' * 18) + '클로드의견끝표식')
+            $longQuestion.impactIfDeferred = (('정의를 보류하면 구현과 검증 기준이 서로 달라질 수 있습니다. ' * 20) + '보류영향끝표식')
             $longQuestion.estimatedCost = '관련 문서 단계와 검증 단계를 다시 실행합니다.'
             $longIssue = ConvertTo-DuoForgeHashtable -InputObject $presentationIssue
             $longIssue.proposal = (('Gradle, AGP, NDK와 pubspec.yaml 하한선을 복원하고 diff를 확인합니다. ' * 20) + '제안끝표식')
@@ -4039,13 +4070,14 @@ try {
                 $width = [int]$size[0]
                 $height = [int]$size[1]
                 foreach ($selectedIndex in 0..($normalizedMenuItems.Count - 1)) {
-                    $cardRows = @(New-DuoForgeInteractiveQuestionCardRowsInternal -Question $presentationQuestion -Presentation $presentation -Width $width -Height $height)
-                    $menuLines = @(New-DuoForgeMenuFrameInternal -Items $normalizedMenuItems -Title '승인 요청: 번호로 선택하거나 O로 내 의견을 입력해 주세요.' -SelectedIndex $selectedIndex -Width $width -Height $height)
+                    $cardRows = @(Add-DuoForgeTrailingSpacerRowInternal -Rows @(New-DuoForgeInteractiveQuestionCardRowsInternal -Question $presentationQuestion -Presentation $presentation -Width $width -Height $height))
+                    $menuLines = @(New-DuoForgeMenuFrameInternal -Items $normalizedMenuItems -Title '승인 요청: 번호로 선택하거나 O로 내 의견을 입력해 주세요.' -SelectedIndex $selectedIndex -Width $width -Height $height -ContextTransition)
                     $allLines = @('질문 검토 3/3 · 현재 배치 3개 · 뒤에 2개', '마지막 검토입니다. 이후 새 질문은 자동으로 묻지 않습니다.') + @($cardRows | ForEach-Object { [string]$_.text }) + @($menuLines)
                     [ordered]@{
                         width = $width
                         height = $height
                         selectedIndex = $selectedIndex
+                        cardLines = @($cardRows | ForEach-Object { [string]$_.text })
                         lines = @($allLines)
                         maximumWidth = (@($allLines | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) }) | Measure-Object -Maximum).Maximum
                     }
@@ -4053,7 +4085,7 @@ try {
             }
             $detailFrames = foreach ($size in @(@(72, 20), @(80, 24), @(100, 30), @(120, 32))) {
                 $width = [int]$size[0]
-                $detailRows = @(New-DuoForgeInteractiveQuestionDetailRowsInternal -Question $longQuestion -Presentation $longPresentation -Issue $longIssue -Width $width)
+                $detailRows = @(Add-DuoForgeTrailingSpacerRowInternal -Rows @(New-DuoForgeInteractiveQuestionDetailRowsInternal -Question $longQuestion -Presentation $longPresentation -Issue $longIssue -Width $width))
                 [ordered]@{
                     width = $width
                     height = [int]$size[1]
@@ -4145,8 +4177,14 @@ try {
             Assert-True (@($frame.lines | Where-Object { $_ -like '*[[]1[]]*AI가 잠정*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 1안이 보이지 않습니다."
             Assert-True (@($frame.lines | Where-Object { $_ -like '*[[]2[]]*잠정 수정*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 2안이 보이지 않습니다."
             Assert-True (@($frame.lines | Where-Object { $_ -like '*[[]O[]]*내 의견 직접 입력*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 주관식 입력 동작이 보이지 않습니다."
+            Assert-Equal ([string]$frame.cardLines[-1]) '' "$($frame.width)x$($frame.height) 질문 카드와 답변 메뉴 사이의 전환 여백이 없습니다."
+            Assert-False ([string]::IsNullOrWhiteSpace([string]$frame.cardLines[-2])) "$($frame.width)x$($frame.height) 질문 카드 끝에 전환 여백이 중복되었습니다."
+            foreach ($sectionTitle in @('── 핵심 쟁점', '── AI 검토와 문서 처리', '── 사용자에게 필요한 결정')) {
+                $sectionIndex = [Array]::IndexOf([object[]]$frame.lines, $sectionTitle)
+                Assert-True ($sectionIndex -ge 0 -and $sectionIndex + 1 -lt $frame.lines.Count -and [string]$frame.lines[$sectionIndex + 1] -match '^  \S') "$($frame.width)x$($frame.height)에서 $sectionTitle 제목과 본문이 분리되지 않았습니다."
+            }
             if ([int]$frame.width -eq 72) {
-                Assert-ContainsText ($frame.lines -join ' ') '보장할 수 없습니다' '72x20에서 핵심 쟁점의 결론이 보이지 않습니다.'
+                Assert-ContainsText (($frame.lines -join ' ') -replace '\s+', ' ') '보장할 수 없습니다' '72x20에서 핵심 쟁점의 결론이 보이지 않습니다.'
             }
         }
         foreach ($frame in @($cardResult.detailFrames)) {
@@ -4156,6 +4194,11 @@ try {
             Assert-ContainsText $detailText '제안끝표식' "$($frame.width)x$($frame.height) 전체 보기에서 제안 방향 끝이 잘렸습니다."
             Assert-ContainsText $detailText '요청끝표식' "$($frame.width)x$($frame.height) 전체 보기에서 요청 내용 끝이 잘렸습니다."
             Assert-ContainsText $detailText '선택지와 결과' "$($frame.width)x$($frame.height) 전체 보기에서 선택 결과가 보이지 않습니다."
+            Assert-ContainsText $detailText '선택지끝표식' "$($frame.width)x$($frame.height) 전체 보기에서 긴 선택지 끝이 잘렸습니다."
+            Assert-ContainsText $detailText '코덱스의견끝표식' "$($frame.width)x$($frame.height) 전체 보기에서 Codex 의견 끝이 잘렸습니다."
+            Assert-ContainsText $detailText '클로드의견끝표식' "$($frame.width)x$($frame.height) 전체 보기에서 Claude 의견 끝이 잘렸습니다."
+            Assert-ContainsText $detailText '보류영향끝표식' "$($frame.width)x$($frame.height) 전체 보기에서 보류 영향 끝이 잘렸습니다."
+            Assert-Equal ([string]$frame.lines[-1]) '' "$($frame.width)x$($frame.height) 질문 전체 보기와 돌아가기 메뉴 사이의 전환 여백이 없습니다."
         }
         Assert-ContainsText $cardResult.disagreement.aiConsensus '판단이 일치하지 않습니다'
         Assert-False ($cardResult.disagreement.aiConsensus -like '*모두*동의*')
@@ -4238,6 +4281,48 @@ try {
             $detailProposalIndex = [Array]::IndexOf([object[]]$frame.detail, '── 제안 방향')
             Assert-True ($detailProposalIndex -ge 0 -and [string]$frame.detail[$detailProposalIndex + 1] -match '^  \S') '전체 보기에서도 제안 방향이 독립 섹션과 2칸 본문으로 분리되어야 합니다.'
             Assert-ContainsText ($frame.detail -join "`n") '제안전체끝' '전체 보기에서 제안 방향 끝이 잘렸습니다.'
+        }
+    }
+
+    Test-Case '추가 자료 요청은 목록을 요약하고 선택한 쟁점과 필요한 자료를 끝까지 보여준다' {
+        $surface = & $module {
+            $issue = [ordered]@{
+                issueId = 'D-EVIDENCE-001'; targetDocumentId = 'B'; category = 'regression/testability'; resolutionStatus = 'AWAITING_EVIDENCE'
+                claim = (('데이터 스키마의 검증 기준을 확인할 근거가 필요합니다. ' * 24) + '자료쟁점끝표식')
+                proposal = (('prayers.json과 sequence.json의 실제 예시 및 step_index 재계산 검증 결과를 제공해 주세요. ' * 22) + '필요자료끝표식')
+            }
+            $capture = [ordered]@{ items = @() }
+            $menuInvoker = {
+                param($items, $title, $escapeValue, $initialSelectedIndex)
+                $capture.items = @($items)
+                return 'B'
+            }.GetNewClosure()
+            Invoke-DuoForgeInteractiveEvidence -Run ([ordered]@{ issues = [ordered]@{ issues = @($issue) } }) -MenuInvoker $menuInvoker
+            $frames = foreach ($width in @(72, 80, 100, 120, 160)) {
+                $lines = @(Add-DuoForgeTrailingSpacerRowInternal -Rows @(New-DuoForgeInteractiveEvidenceIssueRowsInternal -Issue $issue -Width $width -IncludeHeader) | ForEach-Object { [string]$_.text })
+                [ordered]@{
+                    width = $width
+                    lines = @($lines)
+                    maximumWidth = (@($lines | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) }) | Measure-Object -Maximum).Maximum
+                }
+            }
+            [ordered]@{ items = @($capture.items); frames = @($frames) }
+        }
+
+        Assert-ContainsText ([string]$surface.items[0].label) 'D-EVIDENCE-001 · 문서 B · 빠진 데이터·검증 정의'
+        Assert-NotContainsText ([string]$surface.items[0].label) '데이터 스키마의 검증 기준'
+        Assert-ContainsText ([string]$surface.items[0].detail) '줄이지 않고 보여줍니다'
+        foreach ($frame in @($surface.frames)) {
+            Assert-True ([int]$frame.maximumWidth -lt [int]$frame.width) "$($frame.width)열 자료 요청 상세가 폭을 넘었습니다."
+            $frameText = $frame.lines -join "`n"
+            Assert-ContainsText $frameText '자료쟁점끝표식' "$($frame.width)열에서 자료 요청 쟁점 끝이 잘렸습니다."
+            Assert-ContainsText $frameText '필요자료끝표식' "$($frame.width)열에서 필요한 자료 끝이 잘렸습니다."
+            Assert-NotContainsText $frameText '…' "$($frame.width)열 자료 요청 상세에 불필요한 말줄임표가 있습니다."
+            Assert-Equal ([string]$frame.lines[-1]) '' "$($frame.width)열 자료 상세와 경로 선택 메뉴 사이의 전환 여백이 없습니다."
+            foreach ($sectionTitle in @('── 핵심 쟁점', '── 필요한 자료')) {
+                $sectionIndex = [Array]::IndexOf([object[]]$frame.lines, $sectionTitle)
+                Assert-True ($sectionIndex -ge 0 -and $sectionIndex + 1 -lt $frame.lines.Count -and [string]$frame.lines[$sectionIndex + 1] -match '^  \S') "$($frame.width)열 자료 요청 상세에서 $sectionTitle 제목과 본문이 분리되지 않았습니다."
+            }
         }
     }
 
@@ -4638,14 +4723,35 @@ try {
             $frames = foreach ($size in @(@(72, 20), @(80, 24), @(100, 30), @(120, 32))) {
                 $width = [int]$size[0]
                 $height = [int]$size[1]
-                $contextRows = @(New-DuoForgeInteractiveDecisionChangeRowsInternal -Context $context -Width $width -Height $height)
-                $menuLines = @(New-DuoForgeMenuFrameInternal -Items $normalizedOptions -Title $capture.optionTitle -SelectedIndex $capture.initialIndex)
-                $allLines = @($contextRows | ForEach-Object { [string]$_.text }) + @($menuLines | ForEach-Object { Limit-DuoForgeProgressTextInternal -Text ([string]$_) -Width ($width - 1) })
+                $contextRows = @(Add-DuoForgeTrailingSpacerRowInternal -Rows @(New-DuoForgeInteractiveDecisionChangeRowsInternal -Context $context -Width $width -Height $height))
+                $menuLines = @(New-DuoForgeMenuFrameInternal -Items $normalizedOptions -Title $capture.optionTitle -SelectedIndex $capture.initialIndex -Width $width -Height $height -ContextTransition)
+                $contextLines = @($contextRows | ForEach-Object { [string]$_.text })
+                $allLines = @($contextLines) + @($menuLines | ForEach-Object { Limit-DuoForgeProgressTextInternal -Text ([string]$_) -Width ($width - 1) })
                 [ordered]@{
                     width = $width
                     height = $height
+                    contextLines = @($contextLines)
                     lines = @($allLines)
                     maximumWidth = (@($allLines | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) }) | Measure-Object -Maximum).Maximum
+                }
+            }
+            $longContext = [ordered]@{
+                issueId = 'D-041'; targetLabel = '문서 B'; subjectLabel = '빠진 데이터·검증 정의'
+                requestPrompt = (('콘텐츠 데이터 스키마와 재계산 규칙을 어떻게 복원할지 결정해 주세요. ' * 18) + '원래질문끝표식')
+                legacyNote = ''
+                coreIssue = (('assets/liturgy 구조, prayers.json과 sequence.json 항목 스키마, optional_group 및 step_index 재계산 규칙이 삭제되었습니다. ' * 18) + '핵심쟁점끝표식')
+                currentAnswer = (('1안 · AI가 제안한 데이터 스키마와 검증 규칙을 모두 복원합니다. ' * 18) + '현재답변끝표식')
+                options = @()
+            }
+            $longFrames = foreach ($size in @(@(72, 20), @(80, 24), @(100, 30), @(120, 32), @(160, 40))) {
+                $width = [int]$size[0]
+                $height = [int]$size[1]
+                $lines = @(New-DuoForgeInteractiveDecisionChangeRowsInternal -Context $longContext -Width $width -Height $height | ForEach-Object { [string]$_.text })
+                [ordered]@{
+                    width = $width
+                    height = $height
+                    lines = @($lines)
+                    maximumWidth = (@($lines | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) }) | Measure-Object -Maximum).Maximum
                 }
             }
             $legacyDecision = [ordered]@{
@@ -4668,6 +4774,7 @@ try {
                 initialIndex = $capture.initialIndex
                 context = $context
                 frames = @($frames)
+                longFrames = @($longFrames)
                 legacy = Get-DuoForgeInteractiveDecisionChangeContextInternal -Decision $legacyDecision -Issue $legacyIssue
             }
         } $run.runId $workspace
@@ -4683,7 +4790,6 @@ try {
         Assert-Equal $changeSurface.context.requestPrompt '어떤 전략을 선택할까요?'
         Assert-Equal $changeSurface.context.currentAnswer '1안 · 점진 배포'
         foreach ($frame in @($changeSurface.frames)) {
-            Assert-True ($frame.lines.Count -le [int]$frame.height) "$($frame.width)x$($frame.height) 답변 변경 화면이 높이를 넘었습니다."
             Assert-True ([int]$frame.maximumWidth -lt [int]$frame.width) "$($frame.width)x$($frame.height) 답변 변경 화면이 폭을 넘었습니다."
             $frameText = $frame.lines -join ' '
             Assert-ContainsText $frameText '── 원래 질문'
@@ -4692,6 +4798,24 @@ try {
             Assert-ContainsText $frameText '배포 전략 선택이 필요합니다.'
             Assert-ContainsText $frameText '── 현재 답변'
             Assert-ContainsText $frameText '1안 · 점진 배포'
+            Assert-Equal ([string]$frame.contextLines[-1]) '' "$($frame.width)x$($frame.height) 답변 변경 상세와 새 답변 메뉴 사이의 전환 여백이 없습니다."
+            Assert-False ([string]::IsNullOrWhiteSpace([string]$frame.contextLines[-2])) "$($frame.width)x$($frame.height) 답변 변경 상세 끝에 전환 여백이 중복되었습니다."
+            foreach ($sectionTitle in @('── 원래 질문', '── 핵심 쟁점', '── 현재 답변')) {
+                $sectionIndex = [Array]::IndexOf([object[]]$frame.contextLines, $sectionTitle)
+                Assert-True ($sectionIndex -ge 0 -and $sectionIndex + 1 -lt $frame.contextLines.Count -and [string]$frame.contextLines[$sectionIndex + 1] -match '^  \S') "$($frame.width)x$($frame.height) 답변 변경 화면에서 $sectionTitle 제목과 본문이 분리되지 않았습니다."
+            }
+        }
+        foreach ($frame in @($changeSurface.longFrames)) {
+            Assert-True ([int]$frame.maximumWidth -lt [int]$frame.width) "$($frame.width)x$($frame.height) 긴 답변 변경 화면이 폭을 넘었습니다."
+            $frameText = $frame.lines -join "`n"
+            Assert-ContainsText $frameText '원래질문끝표식' "$($frame.width)x$($frame.height)에서 원래 질문 끝이 잘렸습니다."
+            Assert-ContainsText $frameText '핵심쟁점끝표식' "$($frame.width)x$($frame.height)에서 핵심 쟁점 끝이 잘렸습니다."
+            Assert-ContainsText $frameText '현재답변끝표식' "$($frame.width)x$($frame.height)에서 현재 답변 끝이 잘렸습니다."
+            Assert-NotContainsText $frameText '…' "$($frame.width)x$($frame.height) 긴 답변 변경 화면에 불필요한 말줄임표가 있습니다."
+            foreach ($sectionTitle in @('── 원래 질문', '── 핵심 쟁점', '── 현재 답변')) {
+                $sectionIndex = [Array]::IndexOf([object[]]$frame.lines, $sectionTitle)
+                Assert-True ($sectionIndex -ge 0 -and $sectionIndex + 1 -lt $frame.lines.Count -and [string]$frame.lines[$sectionIndex + 1] -match '^  \S') "$($frame.width)x$($frame.height) 긴 답변 변경 화면에서 $sectionTitle 제목과 본문이 분리되지 않았습니다."
+            }
         }
         Assert-False ([bool]$changeSurface.legacy.questionWasStored)
         Assert-ContainsText $changeSurface.legacy.legacyNote '저장된 쟁점과 선택지로 복원'

@@ -255,6 +255,7 @@ function New-DuoForgeMenuFrameRowsInternal {
         [ValidateRange(0, 1000)][int]$Width = 0,
         [ValidateRange(0, 1000)][int]$Height = 0,
         [switch]$Ascii,
+        [switch]$ContextTransition,
         [switch]$ExpandAllDetails
     )
 
@@ -284,7 +285,7 @@ function New-DuoForgeMenuFrameRowsInternal {
             }
             $showDetail = ($index -eq $selected -or $ExpandAllDetails) -and -not [string]::IsNullOrWhiteSpace([string]$item.detail)
             if ($showDetail) {
-                $detailMaximumLines = if ($ExpandAllDetails) { 1000 } elseif ([int]$layout.height -le 24) { 2 } else { 3 }
+                $detailMaximumLines = if ($ExpandAllDetails) { 1000 } elseif ($ContextTransition -and [int]$layout.height -le 24) { 1 } elseif ([int]$layout.height -le 24) { 2 } else { 3 }
                 foreach ($row in @(New-DuoForgeTextRowsInternal -Text ([string]$item.detail) -Layout $layout -Indent 4 -MaximumLines $detailMaximumLines -Role 'meta')) { $rows.Add($row) }
             }
             if (($index -eq $selected -or $ExpandAllDetails) -and -not [bool]$item.enabled) {
@@ -300,7 +301,7 @@ function New-DuoForgeMenuFrameRowsInternal {
         foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title $Message -Layout $layout)) { $rows.Add($row) }
     }
     if (-not [string]::IsNullOrWhiteSpace($Footer)) {
-        if (-not [bool]$layout.compact) { $rows.Add((New-DuoForgeDisplayRowInternal -Text '' -Role 'spacer')) }
+        if (-not [bool]$layout.compact -and -not $ContextTransition) { $rows.Add((New-DuoForgeDisplayRowInternal -Text '' -Role 'spacer')) }
         foreach ($row in @(New-DuoForgeTextRowsInternal -Text $Footer -Layout $layout -MaximumLines 2 -Role 'meta')) { $rows.Add($row) }
     }
     return @($rows)
@@ -316,11 +317,12 @@ function New-DuoForgeMenuFrameInternal {
         [AllowEmptyString()][string]$Footer = '↑/↓ 이동 · Home/End · Enter 선택 · Esc 이전',
         [ValidateRange(0, 1000)][int]$Width = 0,
         [ValidateRange(0, 1000)][int]$Height = 0,
-        [switch]$Ascii
+        [switch]$Ascii,
+        [switch]$ContextTransition
     )
 
     return @(
-        New-DuoForgeMenuFrameRowsInternal -Items $Items -Title $Title -SelectedIndex $SelectedIndex -Message $Message -Footer $Footer -Width $Width -Height $Height -Ascii:$Ascii |
+        New-DuoForgeMenuFrameRowsInternal -Items $Items -Title $Title -SelectedIndex $SelectedIndex -Message $Message -Footer $Footer -Width $Width -Height $Height -Ascii:$Ascii -ContextTransition:$ContextTransition |
             ForEach-Object { [string]$_.text }
     )
 }
@@ -494,7 +496,8 @@ function Invoke-DuoForgeMenuSelectionInternal {
         [scriptblock]$KeyReader,
         [scriptblock]$InputReader,
         [scriptblock]$FrameWriter,
-        [scriptblock]$CapabilityProbe
+        [scriptblock]$CapabilityProbe,
+        [switch]$ContextTransition
     )
 
     $menuItems = @(ConvertTo-DuoForgeMenuItemsInternal -Items $Items)
@@ -520,7 +523,7 @@ function Invoke-DuoForgeMenuSelectionInternal {
             $frameWidth = 0
             $frameHeight = 0
             try { $frameWidth = [int][Console]::WindowWidth; $frameHeight = [int][Console]::WindowHeight } catch { }
-            $frame = @(New-DuoForgeMenuFrameInternal -Items $menuItems -Title $Title -SelectedIndex $selectedIndex -Message $message -Footer $Footer -Width $frameWidth -Height $frameHeight)
+            $frame = @(New-DuoForgeMenuFrameInternal -Items $menuItems -Title $Title -SelectedIndex $selectedIndex -Message $message -Footer $Footer -Width $frameWidth -Height $frameHeight -ContextTransition:$ContextTransition)
             if ($null -ne $FrameWriter) { & $FrameWriter ([string[]]$frame) }
             else { Write-DuoForgeCursorMenuFrameInternal -Lines $frame -RenderState $renderState }
             $message = ''
@@ -568,9 +571,10 @@ function Invoke-DuoForgeMenuInternal {
         [ValidateRange(0, 10000)][int]$InitialSelectedIndex = 0,
         [AllowEmptyString()][string]$Footer = '↑/↓ 이동 · Home/End · Enter 선택 · Esc 이전',
         [scriptblock]$InputReader,
-        [scriptblock]$MenuInvoker
+        [scriptblock]$MenuInvoker,
+        [switch]$ContextTransition
     )
 
     if ($null -ne $MenuInvoker) { return & $MenuInvoker $Items $Title $EscapeValue $InitialSelectedIndex }
-    return Invoke-DuoForgeMenuSelectionInternal -Items $Items -Title $Title -Prompt $Prompt -EscapeValue $EscapeValue -InitialSelectedIndex $InitialSelectedIndex -Footer $Footer -InputReader $InputReader
+    return Invoke-DuoForgeMenuSelectionInternal -Items $Items -Title $Title -Prompt $Prompt -EscapeValue $EscapeValue -InitialSelectedIndex $InitialSelectedIndex -Footer $Footer -InputReader $InputReader -ContextTransition:$ContextTransition
 }

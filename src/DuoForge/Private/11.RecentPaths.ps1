@@ -116,6 +116,7 @@ function Read-DuoForgePathChoice {
             if ([string]::IsNullOrWhiteSpace($path)) {
                 $layout = Get-DuoForgeDisplayLayoutInternal
                 Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '선택창에서 경로를 받지 못했습니다.' -NextAction '직접 입력하거나 최근 경로를 선택해 주세요.' -Layout $layout) -Layout $layout
+                Write-DuoForgeDisplaySpacerInternal -Layout $layout
                 continue
             }
         }
@@ -127,6 +128,7 @@ function Read-DuoForgePathChoice {
             if ($recent.Count -eq 0) {
                 $layout = Get-DuoForgeDisplayLayoutInternal
                 Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '이 역할에 저장된 최근 경로가 없습니다.' -NextAction '선택창을 열거나 경로를 직접 입력해 주세요.' -Layout $layout) -Layout $layout
+                Write-DuoForgeDisplaySpacerInternal -Layout $layout
                 continue
             }
             $recentItems = [System.Collections.Generic.List[object]]::new()
@@ -139,6 +141,7 @@ function Read-DuoForgePathChoice {
         else {
             $layout = Get-DuoForgeDisplayLayoutInternal
             Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '현재 가능한 경로 입력 방식을 선택해 주세요.' -Layout $layout) -Layout $layout
+            Write-DuoForgeDisplaySpacerInternal -Layout $layout
             continue
         }
 
@@ -150,6 +153,7 @@ function Read-DuoForgePathChoice {
         catch {
             $layout = Get-DuoForgeDisplayLayoutInternal
             Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind error -Title '선택한 경로를 사용할 수 없습니다.' -Message ([string]$_.Exception.Message) -Layout $layout) -Layout $layout
+            Write-DuoForgeDisplaySpacerInternal -Layout $layout
         }
     }
 }

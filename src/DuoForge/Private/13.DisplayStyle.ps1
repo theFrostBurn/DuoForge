@@ -371,6 +371,30 @@ function Write-DuoForgeDisplayRowsInternal {
     }
 }
 
+function Add-DuoForgeTrailingSpacerRowInternal {
+    [CmdletBinding()]
+    param([AllowEmptyCollection()][Parameter(Mandatory)][object[]]$Rows)
+
+    $completedRows = [System.Collections.Generic.List[object]]::new()
+    foreach ($row in @($Rows)) { $completedRows.Add($row) }
+    if ($completedRows.Count -eq 0) { return @() }
+
+    $lastRow = $completedRows[$completedRows.Count - 1]
+    $lastText = if ($lastRow -is [string]) { [string]$lastRow } else { [string](Get-DuoForgeObjectValue -Object $lastRow -Name 'text' -Default '') }
+    if (-not [string]::IsNullOrWhiteSpace($lastText)) {
+        $completedRows.Add((New-DuoForgeDisplayRowInternal -Text '' -Role 'spacer'))
+    }
+    return @($completedRows)
+}
+
+function Write-DuoForgeDisplaySpacerInternal {
+    [CmdletBinding()]
+    param([System.Collections.IDictionary]$Layout)
+
+    if ($null -eq $Layout) { $Layout = Get-DuoForgeDisplayLayoutInternal }
+    Write-DuoForgeDisplayRowsInternal -Rows @((New-DuoForgeDisplayRowInternal -Text '' -Role 'spacer')) -Layout $Layout
+}
+
 function Write-DuoForgeTextInternal {
     [CmdletBinding()]
     param(

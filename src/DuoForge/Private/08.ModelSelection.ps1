@@ -600,6 +600,7 @@ function Read-DuoForgeModelChoiceInternal {
         if ([string]$options.catalogSource -like '*fallback*') {
             Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '현재 모델 목록을 읽지 못했습니다.' -Message '검증된 제한 목록으로 선택을 계속합니다.' -Layout $layout) -Layout $layout
         }
+        Write-DuoForgeDisplaySpacerInternal -Layout $layout
         $items = [System.Collections.Generic.List[object]]::new()
         $recommendedIndex = 0
         for ($index = 0; $index -lt @($options.suggestedModels).Count; $index++) {
@@ -619,6 +620,7 @@ function Read-DuoForgeModelChoiceInternal {
             $model = $(if ($null -ne $InputReader) { [string](& $InputReader 'CLI에 전달할 정확한 모델명') } else { [string](Read-Host 'CLI에 전달할 정확한 모델명') }).Trim()
             if (Test-DuoForgeModelIdentifierInternal -Model $model) { return $model }
             Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '모델명 형식이 올바르지 않습니다.' -Message '영문자나 숫자로 시작하고 영문자, 숫자, 점, 밑줄, 콜론, 슬래시, 대괄호, 하이픈만 사용할 수 있습니다.' -Layout $layout) -Layout $layout
+            Write-DuoForgeDisplaySpacerInternal -Layout $layout
             continue
         }
     }
@@ -676,6 +678,7 @@ function Complete-DuoForgeInteractiveProviderSelectionsInternal {
         else {
             $layout = Get-DuoForgeDisplayLayoutInternal
             Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeFieldRowsInternal -Label ("{0} 모델" -f $options.displayName) -Value ([string]$model) -Layout $layout -KeyWidth 16) -Layout $layout
+            Write-DuoForgeDisplaySpacerInternal -Layout $layout
         }
 
         $supportedEfforts = @(Get-DuoForgeReasoningEffortsForModelInternal -Options $options -Model $model)
@@ -685,6 +688,7 @@ function Complete-DuoForgeInteractiveProviderSelectionsInternal {
         }
         else {
             Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeFieldRowsInternal -Label ("{0} 분석 깊이" -f $options.displayName) -Value ([string]$effort) -Layout $layout -KeyWidth 16) -Layout $layout
+            Write-DuoForgeDisplaySpacerInternal -Layout $layout
         }
 
         $result[$provider] = [ordered]@{
