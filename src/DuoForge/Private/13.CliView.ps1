@@ -14,7 +14,7 @@ DuoForge
   duoforge issues --run <실행 ID> [--workspace <폴더>] [--json]
   duoforge explain --run <실행 ID> --issue <쟁점 ID> [--provider codex|claude|both] [--level beginner|general|expert] [--focus general|evidence|examples|tradeoffs|experiment] [--live]
   duoforge evidence --run <실행 ID> --issue <쟁점 ID> --file <Markdown 파일> [--workspace <폴더>]
-  duoforge answer --run <실행 ID> --issue <쟁점 ID> --choice <A|B> [--replace] [--workspace <폴더>]
+  duoforge answer --run <실행 ID> --issue <쟁점 ID> --choice <번호> [--replace] [--workspace <폴더>]
   duoforge constraint --run <실행 ID> --issue <쟁점 ID> --text <제약 조건> [--confirm] [--workspace <폴더>]
   duoforge extend-round --run <실행 ID> [--workspace <폴더>]
   duoforge defer --run <실행 ID> --issue <쟁점 ID> [--workspace <폴더>] [--confirm-partial]
@@ -34,6 +34,7 @@ DuoForge
 
 호환 별칭:
   - 문서 모드의 --codex와 --claude는 각각 --document-a와 --document-b로 정규화되며 사용 중단 예정 경고가 표시됩니다.
+  - answer의 --choice는 화면과 같은 1, 2, 3 번호를 권장하며 기존 A, B, C 입력도 같은 내부 선택으로 처리합니다.
 '@ | Write-Host
 }
 

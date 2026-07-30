@@ -286,6 +286,8 @@ function Write-DuoForgeAnsiMenuFrameInternal {
     )
 
     $escape = [char]27
+    $windowWidth = [Math]::Min(1000, [Math]::Max(2, [Console]::WindowWidth))
+    $lineWidth = $windowWidth - 1
     if (-not [bool](Get-DuoForgeObjectValue -Object $RenderState -Name 'started' -Default $false)) {
         [Console]::Write("$escape[?25l$escape[s")
         $RenderState.started = $true
@@ -297,7 +299,10 @@ function Write-DuoForgeAnsiMenuFrameInternal {
     $lineCount = [Math]::Max([int](Get-DuoForgeObjectValue -Object $RenderState -Name 'lineCount' -Default 0), $Lines.Count)
     for ($index = 0; $index -lt $lineCount; $index++) {
         $null = $builder.Append("`r$escape[2K")
-        if ($index -lt $Lines.Count) { $null = $builder.Append([string]$Lines[$index]) }
+        if ($index -lt $Lines.Count) {
+            $line = Limit-DuoForgeProgressTextInternal -Text ([string]$Lines[$index]) -Width $lineWidth
+            $null = $builder.Append($line)
+        }
         if ($index -lt $lineCount - 1) { $null = $builder.Append([Environment]::NewLine) }
     }
     [Console]::Write($builder.ToString())

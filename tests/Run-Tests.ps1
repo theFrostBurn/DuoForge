@@ -3889,7 +3889,7 @@ try {
         }
     }
 
-    Test-Case '질문 카드는 우선순위대로 최대 3개만 한 배치에 표시하고 결정 정보를 보강한다' {
+    Test-Case '질문 카드는 문서 계보·AI 작업자·숫자 선택을 분리하고 요청 목적을 설명한다' {
         $cardResult = & $module {
             $issues = @()
             $questions = @()
@@ -3904,7 +3904,102 @@ try {
             $secondStage.provider = 'codex'
             $secondStage.result.provider = 'codex'
             $merged = Merge-DuoForgeStageIssues -StageResults @($stage, $secondStage)
-            [ordered]@{ merged = $merged; batch = Get-DuoForgePendingQuestionBatchInternal -Questions @($merged.questions) }
+            $presentationQuestion = [ordered]@{
+                issueKey = 'D-003'
+                title = '음성 처리 요구 충돌'
+                question = '이 차단 쟁점을 어떻게 처리할까요?'
+                options = @(
+                    'A: 제안 내용을 반영하고 마지막 문서 단계부터 다시 검증',
+                    'B: 현재 요구를 유지하고 반대 근거를 고려해 다시 검증'
+                )
+                recommendedOption = 'A'
+                safeDefault = 'A'
+                reasonNow = '이 결정을 확정해야 관련 문서와 검증 단계를 마칠 수 있습니다.'
+                plainExplanation = '일부 Android 기본 음성 인식은 서버를 사용할 수 있습니다. 현재 기술만으로는 완전 오프라인과 외부 전송 금지를 함께 보장할 수 없습니다.'
+                codexOpinion = 'Codex의 관련 판단은 쟁점 이력과 상세 설명에서 확인할 수 있습니다.'
+                claudeOpinion = 'Claude의 관련 판단은 쟁점 이력과 상세 설명에서 확인할 수 있습니다.'
+                reversibility = 'moderate'
+                confidence = 'medium'
+                impactIfDeferred = 'Major 쟁점은 부분 완료로만 종료할 수 있고 Critical 쟁점은 보류할 수 없습니다.'
+            }
+            $presentationIssue = [ordered]@{
+                issueId = 'D-003'
+                raisedBy = 'codex'
+                category = '기술 타당성·요구사항 충돌'
+                severity = 'critical'
+                targetDocumentId = 'B'
+                claim = '온디바이스 음성 처리와 완전 오프라인 요구가 충돌합니다.'
+                proposal = '비행기 모드 사전 기술 시험이 통과하기 전에는 완전 오프라인과 기기 외부 전송 금지를 확정 요구로 선언하지 마십시오. 검증 결과에 따라 지원 범위를 정해야 합니다.'
+                resolutionStatus = 'AWAITING_USER'
+                blocking = $true
+                reviewerVerdicts = @(
+                    [ordered]@{ reviewer = 'codex'; verdict = 'AGREES' },
+                    [ordered]@{ reviewer = 'claude'; verdict = 'AGREES' }
+                )
+                blockingProposals = [ordered]@{ codex = $true; claude = $false }
+                editorialDecisions = @(
+                    [ordered]@{ performedBy = 'claude'; disposition = 'ACCEPTED'; targetDocumentId = 'B'; locations = @('B §3.1', 'B §10') }
+                )
+            }
+            $disagreementIssue = ConvertTo-DuoForgeHashtable -InputObject $presentationIssue
+            $disagreementIssue.reviewerVerdicts = @(
+                [ordered]@{ reviewer = 'codex'; verdict = 'AGREES' },
+                [ordered]@{ reviewer = 'claude'; verdict = 'DISAGREES' }
+            )
+            $laterRejectedIssue = ConvertTo-DuoForgeHashtable -InputObject $presentationIssue
+            $laterRejectedIssue.editorialDecisions = @($laterRejectedIssue.editorialDecisions) + @(
+                [ordered]@{ performedBy = 'codex'; disposition = 'REJECTED'; targetDocumentId = 'B'; locations = @() }
+            )
+            $legacyIssue = [ordered]@{
+                issueId = 'D-011'; raisedBy = 'claude'; category = 'choice'; target = 'document'; claim = '저장 방식을 확정해야 합니다.'
+                proposal = '안전한 저장 방식을 적용합니다.'; reviewerVerdicts = @(); resolutionStatus = 'AWAITING_USER'; blocking = $true
+                ownerDecisions = @([ordered]@{ actor = 'claude'; disposition = 'ACCEPTED'; locations = @('저장 섹션') })
+            }
+            $generalQuestion = [ordered]@{
+                title = '배포 전략'
+                question = '어떤 전략을 선택할까요?'
+                options = @('점진 배포', '일괄 배포')
+                recommendedOption = '점진 배포'
+                safeDefault = '점진 배포'
+                reasonNow = '배포 전에 전략을 확정해야 합니다.'
+                plainExplanation = '출시 범위를 한 번에 넓힐지 나눌지 정합니다.'
+            }
+            $generalIssue = [ordered]@{ issueId = 'D-010'; raisedBy = 'claude'; category = 'choice'; targetDocumentId = 'merged'; claim = '배포 전략을 정해야 합니다.'; proposal = '점진 배포를 우선합니다.'; reviewerVerdicts = @(); editorialDecisions = @(); resolutionStatus = 'AWAITING_USER'; blocking = $true }
+            $presentation = Get-DuoForgeInteractiveQuestionPresentationInternal -Question $presentationQuestion -Issue $presentationIssue
+            $presentationMenuItems = @(Get-DuoForgeInteractiveQuestionMenuItemsInternal -Presentation $presentation -MaximumRounds 2)
+            $normalizedMenuItems = @(ConvertTo-DuoForgeMenuItemsInternal -Items $presentationMenuItems)
+            $frames = foreach ($size in @(@(72, 20), @(80, 24), @(100, 30), @(120, 32))) {
+                $width = [int]$size[0]
+                $height = [int]$size[1]
+                foreach ($selectedIndex in 0..($normalizedMenuItems.Count - 1)) {
+                    $cardRows = @(New-DuoForgeInteractiveQuestionCardRowsInternal -Question $presentationQuestion -Presentation $presentation -Width $width -Height $height)
+                    $menuLines = @(New-DuoForgeMenuFrameInternal -Items $normalizedMenuItems -Title '승인 요청: 1안, 2안처럼 번호로 선택해 주세요.' -SelectedIndex $selectedIndex)
+                    $allLines = @($cardRows | ForEach-Object { [string]$_.text }) + @($menuLines | ForEach-Object { Limit-DuoForgeProgressTextInternal -Text ([string]$_) -Width ($width - 1) })
+                    [ordered]@{
+                        width = $width
+                        height = $height
+                        selectedIndex = $selectedIndex
+                        lines = @($allLines)
+                        maximumWidth = (@($allLines | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) }) | Measure-Object -Maximum).Maximum
+                    }
+                }
+            }
+            [ordered]@{
+                merged = $merged
+                batch = Get-DuoForgePendingQuestionBatchInternal -Questions @($merged.questions)
+                presentation = $presentation
+                menuItems = $presentationMenuItems
+                alternativeItems = @(Get-DuoForgeInteractiveQuestionAlternativeMenuItemsInternal -MaximumRounds 2)
+                frames = @($frames)
+                disagreement = Get-DuoForgeInteractiveQuestionPresentationInternal -Question $presentationQuestion -Issue $disagreementIssue
+                laterRejected = Get-DuoForgeInteractiveQuestionPresentationInternal -Question $presentationQuestion -Issue $laterRejectedIssue
+                legacy = Get-DuoForgeInteractiveQuestionPresentationInternal -Question $presentationQuestion -Issue $legacyIssue
+                general = Get-DuoForgeInteractiveQuestionPresentationInternal -Question $generalQuestion -Issue $generalIssue
+                markdown = New-DuoForgeOpenQuestionsMarkdown -Questions @($presentationQuestion) -Issues @($presentationIssue)
+                numericChoice = Resolve-DuoForgeDecisionChoice -Choice '1' -Options @($presentationQuestion.options)
+                legacyChoice = Resolve-DuoForgeDecisionChoice -Choice 'A' -Options @($presentationQuestion.options)
+                originalOptions = @($presentationQuestion.options)
+            }
         }
         Assert-Equal $cardResult.merged.questions.Count 5
         Assert-Equal $cardResult.batch.batchSize 3
@@ -3915,6 +4010,147 @@ try {
         Assert-False ([string]::IsNullOrWhiteSpace([string]$first.estimatedCost))
         Assert-True ([string]$first.reversibility -in @('easy', 'moderate', 'hard', 'unknown'))
         Assert-True ([string]$first.confidence -in @('low', 'medium', 'high'))
+        Assert-ContainsText $cardResult.presentation.choiceNotice '문서 A/문서 B'
+        Assert-ContainsText $cardResult.presentation.choiceNotice '1안/2안/3안'
+        Assert-ContainsText $cardResult.presentation.providerNotice '사용자 선택 번호와 연결되지 않습니다'
+        Assert-Equal $cardResult.presentation.targetLabel '문서 B'
+        Assert-Equal $cardResult.presentation.requestKind '승인 요청'
+        Assert-ContainsText $cardResult.presentation.currentState '잠정 수정'
+        Assert-ContainsText $cardResult.presentation.currentState '답변 대기'
+        Assert-ContainsText $cardResult.presentation.coreIssue '완전 오프라인'
+        Assert-ContainsText $cardResult.presentation.originSummary 'Codex가 문서 B에서 이 문제를 처음 제기했습니다'
+        Assert-ContainsText $cardResult.presentation.aiConsensus 'Codex와 Claude 모두'
+        Assert-ContainsText $cardResult.presentation.documentAction 'Claude가 문서 B의 2곳에'
+        Assert-ContainsText $cardResult.presentation.documentAction '최종 확정은 아닙니다'
+        Assert-ContainsText $cardResult.presentation.proposalSummary '사전 기술 시험'
+        Assert-ContainsText $cardResult.presentation.requestPrompt '최종 결정으로 승인'
+        Assert-ContainsText $cardResult.presentation.requestPurpose '문서와 검증 단계'
+        Assert-Equal $cardResult.presentation.options[0].displayOrdinal 1
+        Assert-Equal $cardResult.presentation.options[0].internalCode 'A'
+        Assert-Equal $cardResult.presentation.options[0].label 'AI가 잠정 반영한 수정 방향을 승인'
+        Assert-Equal $cardResult.presentation.options[1].label '잠정 수정을 승인하지 않고 기존 요구를 유지'
+        Assert-True ([bool]$cardResult.presentation.options[0].isRecommended)
+        Assert-False ([bool]$cardResult.presentation.options[1].isRecommended)
+        Assert-ContainsText $cardResult.presentation.recommendedLabel '1안 · AI가 잠정 반영한 수정 방향을 승인'
+        Assert-ContainsText $cardResult.presentation.codexOpinion '처음 제기했고'
+        Assert-ContainsText $cardResult.presentation.claudeOpinion '같은 문제라고 보고'
+        Assert-Equal $cardResult.presentation.reversibility '보통 — 일부 단계 재실행 필요'
+        Assert-Equal $cardResult.presentation.confidence '보통'
+        Assert-ContainsText $cardResult.presentation.impactIfDeferred '중요 쟁점'
+        Assert-ContainsText $cardResult.presentation.impactIfDeferred '반드시 해결할 쟁점'
+        Assert-Equal $cardResult.menuItems[0].value 'answer:A'
+        Assert-Equal $cardResult.menuItems[0].shortcuts[0] '1'
+        Assert-True ('A' -in @($cardResult.menuItems[0].shortcuts))
+        Assert-Equal $cardResult.menuItems[1].value 'answer:B'
+        Assert-Equal $cardResult.menuItems[1].shortcuts[0] '2'
+        Assert-True ('B' -in @($cardResult.menuItems[1].shortcuts))
+        Assert-ContainsText $cardResult.menuItems[0].detail '권장 · 결과:'
+        Assert-Equal $cardResult.menuItems[2].value 'other'
+        Assert-Equal $cardResult.menuItems[2].shortcuts[0] 'M'
+        Assert-Equal $cardResult.alternativeItems[0].value 'round'
+        Assert-Equal $cardResult.alternativeItems[-1].value 'back-to-question'
+        foreach ($frame in @($cardResult.frames)) {
+            Assert-True ($frame.lines.Count -le [int]$frame.height) "$($frame.width)x$($frame.height) 질문 카드가 화면 높이를 넘었습니다."
+            Assert-True ([int]$frame.maximumWidth -lt [int]$frame.width) "$($frame.width)x$($frame.height) 질문 카드가 화면 폭을 넘었습니다."
+            Assert-True (@($frame.lines | Where-Object { $_ -like '*쟁점*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 핵심 쟁점이 보이지 않습니다."
+            Assert-True (@($frame.lines | Where-Object { $_ -like '*AI*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 AI 처리 흐름이 보이지 않습니다."
+            Assert-True (@($frame.lines | Where-Object { $_ -like '*요청*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 사용자 요청이 보이지 않습니다."
+            Assert-True (@($frame.lines | Where-Object { $_ -like '*[[]1[]]*AI가 잠정*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 1안이 보이지 않습니다."
+            Assert-True (@($frame.lines | Where-Object { $_ -like '*[[]2[]]*잠정 수정*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 2안이 보이지 않습니다."
+            if ([int]$frame.width -eq 72) {
+                Assert-ContainsText ($frame.lines -join ' ') '보장할 수 없습니다' '72x20에서 핵심 쟁점의 결론이 보이지 않습니다.'
+            }
+        }
+        Assert-ContainsText $cardResult.disagreement.aiConsensus '판단이 일치하지 않습니다'
+        Assert-False ($cardResult.disagreement.aiConsensus -like '*모두*동의*')
+        Assert-Equal $cardResult.laterRejected.requestKind '선택 요청'
+        Assert-ContainsText $cardResult.laterRejected.documentAction '반영됐다는 기록은 없습니다'
+        Assert-ContainsText $cardResult.laterRejected.currentState '해결되지 않은 문제'
+        Assert-Equal $cardResult.laterRejected.options[0].label 'AI가 제안한 수정 방향을 선택'
+        Assert-Equal $cardResult.legacy.targetLabel '작업 문서'
+        Assert-Equal $cardResult.legacy.requestKind '승인 요청'
+        Assert-ContainsText $cardResult.legacy.documentAction 'Claude가 작업 문서의 1곳에'
+        Assert-Equal $cardResult.general.requestKind '선택 요청'
+        Assert-Equal $cardResult.general.options[0].label '점진 배포'
+        Assert-ContainsText $cardResult.markdown '### 현재 상태'
+        Assert-ContainsText $cardResult.markdown '### 사용자에게 요청하는 것'
+        Assert-ContainsText $cardResult.markdown '- 1안: AI가 잠정 반영한 수정 방향을 승인'
+        Assert-NotContainsText $cardResult.markdown '- A: 제안 내용을 반영'
+        Assert-Equal $cardResult.numericChoice.code 'A'
+        Assert-Equal $cardResult.numericChoice.option $cardResult.legacyChoice.option
+        Assert-Equal $cardResult.originalOptions[0] 'A: 제안 내용을 반영하고 마지막 문서 단계부터 다시 검증'
+    }
+
+    Test-Case '한 질문에 답하면 남은 질문으로 이어지고 일시정지 메뉴에서도 다시 들어갈 수 있다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'question-followup\input\brief.md')
+        $workspace = Join-Path $tempRoot 'question-followup-results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $waiting = & $module {
+            param($directory)
+            $callback = {
+                param($step)
+                $result = New-DuoForgeFakeStageResult -Step $step
+                if ([string]$step.stage -eq 'final-validation') {
+                    $result.finalApproved = $false
+                    $result.issues = @(
+                        [ordered]@{ issueKey = 'FOLLOW-R02-001'; targetDocumentId = 'merged'; category = 'preference'; severity = 'major'; claim = '첫 결정을 내려야 합니다.'; evidence = @(); proposal = '첫 방향을 선택하세요.'; requiresUser = $true; blockingProposal = $true },
+                        [ordered]@{ issueKey = 'FOLLOW-R02-002'; targetDocumentId = 'merged'; category = 'preference'; severity = 'major'; claim = '둘째 결정을 내려야 합니다.'; evidence = @(); proposal = '둘째 방향을 선택하세요.'; requiresUser = $true; blockingProposal = $true }
+                    )
+                    $result.openQuestions = @(
+                        [ordered]@{ issueKey = 'FOLLOW-R02-001'; title = '첫 질문'; question = '첫 방향을 선택할까요?'; options = @('첫 방향', '대체 방향'); recommendedOption = '첫 방향'; reasonNow = '첫 결정을 확정해야 합니다.'; plainExplanation = '첫 번째 미결정 사항입니다.'; codexOpinion = '첫 방향을 권합니다.'; claudeOpinion = '첫 방향에 동의합니다.'; estimatedCost = '즉시'; reversibility = 'easy'; confidence = 'high'; impactIfDeferred = '검증이 멈춥니다.'; safeDefault = '첫 방향'; experimentPossible = $false },
+                        [ordered]@{ issueKey = 'FOLLOW-R02-002'; title = '둘째 질문'; question = '둘째 방향을 선택할까요?'; options = @('둘째 방향', '다른 방향'); recommendedOption = '둘째 방향'; reasonNow = '둘째 결정을 확정해야 합니다.'; plainExplanation = '두 번째 미결정 사항입니다.'; codexOpinion = '둘째 방향을 권합니다.'; claudeOpinion = '둘째 방향에 동의합니다.'; estimatedCost = '즉시'; reversibility = 'easy'; confidence = 'high'; impactIfDeferred = '검증이 멈춥니다.'; safeDefault = '둘째 방향'; experimentPossible = $false }
+                    )
+                }
+                return $result
+            }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory
+        Assert-Equal $waiting.status 'AWAITING_USER'
+
+        $followup = & $module {
+            param($runId, $resultsRoot)
+            $currentRun = ConvertTo-DuoForgeHashtable -InputObject (Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $resultsRoot)
+            $capture = [ordered]@{ questionMenus = 0; titles = [System.Collections.Generic.List[string]]::new() }
+            $menuInvoker = {
+                param($items, $title, $escapeValue, $initialSelectedIndex)
+                $capture.titles.Add([string]$title)
+                if ([string]$title -eq '먼저 확인할 요청을 선택해 주세요.') { return '0' }
+                if ([string]$title -like '*1안, 2안처럼 번호로 선택해 주세요.*') {
+                    $capture.questionMenus = [int]$capture.questionMenus + 1
+                    if ([int]$capture.questionMenus -eq 1) { return 'answer:A' }
+                    return 'back'
+                }
+                return $escapeValue
+            }.GetNewClosure()
+            Invoke-DuoForgeInteractiveQuestion -Run $currentRun -MenuInvoker $menuInvoker
+            $pendingQuestions = @(Get-DuoForgeInteractivePendingQuestionsInternal -RunDirectory ([string]$currentRun.runDirectory))
+            $state = Read-DuoForgeJson -Path (Join-Path ([string]$currentRun.runDirectory) 'state.json')
+            [ordered]@{ questionMenus = $capture.questionMenus; titles = @($capture.titles); pendingCount = $pendingQuestions.Count; status = [string]$state.status }
+        } $run.runId $workspace
+        Assert-Equal $followup.questionMenus 2
+        Assert-Equal $followup.pendingCount 1
+        Assert-Equal $followup.status 'PAUSED_USER'
+        Assert-True (@($followup.titles | Where-Object { $_ -like '*1안, 2안처럼 번호로 선택해 주세요.*' }).Count -eq 2)
+
+        $pausedMenu = & $module {
+            param($runId, $runDirectory, $resultsRoot)
+            $capture = [ordered]@{ items = @() }
+            $menuInvoker = {
+                param($items, $title, $escapeValue, $initialSelectedIndex)
+                $capture.items = @($items)
+                return 'B'
+            }.GetNewClosure()
+            Invoke-DuoForgeInteractiveRun -RunRecord ([ordered]@{ runId = $runId; runDirectory = $runDirectory }) -MenuInvoker $menuInvoker
+            return @($capture.items)
+        } $run.runId $run.runDirectory $workspace
+        $answerItem = @($pausedMenu | Where-Object { [string]$_.value -eq 'A' })[0]
+        $resumeItem = @($pausedMenu | Where-Object { [string]$_.value -eq 'R' })[0]
+        Assert-ContainsText ([string]$answerItem.label) '남은 질문에 답하기 (1)'
+        Assert-True ([bool]$answerItem.enabled)
+        Assert-False ([bool]$resumeItem.enabled)
+        Assert-ContainsText ([string]$resumeItem.disabledReason) '아직 답하지 않은 질문이 1개'
     }
 
     Test-Case '최신 사용자 결정은 과거 라운드의 동일 질문을 확정 처리한다' {

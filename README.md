@@ -114,15 +114,15 @@ Claude CLI는 계정별 `/model` 전체 행을 기계 판독 목록으로 내보
 차단 쟁점이 사용자 결정을 기다리면 질문 카드의 선택값을 기록한 뒤 마지막 합성·검증 단계만 다시 실행한다.
 
 ```powershell
-.\duoforge.cmd answer --run "run-20260727-..." --issue "D-001" --choice "A"
-.\duoforge.cmd answer --run "run-20260727-..." --issue "D-001" --choice "B" --replace
+.\duoforge.cmd answer --run "run-20260727-..." --issue "D-001" --choice "1"
+.\duoforge.cmd answer --run "run-20260727-..." --issue "D-001" --choice "2" --replace
 .\duoforge.cmd constraint --run "run-20260727-..." --issue "D-001" --text "개인정보는 국내에만 저장한다."
 .\duoforge.cmd constraint --run "run-20260727-..." --issue "D-001" --text "개인정보는 국내에만 저장한다." --confirm
 .\duoforge.cmd extend-round --run "run-20260727-..."
 .\duoforge.cmd resume --run "run-20260727-..." --live
 ```
 
-질문 카드는 우선순위 순으로 한 번에 최대 3개만 표시한다. 답변 변경은 `--replace`로 이력을 남기며, 자유 제약은 미리보기를 확인한 뒤 `--confirm`으로 적용한다. 세 번째 라운드는 호출 상한을 먼저 검사한 뒤 `extend-round`로 추가한다. 최신 사용자 답변은 양쪽 최종 단계에 공통 제약으로 주입되고 과거 라운드의 동일 질문은 최종 병합에서 확정 처리된다. Critical 쟁점은 보류할 수 없고, Major 쟁점의 부분 완료 보류는 대화형 확인 또는 명시적인 `--confirm-partial`이 필요하다.
+질문 카드는 우선순위 순으로 한 번에 최대 3개만 표시한다. 각 질문은 `현재 상태 → 핵심 쟁점 → AI 검토와 문서 처리 → 사용자에게 요청하는 것 → 선택 결과` 순서로 설명하며, 승인·방향 선택·자료 요청 중 무엇이 필요한지 먼저 밝힌다. 한 질문의 답을 저장하면 남은 질문 목록을 바로 이어서 보여주고, 중간에 나가도 `안전 일시정지` 작업 메뉴의 `남은 질문에 답하기 (N)`으로 다시 들어갈 수 있다. 미답변 질문이 있으면 `작업 계속하기`는 이유와 함께 비활성화한다. 문서 계보는 `문서 A/문서 B/최종 문서`, 사용자 선택은 `1안/2안/3안`, AI 작업자는 `Codex/Claude`로 표기를 분리한다. 화면과 신규 CLI 예시는 숫자 선택을 사용하지만 기존 `--choice A/B/C`도 같은 내부 결정 코드로 계속 읽는다. 답변 변경은 `--replace`로 이력을 남기며, 자유 제약은 미리보기를 확인한 뒤 `--confirm`으로 적용한다. 세 번째 라운드는 호출 상한을 먼저 검사한 뒤 `extend-round`로 추가한다. 최신 사용자 답변은 양쪽 최종 단계에 공통 제약으로 주입되고 과거 라운드의 동일 질문은 최종 병합에서 확정 처리된다. Critical 쟁점은 보류할 수 없고, Major 쟁점의 부분 완료 보류는 대화형 확인 또는 명시적인 `--confirm-partial`이 필요하다.
 
 호출당 크기를 넘는 Markdown의 신규 실행은 `context-plan` schema 2의 결정론적 의미 배치를 사용한다. ATX/Setext 제목과 제목 경로, 서문, 완결된 문단·목록·표·fenced code를 먼저 보존하고, 하나의 의미 단위가 상한을 넘을 때만 문단·줄·UTF-8 안전 바이트 순서로 폴백한다. XML escape 뒤 실제 전송 바이트도 분할 시점에 계산하므로 특수문자가 많은 CORE는 의미 경계를 가능한 한 보존하면서 호출 상한 안으로 더 나뉜다. 각 팩의 `DOCUMENT_MAP`, `BEFORE`, `AFTER`는 위치와 연결을 위한 `context-only` 영역이고 `CORE`만 사실 분석과 근거에 사용할 수 있다. 완성 프롬프트 크기는 실행 생성 시점과 각 단계 소비 시점에 모두 검증한다.
 
