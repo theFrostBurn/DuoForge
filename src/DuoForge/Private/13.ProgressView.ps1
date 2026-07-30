@@ -783,17 +783,17 @@ function New-DuoForgeProgressFrameInternal {
         '전체 단계 완료 후 집계'
     }
     else {
-        "전체 $($Snapshot.issueCount) · 남은 항목 $($Snapshot.openIssueCount) · 진행을 막는 항목 $($Snapshot.blockingIssueCount)"
+        "전체 $($Snapshot.issueCount) · 미해결 $($Snapshot.openIssueCount) · 계속하려면 해결 $($Snapshot.blockingIssueCount)"
     }
     $pauseRequestStatus = if ($null -eq $ViewState) { '' } else { [string](Get-DuoForgeObjectValue -Object $ViewState -Name 'pauseRequestStatus' -Default '') }
     $footer = if ($null -ne $ViewState -and [bool](Get-DuoForgeObjectValue -Object $ViewState -Name 'waitForInput' -Default $false)) {
         if ([string](Get-DuoForgeObjectValue -Object $ViewState -Name 'returnTarget' -Default 'shell') -eq 'menu') { 'Enter 키를 누르면 작업 메뉴로 돌아갑니다.' } else { 'Enter 키를 누르면 셸 프롬프트로 돌아갑니다.' }
     }
-    elseif ($pauseRequestStatus -eq 'requested') { '일시정지 요청됨 · 현재 호출 완료 후 다음 호출 전에 멈춥니다.' }
+    elseif ($pauseRequestStatus -eq 'requested') { '멈추기 요청됨 · 현재 AI 작업이 끝난 뒤 멈춥니다.' }
     elseif ($pauseRequestStatus -eq 'failed') { '일시정지 요청을 저장하지 못했습니다 · P 키로 다시 시도하세요.' }
-    elseif ($screenMode -eq 'detail') { 'PgUp/PgDn 스크롤 · Home/End · Esc 개요 · P 안전 일시정지' }
-    elseif ($recentCommitted.Count -gt 0) { '↑↓ 또는 J/K 항목 이동 · D 상세 보기 · P 안전 일시정지' }
-    else { 'P 안전 일시정지' }
+    elseif ($screenMode -eq 'detail') { 'PgUp/PgDn 스크롤 · Home/End · Esc 개요 · P 현재 작업 후 멈추기' }
+    elseif ($recentCommitted.Count -gt 0) { '↑↓ 또는 J/K 항목 이동 · D 상세 보기 · P 현재 작업 후 멈추기' }
+    else { 'P 현재 작업 후 멈추기' }
 
     $tailLines = [System.Collections.Generic.List[string]]::new()
     if ($diagnosticLines.Count -gt 0) { $tailLines.Add('── 작업 오류') }
@@ -801,13 +801,13 @@ function New-DuoForgeProgressFrameInternal {
     if (-not [string]::IsNullOrWhiteSpace($finalMessage)) {
         foreach ($row in @(New-DuoForgeTextRowsInternal -Text $finalMessage -Layout $displayLayout -MaximumLines 3 -Role 'text')) { $tailLines.Add([string]$row.text) }
     }
-    if ($Height -ge 24) { $tailLines.Add('── 검토 현황') }
-    $issueLabel = if ($Height -ge 24) { '집계' } else { '검토 현황' }
+    if ($Height -ge 24) { $tailLines.Add('── 확인할 내용') }
+    $issueLabel = if ($Height -ge 24) { '집계' } else { '확인할 내용' }
     foreach ($row in @(New-DuoForgeFieldRowsInternal -Label $issueLabel -Value $issueSummary -Layout $displayLayout -Indent $(if ($Height -ge 24) { 2 } else { 0 }) -KeyWidth $(if ($Height -ge 24) { 8 } else { 0 }) -Role 'meta')) { $tailLines.Add([string]$row.text) }
     foreach ($row in @(New-DuoForgeTextRowsInternal -Text $footer -Layout $displayLayout -MaximumLines 2 -Role 'meta')) { $tailLines.Add([string]$row.text) }
 
     $lines = [System.Collections.Generic.List[string]]::new()
-    $lines.Add('DUOFORGE · LIVE 진행 화면')
+    $lines.Add('DUOFORGE · AI 작업 진행')
     foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '작업' -Value ("{0} · {1} · {2}" -f $Snapshot.name, $Snapshot.modeLabel, $Snapshot.runId) -Layout $displayLayout -Indent 0 -KeyWidth 8 -Role 'meta')) { $lines.Add([string]$row.text) }
     $total = [Math]::Max(1, [int]$Snapshot.totalSteps)
     $barWidth = [Math]::Max(10, [Math]::Min(28, $Width - 42))
@@ -935,7 +935,7 @@ function Write-DuoForgeProgressFrameInternal {
             $View.enteredAlternateScreen = $false
         }
         $View.mode = 'log'
-        Write-Host 'LIVE 진행 화면을 유지할 수 없어 줄 단위 진행 표시로 전환합니다.' -ForegroundColor Yellow
+        Write-Host '진행 화면을 유지할 수 없어 줄 단위 작업 기록으로 전환합니다.' -ForegroundColor Yellow
         Write-DuoForgeProgressLogEventInternal -View $View -Event $View.lastEvent
     }
 }
@@ -953,7 +953,7 @@ function Write-DuoForgeProgressLogEventInternal {
     $data = Get-DuoForgeObjectValue -Object $Event -Name 'data' -Default ([ordered]@{})
     $stepKey = [string](Get-DuoForgeObjectValue -Object $data -Name 'stepKey')
     if ($type -eq 'PROGRESS_INITIALIZED') {
-        Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgePageHeaderRowsInternal -Title 'DuoForge 작업 진행' -Tag 'LIVE 누적 로그' -Layout $layout) -Layout $layout
+        Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgePageHeaderRowsInternal -Title 'DuoForge 작업 진행' -Tag 'AI 작업 기록' -Layout $layout) -Layout $layout
         return
     }
     if ($type -eq 'PROVIDER_TICK') { return }
@@ -965,7 +965,10 @@ function Write-DuoForgeProgressLogEventInternal {
         if (-not [string]::IsNullOrWhiteSpace($stepTarget)) { $stepParts += $stepTarget }
         $stepParts -join ' '
     }
-    else { $stepKey }
+    else {
+        $checkpointLabel = Get-DuoForgeDisplayCheckpointLabelInternal -StepKey $stepKey -RunDirectory ([string]$View.runDirectory)
+        if ($checkpointLabel -eq '완료된 AI 작업') { 'AI 작업' } else { $checkpointLabel }
+    }
     if ($type -eq 'STAGE_COMMITTED' -and -not [string]::IsNullOrWhiteSpace($stepKey)) {
         if ([string](Get-DuoForgeObjectValue -Object $View -Name 'lastLoggedCommittedStepKey' -Default '') -eq $stepKey) { return }
         $View.lastLoggedCommittedStepKey = $stepKey
@@ -976,7 +979,7 @@ function Write-DuoForgeProgressLogEventInternal {
         'STAGE_STARTED' { & $append @(New-DuoForgeNoticeRowsInternal -Kind warning -Title ("{0} 시작" -f $label) -Layout $layout) }
         'STAGE_RESULT_RECEIVED' { & $append @(New-DuoForgeNoticeRowsInternal -Kind info -Title ("{0} 답변 도착 · 형식 확인 중" -f $label) -Layout $layout) }
         'STAGE_COMMITTED' {
-            & $append @(New-DuoForgeNoticeRowsInternal -Kind success -Title ("{0} 확정" -f $label) -Layout $layout)
+            & $append @(New-DuoForgeNoticeRowsInternal -Kind success -Title ("{0} 결과 저장 완료" -f $label) -Layout $layout)
             if ($null -ne $snapshot.latest) { & $append @(New-DuoForgeTextRowsInternal -Text ([string]$snapshot.latest.summary -replace '^\s*$', '') -Layout $layout -Indent 2 -MaximumLines 3 -Role 'text') }
         }
         'STAGE_RETRY_SCHEDULED' {
@@ -1083,7 +1086,7 @@ function Invoke-DuoForgeProgressControlInputInternal {
                 if (-not $accepted) { throw 'pause-request-not-accepted' }
                 $View.pauseRequestStatus = 'requested'
                 $View.pauseRequestId = [string](Get-DuoForgeObjectValue -Object $result -Name 'requestId' -Default '')
-                if ([string]$View.mode -eq 'log') { $layout = Get-DuoForgeDisplayLayoutInternal -NoColor; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '일시정지를 요청했습니다.' -Message '현재 호출 완료 후 다음 호출 전에 멈춥니다.' -Layout $layout) -Layout $layout }
+                if ([string]$View.mode -eq 'log') { $layout = Get-DuoForgeDisplayLayoutInternal -NoColor; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '멈추기를 요청했습니다.' -Message '현재 AI 작업이 끝난 뒤 멈춥니다.' -Layout $layout) -Layout $layout }
             }
             catch {
                 $View.pauseRequestStatus = 'failed'

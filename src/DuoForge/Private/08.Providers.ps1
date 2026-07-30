@@ -244,14 +244,14 @@ function Get-DuoForgeDoctorRecommendationsInternal {
     if (-not $PowerShellReady) { $recommendations.Add('PowerShell 7 이상에서 다시 실행해 주세요.') }
     if (-not $Codex.installed) { $recommendations.Add('Codex CLI를 설치해 주세요.') }
     elseif ($Codex.authStatus -eq 'VERIFIED_NOT_LOGGED_IN') { $recommendations.Add('codex login으로 ChatGPT 구독 로그인을 완료해 주세요.') }
-    elseif ($Codex.authStatus -eq 'PROFILE_MISMATCH') { $recommendations.Add('Codex 인증을 확인할 수 없는 격리 프로필입니다. 일반 호스트 PowerShell 7에서 duoforge doctor를 다시 실행해 주세요.') }
+    elseif ($Codex.authStatus -eq 'PROFILE_MISMATCH') { $recommendations.Add('현재 분리된 실행 환경에서는 Codex 로그인을 확인할 수 없습니다. 일반 PowerShell 7 창에서 duoforge doctor를 다시 실행해 주세요.') }
     elseif (-not $Codex.subscription) { $recommendations.Add('codex login status를 일반 호스트 PowerShell 7에서 다시 확인해 주세요. 상태 확인 실패를 미로그인으로 간주하지 않았습니다.') }
     if (-not $Claude.installed) { $recommendations.Add('Claude Code CLI를 설치해 주세요.') }
     elseif ($Claude.authStatus -eq 'VERIFIED_NOT_LOGGED_IN') { $recommendations.Add('claude auth login으로 Claude 구독 로그인을 완료해 주세요.') }
-    elseif ($Claude.authStatus -eq 'PROFILE_MISMATCH') { $recommendations.Add('Claude 인증을 확인할 수 없는 격리 프로필입니다. 일반 호스트 PowerShell 7에서 duoforge doctor를 다시 실행해 주세요.') }
+    elseif ($Claude.authStatus -eq 'PROFILE_MISMATCH') { $recommendations.Add('현재 분리된 실행 환경에서는 Claude 로그인을 확인할 수 없습니다. 일반 PowerShell 7 창에서 duoforge doctor를 다시 실행해 주세요.') }
     elseif (-not $Claude.subscription) { $recommendations.Add('claude auth status를 일반 호스트 PowerShell 7에서 다시 확인해 주세요. 상태 확인 실패를 미로그인으로 간주하지 않았습니다.') }
     if ($ApiConflicts.Count -gt 0) { $recommendations.Add('표시된 API 인증 우선 환경 변수를 사용자가 직접 정리한 뒤 다시 검사해 주세요. DuoForge는 값을 읽거나 자동 삭제하지 않습니다.') }
-    $recommendations.Add('3A는 현재 Windows 격리 후보가 범위 밖 읽기와 자식 프로세스 차단에 실패하여 비활성화되어 있습니다.')
+    $recommendations.Add('두 프로젝트 비교 기능은 현재 Windows에서 프로젝트 밖 파일 접근과 추가 프로그램 실행을 충분히 막지 못해 사용할 수 없습니다.')
     return @($recommendations)
 }
 

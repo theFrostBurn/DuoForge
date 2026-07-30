@@ -3,10 +3,10 @@ function Get-DuoForgeDisplayModeLabelInternal {
     param([AllowEmptyString()][Parameter(Mandatory)][string]$Mode)
 
     switch ($Mode) {
-        'shared-document' { '컨셉으로 공동 문서 만들기' }
-        'document-merge' { '두 문서를 하나로 합의하기' }
+        'shared-document' { '요구사항으로 공동 문서 만들기' }
+        'document-merge' { '두 문서를 비교해 하나의 합의안 만들기' }
         'dual-document' { '두 문서를 각각 개선하기' }
-        'dual-project-audit' { '두 프로젝트 비교하기(비활성)' }
+        'dual-project-audit' { '두 프로젝트 비교하기 · 준비 중' }
         default { ConvertTo-DuoForgeProgressTextInternal -Text $Mode -MaximumCharacters 120 }
     }
 }
@@ -34,6 +34,66 @@ function Get-DuoForgeDisplayStageLabelInternal {
     }
 }
 
+function Get-DuoForgeDisplayReasoningEffortLabelInternal {
+    [CmdletBinding()]
+    param([AllowEmptyString()][Parameter(Mandatory)][string]$ReasoningEffort)
+
+    switch ($ReasoningEffort) {
+        'low' { '낮음' }
+        'medium' { '보통' }
+        'high' { '높음' }
+        'xhigh' { '매우 높음' }
+        'max' { '최대' }
+        'ultra' { '최대 확장' }
+        default { ConvertTo-DuoForgeProgressTextInternal -Text $ReasoningEffort -MaximumCharacters 80 }
+    }
+}
+
+function Get-DuoForgeDisplayCheckpointLabelInternal {
+    [CmdletBinding()]
+    param(
+        [AllowNull()][AllowEmptyString()][string]$StepKey,
+        [AllowNull()][AllowEmptyString()][string]$RunDirectory
+    )
+
+    if ([string]::IsNullOrWhiteSpace($StepKey)) { return '아직 완료된 AI 작업 없음' }
+    if ($StepKey -eq 'input-snapshot') { return '입력 문서 준비 완료' }
+
+    $step = $null
+    if (-not [string]::IsNullOrWhiteSpace($RunDirectory)) {
+        $stepsPath = Join-Path $RunDirectory 'steps.json'
+        if (Test-Path -LiteralPath $stepsPath -PathType Leaf) {
+            try {
+                $graph = Read-DuoForgeJson -Path $stepsPath
+                $matches = @($graph.steps | Where-Object { [string]$_.stepKey -eq $StepKey })
+                if ($matches.Count -eq 1) { $step = $matches[0] }
+            }
+            catch { $step = $null }
+        }
+    }
+
+    if ($null -eq $step -and $StepKey -match '^r(?<round>\d+)-(?<provider>codex|claude)-(?<stage>.+)$') {
+        $knownStage = [string]$Matches.stage
+        if ($knownStage -in @(
+            'independent-draft', 'independent-merge-draft', 'cross-review', 'author-response',
+            'joint-document-review', 'document-review', 'review-response', 'synthesis',
+            'final-validation', 'owner-response', 'owned-document-revision'
+        )) {
+            $step = [ordered]@{ round = [int]$Matches.round; provider = [string]$Matches.provider; stage = $knownStage; targetDocumentId = $null }
+        }
+    }
+
+    if ($null -eq $step) { return '완료된 AI 작업' }
+    $providerLabel = switch ([string]$step.provider) { 'codex' { 'Codex' } 'claude' { 'Claude' } default { 'AI' } }
+    $stageLabel = Get-DuoForgeDisplayStageLabelInternal -Stage ([string]$step.stage)
+    $targetDocumentId = [string](Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId')
+    if ([string]$step.stage -eq 'document-revision' -and $targetDocumentId -in @('A', 'B')) { $stageLabel = "문서 $targetDocumentId 수정" }
+    elseif ([string]$step.stage -eq 'document-validation' -and $targetDocumentId -in @('A', 'B')) { $stageLabel = "문서 $targetDocumentId 최종 확인" }
+    $round = [int](Get-DuoForgeObjectValue -Object $step -Name 'round' -Default 0)
+    if ($round -gt 0) { return ('{0}차 · {1} · {2}' -f $round, $providerLabel, $stageLabel) }
+    return ('{0} · {1}' -f $providerLabel, $stageLabel)
+}
+
 function Get-DuoForgeDisplayStateLabelInternal {
     [CmdletBinding()]
     param([AllowEmptyString()][Parameter(Mandatory)][string]$Status)
@@ -44,13 +104,13 @@ function Get-DuoForgeDisplayStateLabelInternal {
         'SNAPSHOTTED' { '작업 준비 완료' }
         'RUNNING' { '진행 중' }
         'BLOCKED_PREFLIGHT' { '실행 환경 문제로 멈춤' }
-        'PAUSED_USER' { '안전 일시정지' }
+        'PAUSED_USER' { '사용자 요청으로 멈춤' }
         'PAUSED_QUOTA' { '사용 한도 회복 대기' }
         'AWAITING_USER' { '답변 대기' }
         'AWAITING_EVIDENCE' { '추가 자료 대기' }
         'COMPLETED' { '완료' }
         'COMPLETED_PARTIAL' { '일부 범위만 완료' }
-        'QUESTION_LIMIT_REACHED' { '질문 검토 한도 도달' }
+        'QUESTION_LIMIT_REACHED' { '사용자 확인을 3번 거친 뒤 멈춤' }
         'RESUMABLE_ERROR' { '오류 발생 · 이어서 가능' }
         'SOURCE_DRIFT' { '원본 파일이 변경됨' }
         'FAILED_STAGE' { '작업 실패' }
@@ -76,11 +136,11 @@ function Get-DuoForgeDisplayIssueStatusLabelInternal {
     param([AllowEmptyString()][Parameter(Mandatory)][string]$Status)
 
     switch ($Status) {
-        'OPEN' { '검토 중' }
-        'RESOLVED' { '처리됨' }
+        'OPEN' { '미해결' }
+        'RESOLVED' { '검토 완료' }
         'AWAITING_USER' { '답변 필요' }
         'AWAITING_EVIDENCE' { '자료 필요' }
-        'DEFERRED' { '나중에 처리' }
+        'DEFERRED' { '보류됨' }
         'SUPERSEDED' { '새 항목으로 대체됨' }
         default { ConvertTo-DuoForgeProgressTextInternal -Text $Status -MaximumCharacters 120 }
     }

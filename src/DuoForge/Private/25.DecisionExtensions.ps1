@@ -144,7 +144,7 @@ function Add-DuoForgeRoundInternal {
         $config = Get-DuoForgeConfig
         $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
         $nextPlan = Get-DuoForgeExecutionPlanInternal -Mode ([string]$manifest.mode) -MaxRounds 3 -FirstSynthesizer ([string]$manifest.firstSynthesizer) -MaxCallsPerProvider ([int]$config.limits.maxCallsPerProviderPerRun) -ContextBatchCount $contextBatchCount -WorkflowVersion $workflowVersion
-        if (-not [bool]$nextPlan.withinLimits) { throw (New-DuoForgeException -Code 'DF-PLAN-CALL-LIMIT' -Message '추가 라운드의 최악 호출 계획이 강제 상한을 초과합니다. 입력 범위를 줄인 새 실행이 필요합니다.') }
+        if (-not [bool]$nextPlan.withinLimits) { throw (New-DuoForgeException -Code 'DF-PLAN-CALL-LIMIT' -Message '회차를 추가하면 허용된 AI 요청 횟수를 넘습니다. 입력 범위를 줄여 새 작업을 만들어 주세요.') }
 
         $oldGraph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $directory 'steps.json'))
         $historyDirectory = Join-Path $directory 'history\graphs'

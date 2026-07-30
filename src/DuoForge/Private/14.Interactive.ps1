@@ -48,7 +48,7 @@ function Invoke-DuoForgeGuidedLogin {
     }
     $providerContext = Resolve-DuoForgeProviderExecutionContextInternal -Provider $Provider
     if (-not [bool]$providerContext.liveRuntimeEligible) {
-        throw (New-DuoForgeException -Code 'DF-AUTH-CONTEXT' -Message '현재 격리 프로필에서는 브라우저 로그인을 시작하지 않습니다. 일반 호스트 PowerShell 7에서 다시 실행해 주세요.')
+        throw (New-DuoForgeException -Code 'DF-AUTH-CONTEXT' -Message '현재 분리된 실행 환경에서는 브라우저 로그인을 시작하지 않습니다. 일반 PowerShell 7 창에서 다시 실행해 주세요.')
     }
     if ($Provider -eq 'codex') {
         Write-DuoForgeTextInternal 'Codex 공식 브라우저 로그인을 시작합니다. DuoForge는 인증 정보나 코드를 입력받지 않습니다.'
@@ -105,7 +105,7 @@ function Invoke-DuoForgeInteractiveSetup {
         if ($choice -ieq 'M') {
             $commandRows = [System.Collections.Generic.List[object]]::new()
             foreach ($row in @(New-DuoForgePageHeaderRowsInternal -Title '수동 로그인 명령' -Layout $layout)) { $commandRows.Add($row) }
-            foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '공급자별 명령' -Body '' -Layout $layout -First)) { $commandRows.Add($row) }
+            foreach ($row in @(New-DuoForgeSectionRowsInternal -Title 'AI별 로그인 명령' -Body '' -Layout $layout -First)) { $commandRows.Add($row) }
             foreach ($row in @(New-DuoForgeFieldRowsInternal -Label 'Codex' -Value 'codex login' -Layout $layout -KeyWidth 14)) { $commandRows.Add($row) }
             foreach ($row in @(New-DuoForgeFieldRowsInternal -Label 'Claude' -Value 'claude auth login' -Layout $layout -KeyWidth 14)) { $commandRows.Add($row) }
             foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '로그인 확인' -Value 'codex login status / claude auth status' -Layout $layout -KeyWidth 14)) { $commandRows.Add($row) }
@@ -122,10 +122,10 @@ function Get-DuoForgeInteractiveNewModeOptionsInternal {
     param()
 
     return @(
-        [ordered]@{ key = '1'; value = '1'; shortcuts = @('1'); mode = 'shared-document'; label = '컨셉으로 공동 문서 만들기'; enabled = $true; disabledReason = $null }
-        [ordered]@{ key = '2'; value = '2'; shortcuts = @('2'); mode = 'document-merge'; label = '두 문서를 하나로 합의하기'; enabled = $true; disabledReason = $null }
+        [ordered]@{ key = '1'; value = '1'; shortcuts = @('1'); mode = 'shared-document'; label = '요구사항으로 공동 문서 만들기'; enabled = $true; disabledReason = $null }
+        [ordered]@{ key = '2'; value = '2'; shortcuts = @('2'); mode = 'document-merge'; label = '두 문서를 비교해 하나의 합의안 만들기'; enabled = $true; disabledReason = $null }
         [ordered]@{ key = '3'; value = '3'; shortcuts = @('3'); mode = 'dual-document'; label = '두 문서를 각각 개선하기'; enabled = $true; disabledReason = $null }
-        [ordered]@{ key = '4'; value = '4'; shortcuts = @('4'); mode = 'dual-project-audit'; label = '두 프로젝트 비교하기'; enabled = $false; disabledReason = 'DF-PREFLIGHT-3A-ISOLATION: Windows 격리 게이트가 범위 밖 읽기와 자식 프로세스 차단을 증명하지 못했습니다.' }
+        [ordered]@{ key = '4'; value = '4'; shortcuts = @('4'); mode = 'dual-project-audit'; label = '두 프로젝트 비교하기 · 준비 중'; enabled = $false; disabledReason = '현재 Windows에서는 프로젝트 밖 파일 접근을 막는 안전 기능을 충분히 확인하지 못해 사용할 수 없습니다.' }
     )
 }
 
@@ -148,7 +148,7 @@ function Invoke-DuoForgeInteractiveNew {
     }
     if (-not [bool]$selectedOption.enabled) {
         $layout = Get-DuoForgeDisplayLayoutInternal
-        Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '이 작업 방식은 현재 사용할 수 없습니다.' -Message ([string]$selectedOption.disabledReason) -NextAction '입력 전송과 모델 호출 없이 이전 화면으로 돌아갑니다.' -Layout $layout) -Layout $layout
+        Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '이 작업 방식은 아직 사용할 수 없습니다.' -Message ([string]$selectedOption.disabledReason) -NextAction '문서 전송이나 AI 작업을 시작하지 않고 이전 화면으로 돌아갑니다.' -Layout $layout) -Layout $layout
         return
     }
 
@@ -180,15 +180,15 @@ function Invoke-DuoForgeInteractiveNew {
         return
     }
     Write-DuoForgeExecutionPlan -Validation $validation
-    $confirmation = (Read-Host '변경되지 않는 입력 사본과 작업 기록을 만들까요? [Y/N]').Trim()
+    $confirmation = (Read-Host '선택한 문서를 작업 폴더에 복사하고 새 작업을 만들까요? [Y/N]').Trim()
     if ($confirmation -notin @('Y', 'y')) {
-        Write-DuoForgeTextInternal '취소했습니다. 확정 실행은 생성하지 않았습니다.'
+        Write-DuoForgeTextInternal '취소했습니다. 문서 사본과 작업 기록을 만들지 않았습니다.'
         return
     }
     $run = New-DuoForgeRunInternal -ValidationResult $validation
     $layout = Get-DuoForgeDisplayLayoutInternal
     Write-DuoForgeDisplayRowsInternal -Rows @(
-        New-DuoForgeNoticeRowsInternal -Kind success -Title '작업 준비를 완료했습니다.' -Message '변경되지 않는 입력 사본과 실행 기록을 만들었습니다. AI는 아직 호출하지 않았습니다.' -Layout $layout
+        New-DuoForgeNoticeRowsInternal -Kind success -Title '새 작업을 만들었습니다.' -Message '원본과 분리된 문서 사본과 작업 기록을 만들었습니다. AI 작업은 아직 시작하지 않았습니다.' -Layout $layout
         New-DuoForgeFieldRowsInternal -Label '작업 ID' -Value ([string]$run.runId) -Layout $layout -KeyWidth 10 -Role 'meta'
         New-DuoForgeFieldRowsInternal -Label '경로' -Value ([string]$run.runDirectory) -Layout $layout -KeyWidth 10 -Role 'meta'
     ) -Layout $layout
@@ -202,8 +202,8 @@ function Confirm-DuoForgeInteractivePartialAnalysisInternal {
     $otherErrors = @($Validation.errors | Where-Object { [string]$_.code -ne 'DF-PARTIAL-CONSENT-REQUIRED' })
     if ($partialErrors.Count -eq 0 -or $otherErrors.Count -gt 0 -or -not (Test-DuoForgeInteractiveHost)) { return $Validation }
     $layout = Get-DuoForgeDisplayLayoutInternal
-    Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '전체 입력을 분석할 수 없습니다.' -Message ([string]$partialErrors[0].message) -NextAction '부분 분석과 COMPLETED_PARTIAL 결과에 동의할 때만 정확히 PARTIAL을 입력해 주세요.' -Code 'DF-PARTIAL-CONSENT-REQUIRED' -Layout $layout) -Layout $layout
-    $confirmation = (Read-Host '부분 분석과 COMPLETED_PARTIAL 결과에 동의하면 PARTIAL을 입력하세요').Trim()
+    Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '문서 전체를 읽을 수 없습니다.' -Message ([string]$partialErrors[0].message) -NextAction '문서 일부만 읽은 결과로 진행해도 될 때만 확인어 PARTIAL을 입력해 주세요.' -Code 'DF-PARTIAL-CONSENT-REQUIRED' -Layout $layout) -Layout $layout
+    $confirmation = (Read-Host '문서 일부만 읽은 결과에 동의하면 PARTIAL을 입력하세요').Trim()
     if ($confirmation -cne 'PARTIAL') { return $Validation }
     $Validation.request.allowPartial = $true
     return Test-DuoForgeStartRequestInternal -Request $Validation.request -DoctorReport $Validation.doctor
@@ -247,16 +247,21 @@ function Invoke-DuoForgeInteractiveLiveResume {
     $selections = Get-DuoForgeRunProviderSelectionsInternal -RunDirectory ([string]$Run.runDirectory)
     $layout = Get-DuoForgeDisplayLayoutInternal
     $confirmationRows = [System.Collections.Generic.List[object]]::new()
-    foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title 'LIVE 공급자 호출을 시작하려고 합니다.' -Message '선택한 입력 사본 내용이 Codex와 Claude에 전송됩니다.' -NextAction '아래 AI 선택과 호출 예산을 확인한 뒤 정확히 LIVE를 입력해 주세요.' -Layout $layout)) { $confirmationRows.Add($row) }
-    foreach ($row in @(New-DuoForgeSectionRowsInternal -Title 'AI 선택' -Body '' -Layout $layout)) { $confirmationRows.Add($row) }
+    $blockedWorkItems = [int]$budget.providers.codex.blockedWorkItems + [int]$budget.providers.claude.blockedWorkItems
+    if ($blockedWorkItems -gt 0) {
+        Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind error -Title '계속할 수 없는 AI 작업이 있습니다.' -Message ("허용된 요청 횟수를 모두 사용한 작업이 ${blockedWorkItems}개 있습니다.") -NextAction '오류 내용을 확인한 뒤 해당 작업을 다시 준비해 주세요.' -Layout $layout) -Layout $layout
+        return
+    }
+    foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title 'Codex와 Claude에 문서를 보내 작업을 계속하려고 합니다.' -Message '작업 시작 때 보관한 문서와 이후 추가한 자료·답변·조건이 두 AI에 전송됩니다.' -NextAction '아래 설정과 최대 요청 횟수를 확인한 뒤 확인어 LIVE를 입력해 주세요.' -Layout $layout)) { $confirmationRows.Add($row) }
+    foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '사용할 AI 설정' -Body '' -Layout $layout)) { $confirmationRows.Add($row) }
     foreach ($row in @(New-DuoForgeProviderSelectionRowsInternal -ProviderSelections $selections -Layout $layout)) { $confirmationRows.Add($row) }
-    foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '남은 호출 예산' -Body '' -Layout $layout)) { $confirmationRows.Add($row) }
-    foreach ($row in @(New-DuoForgeFieldRowsInternal -Label 'Codex' -Value (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Codex' -ProviderBudget $budget.providers.codex) -Layout $layout -KeyWidth 8 -Role 'warning')) { $confirmationRows.Add($row) }
-    foreach ($row in @(New-DuoForgeFieldRowsInternal -Label 'Claude' -Value (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Claude' -ProviderBudget $budget.providers.claude) -Layout $layout -KeyWidth 8 -Role 'warning')) { $confirmationRows.Add($row) }
+    foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '계속하면 실행되는 AI 작업' -Body '' -Layout $layout)) { $confirmationRows.Add($row) }
+    foreach ($row in @(New-DuoForgeFieldRowsInternal -Label 'Codex' -Value (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Codex' -ProviderBudget $budget.providers.codex) -Layout $layout -KeyWidth 8 -Role 'warning' -PreserveParagraphs)) { $confirmationRows.Add($row) }
+    foreach ($row in @(New-DuoForgeFieldRowsInternal -Label 'Claude' -Value (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Claude' -ProviderBudget $budget.providers.claude) -Layout $layout -KeyWidth 8 -Role 'warning' -PreserveParagraphs)) { $confirmationRows.Add($row) }
     Write-DuoForgeDisplayRowsInternal -Rows @($confirmationRows) -Layout $layout
-    $confirmation = if ($null -ne $InputReader) { [string](& $InputReader '실제 Codex·Claude 호출을 시작하려면 LIVE를 입력하세요') } else { Read-Host '실제 Codex·Claude 호출을 시작하려면 LIVE를 입력하세요' }
+    $confirmation = if ($null -ne $InputReader) { [string](& $InputReader '문서 전송과 AI 작업 시작에 동의하면 LIVE를 입력하세요') } else { Read-Host '문서 전송과 AI 작업 시작에 동의하면 LIVE를 입력하세요' }
     $confirmation = $confirmation.Trim()
-    if ($confirmation -cne 'LIVE') { Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '라이브 실행을 취소했습니다.' -Layout $layout) -Layout $layout; return }
+    if ($confirmation -cne 'LIVE') { Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title 'AI 작업 시작을 취소했습니다.' -Layout $layout) -Layout $layout; return }
     $resultsRoot = [System.IO.Path]::GetDirectoryName([string]$Run.runDirectory)
     $result = if ($null -ne $ResumeInvoker) {
         & $ResumeInvoker ([string]$Run.state.runId) $resultsRoot $true
@@ -313,24 +318,26 @@ function Invoke-DuoForgeInteractiveIssueExplanation {
     $requiredCalls = if ($Provider -eq 'both') { 2 } else { 1 }
     if ([int]$existing.budget.remaining -lt $requiredCalls) {
         $layout = Get-DuoForgeDisplayLayoutInternal
-        Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '설명 호출 잔여 예산이 부족합니다.' -Message ('남음 {0}회 · 필요 {1}회' -f $existing.budget.remaining, $requiredCalls) -Layout $layout) -Layout $layout
+        Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '추가 설명을 요청할 수 있는 횟수가 부족합니다.' -Message ('요청 가능 {0}회 · 이번에 필요한 요청 {1}회' -f $existing.budget.remaining, $requiredCalls) -Layout $layout) -Layout $layout
         Write-DuoForgeExplanationRecords -Records @($existing.explanations)
         return
     }
     $layout = Get-DuoForgeDisplayLayoutInternal
     $confirmationRows = [System.Collections.Generic.List[object]]::new()
-    foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '새 AI 설명 호출을 시작하려고 합니다.' -Message ('검토 항목 {0} · {1} 관점 · {2} 수준 · {3} 초점' -f $IssueId, $Provider, $Level, $Focus) -NextAction '아래 AI 선택과 호출 예산을 확인한 뒤 정확히 LIVE를 입력해 주세요.' -Layout $layout)) { $confirmationRows.Add($row) }
-    foreach ($row in @(New-DuoForgeSectionRowsInternal -Title 'AI 선택' -Body '' -Layout $layout)) { $confirmationRows.Add($row) }
+    $providerLabel = switch ($Provider) { 'codex' { 'Codex' } 'claude' { 'Claude' } 'both' { 'Codex와 Claude 비교' } }
+    $levelLabel = switch ($Level) { 'beginner' { '쉽게' } 'general' { '일반' } 'expert' { '전문가' } }
+    foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title 'AI에 새 설명을 요청하려고 합니다.' -Message ('확인할 내용 {0} · {1} · 설명 수준 {2}' -f $IssueId, $providerLabel, $levelLabel) -NextAction '아래 설정과 요청 횟수를 확인한 뒤 확인어 LIVE를 입력해 주세요.' -Layout $layout)) { $confirmationRows.Add($row) }
+    foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '사용할 AI 설정' -Body '' -Layout $layout)) { $confirmationRows.Add($row) }
     foreach ($row in @(New-DuoForgeProviderSelectionRowsInternal -ProviderSelections $Run.manifest.providerSelections -Layout $layout)) { $confirmationRows.Add($row) }
-    foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '호출 예산' -Body '' -Layout $layout)) { $confirmationRows.Add($row) }
-    foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '이번 호출' -Value ('{0}회' -f $requiredCalls) -Layout $layout -KeyWidth 12 -Role 'warning')) { $confirmationRows.Add($row) }
-    foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '남은 예산' -Value ('{0}회' -f $existing.budget.remaining) -Layout $layout -KeyWidth 12 -Role 'warning')) { $confirmationRows.Add($row) }
+    foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '추가 설명 요청 횟수' -Body '' -Layout $layout)) { $confirmationRows.Add($row) }
+    foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '이번 요청' -Value ('{0}회' -f $requiredCalls) -Layout $layout -KeyWidth 12 -Role 'warning')) { $confirmationRows.Add($row) }
+    foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '요청 가능' -Value ('{0}회' -f $existing.budget.remaining) -Layout $layout -KeyWidth 12 -Role 'warning')) { $confirmationRows.Add($row) }
     Write-DuoForgeDisplayRowsInternal -Rows @($confirmationRows) -Layout $layout
-    $confirmation = (Read-Host '실제 설명 호출을 시작하려면 LIVE를 입력하세요').Trim()
-    if ($confirmation -cne 'LIVE') { Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '설명 호출을 취소했습니다.' -Layout $layout) -Layout $layout; return }
+    $confirmation = (Read-Host 'AI에 설명을 요청하려면 LIVE를 입력하세요').Trim()
+    if ($confirmation -cne 'LIVE') { Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '설명 요청을 취소했습니다.' -Layout $layout) -Layout $layout; return }
     $result = Invoke-DuoForgeIssueExplanationInternal -RunId ([string]$Run.state.runId) -IssueId $IssueId -Provider $Provider -Level $Level -Focus $Focus -ResultsRoot $resultsRoot -LiveConsent $true
     Write-DuoForgeExplanationRecords -Records @($result.explanations)
-    Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '설명 호출을 완료했습니다.' -Message ('예산 사용 {0}/{1} · 남음 {2}' -f $result.budget.used, $result.budget.maximum, $result.budget.remaining) -Layout $layout) -Layout $layout
+    Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '새 설명을 받았습니다.' -Message ('사용 {0}/{1}회 · 추가 요청 가능 {2}회' -f $result.budget.used, $result.budget.maximum, $result.budget.remaining) -Layout $layout) -Layout $layout
 }
 
 function Test-DuoForgeInteractiveOpinionPlaceholderInternal {
@@ -824,7 +831,7 @@ function New-DuoForgeInteractiveQuestionCardRowsInternal {
     )
 
     $layout = Get-DuoForgeDisplayLayoutInternal -Width $Width -Height $Height -NoColor
-    # 질문 검토 회차와 실제 메뉴의 주관식·다른 방법·이전 동작까지 먼저 예약한다.
+    # 사용자 확인 화면과 실제 메뉴의 주관식·다른 방법·이전 동작까지 먼저 예약한다.
     # 넓은 화면은 메뉴 설명이 덜 줄바꿈되므로 남는 행을 질문 본문에 돌려준다.
     $estimatedMenuLines = @($Presentation.options).Count + $(
         if ($Width -le 80) { 12 }
@@ -860,7 +867,7 @@ function New-DuoForgeInteractiveQuestionCardRowsInternal {
 
     if ($Height -le 23) {
         # 가장 작은 화면은 상태·권장 행을 메뉴에 맡기되, 질문의 세 핵심 섹션은 제목과 본문을 분리한다.
-        & $append @(& $newQuestionSection '핵심 쟁점' ([string]$Presentation.compactCoreIssue) 2 'text' -First -Dense)
+        & $append @(& $newQuestionSection '확인할 핵심 내용' ([string]$Presentation.compactCoreIssue) 2 'text' -First -Dense)
         & $append @(& $newQuestionSection 'AI 검토와 문서 처리' ([string]$Presentation.reviewFlow) 1 'text' -Dense)
         & $append @(& $newQuestionSection '사용자에게 필요한 결정' ([string]$Presentation.requestPrompt) 1 'warning' -Dense)
     }
@@ -868,7 +875,7 @@ function New-DuoForgeInteractiveQuestionCardRowsInternal {
         if ($Height -gt 24) {
             & $append @(& $newQuestionSection '현재 상태' ([string]$Presentation.compactCurrentState) 1 'text' -First -Dense:$denseSections)
         }
-        & $append @(& $newQuestionSection '핵심 쟁점' ([string]$Presentation.compactCoreIssue) 1 'text' -First:($Height -le 24) -Dense:$denseSections)
+        & $append @(& $newQuestionSection '확인할 핵심 내용' ([string]$Presentation.compactCoreIssue) 1 'text' -First:($Height -le 24) -Dense:$denseSections)
         & $append @(& $newQuestionSection 'AI 검토와 문서 처리' ([string]$Presentation.reviewFlow) 1 'text' -Dense:$denseSections)
         & $append @(& $newQuestionSection '사용자에게 필요한 결정' ([string]$Presentation.requestPrompt) 1 'warning' -Dense:$denseSections)
     }
@@ -904,7 +911,7 @@ function New-DuoForgeInteractiveQuestionCardRowsInternal {
 
         if ($budget -ge $expandedMinimumRows) {
             & $append @(New-DuoForgeSectionRowsInternal -Title '현재 상태' -Body ([string]$Presentation.currentState) -Layout $layout -First -Compact -MaximumBodyLines ([int]$lineBudget.current))
-            & $append @(New-DuoForgeSectionRowsInternal -Title '핵심 쟁점' -Body $expandedCoreIssue -Layout $layout -MaximumBodyLines ([int]$lineBudget.core))
+            & $append @(New-DuoForgeSectionRowsInternal -Title '확인할 핵심 내용' -Body $expandedCoreIssue -Layout $layout -MaximumBodyLines ([int]$lineBudget.core))
             & $append @(New-DuoForgeSectionRowsInternal -Title 'AI 검토와 문서 처리' -Body ([string]$Presentation.reviewFlow) -Layout $layout -MaximumBodyLines ([int]$lineBudget.review))
             & $append @(New-DuoForgeSectionRowsInternal -Title '제안 방향' -Body $expandedProposal -Layout $layout -MaximumBodyLines ([int]$lineBudget.proposal))
             & $append @(New-DuoForgeSectionRowsInternal -Title '사용자에게 필요한 결정' -Body ([string]$Presentation.requestPrompt) -Layout $layout -MaximumBodyLines ([int]$lineBudget.request) -BodyRole 'warning')
@@ -914,7 +921,7 @@ function New-DuoForgeInteractiveQuestionCardRowsInternal {
         }
         else {
             & $append @(& $newQuestionSection '현재 상태' ([string]$Presentation.compactCurrentState) 1 'text' -First)
-            & $append @(& $newQuestionSection '핵심 쟁점' ([string]$Presentation.compactCoreIssue) 2)
+            & $append @(& $newQuestionSection '확인할 핵심 내용' ([string]$Presentation.compactCoreIssue) 2)
             & $append @(& $newQuestionSection 'AI 검토와 문서 처리' ([string]$Presentation.reviewFlow) 1)
             & $append @(& $newQuestionSection '사용자에게 필요한 결정' ([string]$Presentation.requestPrompt) 1 'warning')
             & $append @(& $newQuestionSection '권장 방향' ([string]$Presentation.recommendedLabel) 1 'success')
@@ -950,7 +957,7 @@ function New-DuoForgeInteractiveQuestionDetailRowsInternal {
 
     & $append @(New-DuoForgePageHeaderRowsInternal -Title ("{0} · {1} · {2}" -f $Question.issueKey, $Presentation.targetLabel, $Presentation.subjectLabel) -Tag ([string]$Presentation.requestKind) -Layout $layout)
     & $append @(New-DuoForgeSectionRowsInternal -Title '현재 상태' -Body ([string]$Presentation.currentState) -Layout $layout -First -PreserveParagraphs)
-    & $append @(New-DuoForgeSectionRowsInternal -Title '핵심 쟁점' -Body $coreIssue -Layout $layout -PreserveParagraphs)
+    & $append @(New-DuoForgeSectionRowsInternal -Title '확인할 핵심 내용' -Body $coreIssue -Layout $layout -PreserveParagraphs)
     & $append @(New-DuoForgeSectionRowsInternal -Title 'AI 검토와 문서 처리' -Body '' -Layout $layout)
     $aiKeyWidth = 12
     & $append @(New-DuoForgeFieldRowsInternal -Label '최초 제기' -Value ([string]$Presentation.originSummary) -Layout $layout -KeyWidth $aiKeyWidth)
@@ -1038,12 +1045,12 @@ function Invoke-DuoForgeInteractiveCustomDecisionInternal {
             foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '적용 대상' -Value ("{0} · {1}" -f $IssueId, (Get-DuoForgeInteractiveDocumentLabelInternal -TargetDocumentId ([string]$preview.affectedTarget))) -Layout $layout -KeyWidth 12)) { $previewRows.Add($row) }
             foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '처리 결과' -Value $(if ([bool]$preview.replacesPreviousAnswer) { '기존 답변을 이 주관식 답변으로 변경합니다.' } else { '이 질문을 답변 완료로 처리합니다.' }) -Layout $layout -KeyWidth 12)) { $previewRows.Add($row) }
             foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '적용 방식' -Value ([string]$preview.application) -Layout $layout -KeyWidth 12)) { $previewRows.Add($row) }
-            foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title 'APPLY를 입력하면 이 답변을 기록하고 관련 단계를 다시 실행 대상으로 만듭니다.' -Layout $layout)) { $previewRows.Add($row) }
+            foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title 'APPLY를 입력하면 이 답변을 기록하고 관련 문서 작성과 확인 작업을 다시 진행합니다.' -Layout $layout)) { $previewRows.Add($row) }
             Write-DuoForgeDisplayRowsInternal -Rows @($previewRows) -Layout $layout
             $confirmation = ([string](& $readText '이 내용으로 확정하려면 APPLY를 입력하세요')).Trim()
             if ($confirmation -cne 'APPLY') { Write-DuoForgeTextInternal '주관식 답변 입력을 취소했습니다.'; return $null }
             $applied = Set-DuoForgeUserDecisionInternal -RunId ([string]$Run.state.runId) -IssueId $IssueId -Action answer -CustomText $text -ResultsRoot $resultsRoot -ReplacePrevious:([bool]$preview.replacesPreviousAnswer)
-            Write-DuoForgeTextInternal ("주관식 답변을 기록했습니다. 다시 실행할 단계: {0}" -f ($applied.resetSteps -join ', ')) -ForegroundColor Green
+            Write-DuoForgeTextInternal ("주관식 답변을 기록했습니다. 관련 AI 작업 {0}개를 다시 진행합니다." -f @($applied.resetSteps).Count) -ForegroundColor Green
             return [ordered]@{ kind = 'answer'; result = $applied; preview = $preview }
         }
 
@@ -1056,13 +1063,13 @@ function Invoke-DuoForgeInteractiveCustomDecisionInternal {
         foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '연결 기준' -Value ("{0} · {1}" -f $IssueId, (Get-DuoForgeInteractiveDocumentLabelInternal -TargetDocumentId ([string]$preview.affectedTarget))) -Layout $layout -KeyWidth 16)) { $previewRows.Add($row) }
         foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '적용 범위' -Value '현재·이후의 객관식 및 주관식 답변과 함께 두 AI의 마지막 문서 생성·검증 단계에 적용합니다.' -Layout $layout -KeyWidth 16)) { $previewRows.Add($row) }
         foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '현재 질문 처리' -Value '공통 전제이므로 현재 질문은 미답변으로 유지됩니다.' -Layout $layout -KeyWidth 16)) { $previewRows.Add($row) }
-        foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '충돌 처리' -Value '기존 답변과 양립할 수 없으면 AI가 새 차단 쟁점으로 알려야 합니다.' -Layout $layout -KeyWidth 16)) { $previewRows.Add($row) }
-        foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title 'APPLY를 입력하면 이 전제를 기록하고 관련 단계를 다시 실행 대상으로 만듭니다.' -Layout $layout)) { $previewRows.Add($row) }
+        foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '서로 맞지 않을 때' -Value '기존 답변과 함께 적용할 수 없으면 AI가 반드시 해결할 내용으로 알려야 합니다.' -Layout $layout -KeyWidth 18)) { $previewRows.Add($row) }
+        foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title 'APPLY를 입력하면 이 전제를 기록하고 관련 문서 작성과 확인 작업을 다시 진행합니다.' -Layout $layout)) { $previewRows.Add($row) }
         Write-DuoForgeDisplayRowsInternal -Rows @($previewRows) -Layout $layout
         $confirmation = ([string](& $readText '이 공통 전제를 적용하려면 APPLY를 입력하세요')).Trim()
         if ($confirmation -cne 'APPLY') { Write-DuoForgeTextInternal '공통 전제 입력을 취소했습니다.'; return $null }
         $applied = Set-DuoForgeUserConstraintInternal -RunId ([string]$Run.state.runId) -IssueId $IssueId -Text $text -ResultsRoot $resultsRoot -Confirm
-        Write-DuoForgeTextInternal ("공통 전제를 기록했습니다. 다시 실행할 단계: {0}" -f ($applied.resetSteps -join ', ')) -ForegroundColor Green
+        Write-DuoForgeTextInternal ("공통 전제를 기록했습니다. 관련 AI 작업 {0}개를 다시 진행합니다." -f @($applied.resetSteps).Count) -ForegroundColor Green
         return [ordered]@{ kind = 'constraint'; result = $applied; preview = $preview }
     }
     catch {
@@ -1091,9 +1098,9 @@ function Invoke-DuoForgeInteractiveQuestion {
     $runIssues = if ($null -ne $issueLedger) { @(Get-DuoForgeObjectValue -Object $issueLedger -Name 'issues' -Default @()) } else { @() }
     $batch = Get-DuoForgePendingQuestionBatchInternal -Questions $questions
     $layout = Get-DuoForgeDisplayLayoutInternal
-    Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeFieldRowsInternal -Label '질문 검토' -Value ("{0}/{1} · 현재 배치 {2}개 · 뒤에 {3}개" -f $reviewProgress.cycle, $reviewProgress.maximum, $batch.batchSize, $batch.remainingAfterBatch) -Layout $layout -Indent 0 -KeyWidth 10 -Role 'meta') -Layout $layout
+    Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeFieldRowsInternal -Label '사용자 확인 단계' -Value ("{0}/{1} · 지금 볼 질문 {2}개 · 이후 {3}개" -f $reviewProgress.cycle, $reviewProgress.maximum, $batch.batchSize, $batch.remainingAfterBatch) -Layout $layout -Indent 0 -KeyWidth 16 -Role 'meta') -Layout $layout
     if ([int]$reviewProgress.cycle -ge [int]$reviewProgress.maximum) {
-        Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '마지막 질문 검토입니다.' -Message '이번 검토 뒤에 생기는 새 질문은 자동으로 묻지 않습니다.' -Layout $layout) -Layout $layout
+        Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '마지막 사용자 확인 단계입니다.' -Message '이번 답변을 반영한 뒤 새 질문이 생겨도 자동으로 다시 묻지 않습니다.' -Layout $layout) -Layout $layout
     }
     if ($batch.batchSize -gt 1) {
         $batchItems = [System.Collections.Generic.List[object]]::new()
@@ -1170,8 +1177,8 @@ function Invoke-DuoForgeInteractiveQuestion {
             $preview = New-DuoForgeDecisionConstraintPreviewInternal -RunId ([string]$Run.state.runId) -IssueId ([string]$question.issueKey) -Text $constraintText -ResultsRoot $resultsRoot
             $previewRows = [System.Collections.Generic.List[object]]::new()
             foreach ($row in @(New-DuoForgePageHeaderRowsInternal -Title '보충 조건 적용 전 확인' -Tag 'APPLY 확인' -Layout $layout)) { $previewRows.Add($row) }
-            foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '구조화된 미리보기' -Body '' -Layout $layout -First)) { $previewRows.Add($row) }
-            foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '정규화된 제약' -Value ([string]$preview.normalizedConstraint) -Layout $layout -KeyWidth 16 -PreserveParagraphs)) { $previewRows.Add($row) }
+            foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '입력 내용 확인' -Body '' -Layout $layout -First)) { $previewRows.Add($row) }
+            foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '정리된 조건' -Value ([string]$preview.normalizedConstraint) -Layout $layout -KeyWidth 16 -PreserveParagraphs)) { $previewRows.Add($row) }
             foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '영향 대상' -Value ([string]$preview.affectedTarget) -Layout $layout -KeyWidth 16)) { $previewRows.Add($row) }
             foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '적용 방식' -Value ([string]$preview.application) -Layout $layout -KeyWidth 16 -PreserveParagraphs)) { $previewRows.Add($row) }
             foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '이 조건은 이후 두 AI 검토에 함께 적용됩니다.' -NextAction '위 미리보기대로 기록하려면 정확히 APPLY를 입력해 주세요.' -Layout $layout)) { $previewRows.Add($row) }
@@ -1179,7 +1186,7 @@ function Invoke-DuoForgeInteractiveQuestion {
             $confirmation = ([string](& $readText '이 구조화 미리보기대로 적용하려면 APPLY를 입력하세요')).Trim()
             if ($confirmation -cne 'APPLY') { Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '제약 조건 적용을 취소했습니다.' -Layout $layout) -Layout $layout; continue }
             $applied = Set-DuoForgeUserConstraintInternal -RunId ([string]$Run.state.runId) -IssueId ([string]$question.issueKey) -Text $constraintText -ResultsRoot $resultsRoot -Confirm
-            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '제약 조건을 기록했습니다.' -Message ("다시 실행할 단계: {0}" -f ($applied.resetSteps -join ', ')) -Layout $layout) -Layout $layout
+            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '제약 조건을 기록했습니다.' -Message ("관련 AI 작업 {0}개를 다시 진행합니다." -f @($applied.resetSteps).Count) -Layout $layout) -Layout $layout
             return
         }
         if ($choice -eq 'explain') {
@@ -1197,7 +1204,7 @@ function Invoke-DuoForgeInteractiveQuestion {
         try {
             $answerChoice = if ($choice -like 'answer:*') { $choice.Substring(7) } else { $choice }
             $result = Set-DuoForgeUserDecisionInternal -RunId ([string]$Run.state.runId) -IssueId ([string]$question.issueKey) -Action answer -Choice $answerChoice -ResultsRoot $resultsRoot
-            Write-DuoForgeTextInternal ("결정을 기록했습니다. 다시 실행할 단계: {0}" -f ($result.resetSteps -join ', ')) -ForegroundColor Green
+            Write-DuoForgeTextInternal ("답변을 기록했습니다. 관련 AI 작업 {0}개를 다시 진행합니다." -f @($result.resetSteps).Count) -ForegroundColor Green
             $remainingQuestions = @(Get-DuoForgeInteractivePendingQuestionsInternal -RunDirectory ([string]$Run.runDirectory))
             if ($remainingQuestions.Count -gt 0) {
                 Write-DuoForgeTextInternal ("아직 답하지 않은 질문이 {0}개 있습니다. 다음 질문 목록을 이어서 표시합니다. Q를 누르면 나중에 다시 답할 수 있습니다." -f $remainingQuestions.Count) -ForegroundColor Yellow
@@ -1233,7 +1240,7 @@ function New-DuoForgeInteractiveEvidenceIssueRowsInternal {
         $subjectLabel = Get-DuoForgeInteractiveCategoryLabelInternal -Category ([string](Get-DuoForgeObjectValue -Object $Issue -Name 'category' -Default ''))
         foreach ($row in @(New-DuoForgePageHeaderRowsInternal -Title ('{0} · {1} · {2}' -f $Issue.issueId, $targetLabel, $subjectLabel) -Tag '추가 자료 요청' -Layout $layout)) { $rows.Add($row) }
     }
-    foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '핵심 쟁점' -Body (Get-DuoForgeInteractiveReadableTextInternal -Text ([string]$Issue.claim) -MaximumCharacters 4000) -Layout $layout -First:$IncludeHeader -PreserveParagraphs)) { $rows.Add($row) }
+    foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '확인할 핵심 내용' -Body (Get-DuoForgeInteractiveReadableTextInternal -Text ([string]$Issue.claim) -MaximumCharacters 4000) -Layout $layout -First:$IncludeHeader -PreserveParagraphs)) { $rows.Add($row) }
     foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '필요한 자료' -Body (Get-DuoForgeInteractiveReadableTextInternal -Text ([string]$Issue.proposal) -MaximumCharacters 4000) -Layout $layout -PreserveParagraphs)) { $rows.Add($row) }
     return @($rows)
 }
@@ -1247,7 +1254,7 @@ function Invoke-DuoForgeInteractiveEvidence {
     )
 
     $issues = @($Run.issues.issues | Where-Object { [string]$_.resolutionStatus -eq 'AWAITING_EVIDENCE' })
-    if ($issues.Count -eq 0) { Write-DuoForgeTextInternal '추가 자료를 기다리는 검토 항목이 없습니다.'; return }
+    if ($issues.Count -eq 0) { Write-DuoForgeTextInternal '추가 자료가 필요한 내용이 없습니다.'; return }
     $items = [System.Collections.Generic.List[object]]::new()
     for ($index = 0; $index -lt $issues.Count; $index++) {
         $targetLabel = Get-DuoForgeInteractiveDocumentLabelInternal -TargetDocumentId (Get-DuoForgeIssueTargetInternal -Issue $issues[$index])
@@ -1255,13 +1262,13 @@ function Invoke-DuoForgeInteractiveEvidence {
         $items.Add([ordered]@{
             value = [string]$index
             label = ('{0} · {1} · {2}' -f $issues[$index].issueId, $targetLabel, $subjectLabel)
-            detail = '선택하면 핵심 쟁점과 필요한 자료를 줄이지 않고 보여줍니다.'
+            detail = '선택하면 확인할 핵심 내용과 필요한 자료를 모두 보여줍니다.'
             shortcuts = @([string]($index + 1))
             enabled = $true
         })
     }
     $items.Add([ordered]@{ value = 'B'; label = '이전으로'; shortcuts = @('B'); enabled = $true })
-    $choice = Invoke-DuoForgeMenuInternal -Items @($items) -Title '자료를 추가할 검토 항목을 선택해 주세요.' -EscapeValue 'B' -InputReader $InputReader -MenuInvoker $MenuInvoker
+    $choice = Invoke-DuoForgeMenuInternal -Items @($items) -Title '자료를 추가할 내용을 선택해 주세요.' -EscapeValue 'B' -InputReader $InputReader -MenuInvoker $MenuInvoker
     if ($choice -ieq 'B') { return }
     $issue = $issues[[int]$choice]
     $layout = Get-DuoForgeDisplayLayoutInternal
@@ -1270,17 +1277,17 @@ function Invoke-DuoForgeInteractiveEvidence {
     $file = Read-DuoForgePathChoice -Prompt '추가할 Markdown 자료 문서를 선택해 주세요.' -Role 'user-evidence' -Type File -InputReader $InputReader -MenuInvoker $MenuInvoker
     if ($null -eq $file) { return }
     $evidenceRows = [System.Collections.Generic.List[object]]::new()
-    foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '근거 문서를 입력 사본으로 추가하려고 합니다.' -Message '원본 파일은 변경하지 않고 작업 폴더에 보존합니다.' -Layout $layout)) { $evidenceRows.Add($row) }
+    foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '추가 자료를 작업에 연결하려고 합니다.' -Message '선택한 문서를 작업 폴더에 별도로 보관하며 원본 파일은 변경하지 않습니다.' -Layout $layout)) { $evidenceRows.Add($row) }
     foreach ($row in @(New-DuoForgeInteractiveEvidenceIssueRowsInternal -Issue $issue -Width ([int]$layout.width))) { $evidenceRows.Add($row) }
     foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '추가할 근거' -Body '' -Layout $layout)) { $evidenceRows.Add($row) }
-    foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '검토 항목' -Value ([string]$issue.issueId) -Layout $layout -KeyWidth 12)) { $evidenceRows.Add($row) }
+    foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '확인할 내용' -Value ([string]$issue.issueId) -Layout $layout -KeyWidth 14)) { $evidenceRows.Add($row) }
     foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '문서 경로' -Value ([string]$file) -Layout $layout -KeyWidth 12)) { $evidenceRows.Add($row) }
     Write-DuoForgeDisplayRowsInternal -Rows @($evidenceRows) -Layout $layout
     $confirmation = (Read-Host '추가하려면 Y를 입력하세요').Trim()
     if ($confirmation -notin @('Y', 'y')) { Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '근거 추가를 취소했습니다.' -Layout $layout) -Layout $layout; return }
     $resultsRoot = [System.IO.Path]::GetDirectoryName([string]$Run.runDirectory)
     $result = Add-DuoForgeIssueEvidenceInternal -RunId ([string]$Run.state.runId) -IssueId ([string]$issue.issueId) -File $file -ResultsRoot $resultsRoot
-    Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '근거 문서를 보존했습니다.' -Message ('입력 사본 {0} · 다시 실행할 단계: {1}' -f $result.snapshotName, ($result.resetSteps -join ', ')) -Layout $layout) -Layout $layout
+    Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '추가 자료를 연결했습니다.' -Message ("관련 AI 작업 {0}개를 다시 진행합니다." -f @($result.resetSteps).Count) -Layout $layout) -Layout $layout
 }
 
 function Get-DuoForgeInteractiveDecisionChangeContextInternal {
@@ -1364,7 +1371,7 @@ function New-DuoForgeInteractiveDecisionChangeRowsInternal {
     if (-not [string]::IsNullOrWhiteSpace([string]$Context.legacyNote)) {
         & $append @(New-DuoForgeSectionRowsInternal -Title '복원 안내' -Body ([string]$Context.legacyNote) -Layout $layout -BodyRole 'warning' -PreserveParagraphs)
     }
-    & $append @(New-DuoForgeSectionRowsInternal -Title '핵심 쟁점' -Body ([string]$Context.coreIssue) -Layout $layout -PreserveParagraphs)
+    & $append @(New-DuoForgeSectionRowsInternal -Title '확인할 핵심 내용' -Body ([string]$Context.coreIssue) -Layout $layout -PreserveParagraphs)
     & $append @(New-DuoForgeSectionRowsInternal -Title '현재 답변' -Body ([string]$Context.currentAnswer) -Layout $layout -BodyRole 'success' -PreserveParagraphs)
     return @($rows)
 }
@@ -1427,7 +1434,7 @@ function Invoke-DuoForgeInteractiveDecisionChangeInternal {
     $resultsRoot = [System.IO.Path]::GetDirectoryName([string]$Run.runDirectory)
     try {
         $changed = Set-DuoForgeUserDecisionInternal -RunId ([string]$Run.state.runId) -IssueId ([string]$decision.issueId) -Action answer -Choice $choice -ResultsRoot $resultsRoot -ReplacePrevious
-        Write-DuoForgeTextInternal ("결정을 개정 {0}로 변경했습니다. 다시 실행할 단계: {1}" -f $changed.revision, ($changed.resetSteps -join ', ')) -ForegroundColor Green
+        Write-DuoForgeTextInternal ("답변을 변경했습니다. 관련 AI 작업 {0}개를 다시 진행합니다." -f @($changed.resetSteps).Count) -ForegroundColor Green
     }
     catch {
         if ([string]$_.Exception.Data['DuoForgeCode'] -eq 'DF-DECISION-CHOICE') { Write-DuoForgeTextInternal '올바른 선택지를 입력해 주세요.' -ForegroundColor Yellow; return }
@@ -1451,10 +1458,10 @@ function Invoke-DuoForgeInteractiveRun {
         $statusRows = [System.Collections.Generic.List[object]]::new()
         foreach ($row in @(New-DuoForgePageHeaderRowsInternal -Title ([string]$run.manifest.name) -Tag (Get-DuoForgeDisplayStateLabelInternal -Status ([string]$run.state.status)) -Layout $layout)) { $statusRows.Add($row) }
         foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '현재 상태' -Body '' -Layout $layout -First)) { $statusRows.Add($row) }
-        foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '마지막 완료' -Value (Get-DuoForgeDisplayStageLabelInternal -Stage ([string]$run.state.lastCompletedStage)) -Layout $layout -KeyWidth 14)) { $statusRows.Add($row) }
-        foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '검토 현황' -Value ("남은 항목 {0}개 · 진행을 막는 항목 {1}개" -f @($run.state.openIssues).Count, @($run.state.blockingIssues).Count) -Layout $layout -KeyWidth 14)) { $statusRows.Add($row) }
-        if ([int]$reviewProgress.cycle -gt 0) { foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '질문 검토' -Value ("{0}/{1}" -f $reviewProgress.cycle, $reviewProgress.maximum) -Layout $layout -KeyWidth 14 -Role 'meta')) { $statusRows.Add($row) } }
-        if ([bool]$reviewProgress.limitReached) { foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '질문 검토 한도에 도달했습니다.' -Message '세 차례의 질문·답변·검토 뒤에도 새 차단 질문이 남았습니다.' -NextAction '검토 항목과 결과 문서를 확인해 주세요.' -Layout $layout)) { $statusRows.Add($row) } }
+        foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '마지막 완료' -Value (Get-DuoForgeDisplayCheckpointLabelInternal -StepKey ([string]$run.state.lastCompletedStage) -RunDirectory ([string]$run.runDirectory)) -Layout $layout -KeyWidth 14)) { $statusRows.Add($row) }
+        foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '남은 확인 사항' -Value ("미해결 {0}개 · 계속하려면 해결할 사항 {1}개" -f @($run.state.openIssues).Count, @($run.state.blockingIssues).Count) -Layout $layout -KeyWidth 16)) { $statusRows.Add($row) }
+        if ([int]$reviewProgress.cycle -gt 0) { foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '사용자 확인 단계' -Value ("{0}/{1}" -f $reviewProgress.cycle, $reviewProgress.maximum) -Layout $layout -KeyWidth 16 -Role 'meta')) { $statusRows.Add($row) } }
+        if ([bool]$reviewProgress.limitReached) { foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '사용자 확인을 3번 거친 뒤 멈췄습니다.' -Message '답변을 세 차례 반영했지만 아직 사용자가 결정해야 할 내용이 남았습니다.' -NextAction '확인할 내용과 결과 문서를 검토해 주세요.' -Layout $layout)) { $statusRows.Add($row) } }
         Write-DuoForgeDisplayRowsInternal -Rows @(Add-DuoForgeTrailingSpacerRowInternal -Rows @($statusRows)) -Layout $layout
         $menuItems = [System.Collections.Generic.List[object]]::new()
         $terminalStates = @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED')
@@ -1481,8 +1488,8 @@ function Invoke-DuoForgeInteractiveRun {
                 disabledReason = if ($pendingQuestionCount -gt 0) { "아직 답하지 않은 질문이 ${pendingQuestionCount}개 있습니다." } else { '' }
             })
         }
-        if ([string]$run.state.status -notin @('PAUSED_USER') -and [string]$run.state.status -notin $terminalStates) { $menuItems.Add([ordered]@{ value = 'P'; label = '다음 AI 호출 전 안전 일시정지 요청'; shortcuts = @('P'); enabled = $true }) }
-        $menuItems.Add([ordered]@{ value = 'I'; label = '검토 항목 보기'; shortcuts = @('I'); enabled = $true })
+        if ([string]$run.state.status -notin @('PAUSED_USER') -and [string]$run.state.status -notin $terminalStates) { $menuItems.Add([ordered]@{ value = 'P'; label = '현재 AI 작업이 끝난 뒤 멈추기'; shortcuts = @('P'); enabled = $true }) }
+        $menuItems.Add([ordered]@{ value = 'I'; label = '확인할 내용 보기'; shortcuts = @('I'); enabled = $true })
         if (Test-Path -LiteralPath (Join-Path ([string]$run.runDirectory) 'final') -PathType Container) { $menuItems.Add([ordered]@{ value = 'O'; label = '결과 폴더 열기'; shortcuts = @('O'); enabled = $true }) }
         $menuItems.Add([ordered]@{ value = 'B'; label = '이전으로'; shortcuts = @('B'); enabled = $true })
         $choice = Invoke-DuoForgeMenuInternal -Items @($menuItems) -Title '다음 동작' -EscapeValue 'B' -InputReader $InputReader -MenuInvoker $MenuInvoker -ContextTransition
@@ -1494,7 +1501,7 @@ function Invoke-DuoForgeInteractiveRun {
         if ($choice -ieq 'P' -and [string]$run.state.status -notin @('PAUSED_USER', 'COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED')) {
             $pause = Request-DuoForgePauseInternal -RunId ([string]$run.state.runId) -ResultsRoot $resultsRoot
             if ($pause.alreadyRequested) { Write-DuoForgeTextInternal ('이미 일시정지가 요청되어 있습니다: {0}' -f $pause.requestId) }
-            else { Write-DuoForgeTextInternal '일시정지를 요청했습니다. 현재 호출이 완료된 뒤 다음 호출 전에 멈춥니다.' -ForegroundColor Green }
+            else { Write-DuoForgeTextInternal '멈추기를 요청했습니다. 현재 AI 작업이 끝난 뒤 멈춥니다.' -ForegroundColor Green }
             continue
         }
         if ($choice -ieq 'I') { Write-DuoForgeIssueList -Issues @($run.issues.issues); continue }

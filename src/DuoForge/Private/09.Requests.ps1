@@ -250,7 +250,7 @@ function Test-DuoForgeStartRequestInternal {
     foreach ($provider in @('codex', 'claude')) {
         $selection = Get-DuoForgeObjectValue -Object $requestSelections -Name $provider
         foreach ($field in @(Get-DuoForgeUnknownRequestFieldsInternal -Value $selection -AllowedFields @('model', 'reasoningEffort'))) {
-            $errors.Add([ordered]@{ code = 'DF-REQUEST-FIELD'; message = "$provider 공급자 선택에 허용되지 않은 필드가 있습니다: $field" })
+            $errors.Add([ordered]@{ code = 'DF-REQUEST-FIELD'; message = "$provider AI 설정에 사용할 수 없는 항목이 있습니다: $field" })
         }
     }
     if ([int](Get-DuoForgeObjectValue -Object $Request -Name 'schemaVersion' -Default 0) -ne 2) {
@@ -372,7 +372,7 @@ function Test-DuoForgeStartRequestInternal {
     elseif ($mode -eq 'dual-project-audit') {
         $errors.Add([ordered]@{
             code = 'DF-PREFLIGHT-3A-ISOLATION'
-            message = '3A는 현재 Windows 격리 후보가 범위 밖 읽기와 자식 프로세스 차단에 실패하여 이 빌드에서 비활성화되어 있습니다.'
+            message = '두 프로젝트 비교 기능은 현재 Windows에서 프로젝트 밖 파일 접근과 추가 프로그램 실행을 충분히 막지 못해 사용할 수 없습니다.'
         })
     }
     else {
@@ -383,7 +383,7 @@ function Test-DuoForgeStartRequestInternal {
     if (-not [bool]$authenticationGate.modelCallsAllowed -and $mode -in @('shared-document', 'document-merge', 'dual-document')) {
         $errors.Add([ordered]@{
             code = [string]$authenticationGate.blockCode
-            message = '두 공급자의 구독 인증과 안전 실행 프로필이 모두 준비되지 않았습니다. duoforge doctor 결과를 확인해 주세요.'
+            message = 'Codex와 Claude의 구독 로그인과 안전 설정이 모두 준비되지 않았습니다. duoforge doctor 결과를 확인해 주세요.'
         })
     }
 
@@ -400,15 +400,15 @@ function Test-DuoForgeStartRequestInternal {
             $requiredDocumentIds = @($contextPlan.sourceBlueprints | ForEach-Object { [string]$_.documentId } | Sort-Object -Unique)
             $missingDocumentIds = @($requiredDocumentIds | Where-Object { $_ -notin $selectedDocumentIds })
             if ($missingDocumentIds.Count -gt 0) {
-                $errors.Add([ordered]@{ code = 'DF-CONTEXT-DOCUMENT-CAPACITY'; message = "A/B 문맥을 각각 최소 한 배치씩 분석할 호출 여유가 없습니다. 누락 문서: $($missingDocumentIds -join ', ')" })
+                $errors.Add([ordered]@{ code = 'DF-CONTEXT-DOCUMENT-CAPACITY'; message = "문서 A와 B를 모두 읽을 만큼 AI 요청 횟수가 남아 있지 않습니다. 읽지 못하는 문서: $($missingDocumentIds -join ', ')" })
             }
         }
         $plan = Get-DuoForgeExecutionPlanInternal -Mode $mode -MaxRounds ([int]$Request.maxRounds) -FirstSynthesizer ([string]$Request.firstSynthesizer) -MaxCallsPerProvider ([int]$Config.limits.maxCallsPerProviderPerRun) -ContextBatchCount ([int]$contextPlan.selectedBatchCount) -WorkflowVersion 'workflow-v2'
         if (-not $plan.withinLimits) {
-            $errors.Add([ordered]@{ code = 'DF-PLAN-CALL-LIMIT'; message = '최악 호출 계획이 공급자별 강제 호출 상한을 초과합니다.' })
+            $errors.Add([ordered]@{ code = 'DF-PLAN-CALL-LIMIT'; message = '예상 AI 요청 횟수가 작업별 허용 상한을 초과합니다. 작업 범위를 줄여 주세요.' })
         }
         if ([bool]$contextPlan.requiresPartialConsent -and -not [bool](Get-DuoForgeObjectValue -Object $Request -Name 'allowPartial' -Default $false)) {
-            $errors.Add([ordered]@{ code = 'DF-PARTIAL-CONSENT-REQUIRED'; message = "예상 문맥 커버리지는 파일 $($contextPlan.predictedFileCoveragePercent)%, 바이트 $($contextPlan.predictedByteCoveragePercent)%입니다. 범위를 줄이거나 --allow-partial로 부분 분석에 명시적으로 동의해 주세요." })
+            $errors.Add([ordered]@{ code = 'DF-PARTIAL-CONSENT-REQUIRED'; message = "문서 전체 중 파일 기준 $($contextPlan.predictedFileCoveragePercent)%, 분량 기준 $($contextPlan.predictedByteCoveragePercent)%만 읽을 수 있습니다. 작업 범위를 줄이거나 일부만 읽은 결과로 진행하는 데 동의해 주세요. 명령줄에서는 --allow-partial 옵션을 사용합니다." })
         }
     }
     catch {

@@ -45,7 +45,11 @@ function Get-DuoForgeRemainingCallBudget {
         foreach ($step in $providerSteps) { $attempted += [int]$step.attemptCount }
         $baseCallsRemaining = @($remainingSteps | Where-Object { [int]$_.attemptCount -eq 0 }).Count
         $retryBudgetRemaining = @($remainingSteps | Where-Object { [int]$_.attemptCount -lt 2 }).Count
-        $maximumPlannedAdditionalCalls = $baseCallsRemaining + $retryBudgetRemaining
+        $blockedSteps = @($remainingSteps | Where-Object { [string]$_.status -eq 'FAILED' -and [string]$_.retryMode -eq 'RETRY_EXHAUSTED' })
+        $runnableSteps = @($remainingSteps | Where-Object { $_ -notin $blockedSteps })
+        $scheduledCallsRemaining = $runnableSteps.Count
+        $failureRetryCallsRemaining = @($runnableSteps | Where-Object { [int]$_.attemptCount -eq 0 }).Count
+        $maximumPlannedAdditionalCalls = $scheduledCallsRemaining + $failureRetryCallsRemaining
         $providerPlans = Get-DuoForgeObjectValue -Object $manifest.executionPlan -Name 'providers'
         $providerPlan = Get-DuoForgeObjectValue -Object $providerPlans -Name $provider
         $maximum = [int](Get-DuoForgeObjectValue -Object $providerPlan -Name 'maximumCalls' -Default 0)
@@ -54,7 +58,11 @@ function Get-DuoForgeRemainingCallBudget {
             maximumAdditionalCalls = [Math]::Max(0, $maximum - $attempted)
             baseCallsRemaining = $baseCallsRemaining
             retryBudgetRemaining = $retryBudgetRemaining
+            scheduledCallsRemaining = $scheduledCallsRemaining
+            failureRetryCallsRemaining = $failureRetryCallsRemaining
             maximumPlannedAdditionalCalls = $maximumPlannedAdditionalCalls
+            blockedWorkItems = $blockedSteps.Count
+            canContinue = $blockedSteps.Count -eq 0
             attempted = $attempted
         }
     }
@@ -71,14 +79,14 @@ function Invoke-DuoForgeResumeLiveInternal {
     )
 
     if (-not $LiveConsent) {
-        throw (New-DuoForgeException -Code 'DF-LIVE-CONSENT' -Message '라이브 공급자 호출 동의가 없습니다.')
+        throw (New-DuoForgeException -Code 'DF-LIVE-CONSENT' -Message '문서 전송과 AI 작업 시작에 대한 확인이 없습니다.')
     }
     $run = Get-DuoForgeRunInternal -RunId $RunId -ResultsRoot $ResultsRoot
     $directory = [string]$run.runDirectory
     $null = Invoke-WithDuoForgeRunLock -RunDirectory $directory -ScriptBlock { $true }
     $run = Get-DuoForgeRunInternal -RunId $RunId -ResultsRoot $ResultsRoot
     if ([string]$run.manifest.mode -eq 'dual-project-audit') {
-        throw (New-DuoForgeException -Code 'DF-PREFLIGHT-3A-ISOLATION' -Message '모드 4는 현재 Windows 격리 후보가 범위 밖 읽기와 자식 프로세스 차단에 실패하여 비활성화되어 있습니다.')
+        throw (New-DuoForgeException -Code 'DF-PREFLIGHT-3A-ISOLATION' -Message '두 프로젝트 비교 기능은 현재 Windows에서 프로젝트 밖 파일 접근과 추가 프로그램 실행을 충분히 막지 못해 사용할 수 없습니다.')
     }
     $null = Assert-DuoForgeRunStorageContractInternal -RunDirectory $directory
     $null = Assert-DuoForgeProviderSelectionsInternal -Selections (Get-DuoForgeObjectValue -Object $run.manifest -Name 'providerSelections')
@@ -99,7 +107,7 @@ function Invoke-DuoForgeResumeLiveInternal {
 
     $doctor = Invoke-DuoForgeDoctorInternal
     if (-not [bool]$doctor.readyForDocumentModes) {
-        throw (New-DuoForgeException -Code 'DF-DOCTOR-BLOCKED' -Message '현재 환경 진단이 문서 모드 라이브 실행을 허용하지 않습니다.')
+        throw (New-DuoForgeException -Code 'DF-DOCTOR-BLOCKED' -Message '현재 실행 환경에서는 문서 AI 작업을 시작할 수 없습니다. 환경 확인 결과를 먼저 살펴봐 주세요.')
     }
 
     $providerStageCommand = Get-Command -Name 'Invoke-DuoForgeLiveProviderStage' -CommandType Function -ErrorAction Stop

@@ -18,16 +18,16 @@ function Get-DuoForgeDiagnosticPublicSummaryInternal {
 
     switch -Regex ($Code) {
         '^DF-STAGE-UNEXPECTED$' { return '단계 실행 중 예상하지 못한 오류가 발생했습니다.' }
-        '^DF-STAGE-SCHEMA$' { return '공급자 응답이 단계 결과 계약을 충족하지 못했습니다.' }
+        '^DF-STAGE-SCHEMA$' { return 'AI 답변 형식이 필요한 조건을 충족하지 못했습니다.' }
         '^DF-STAGE-INTERRUPTED$' { return '이전에 중단된 단계를 안전하게 복구했습니다.' }
         '^DF-STAGE-RETRY-EXHAUSTED$' { return '중단된 단계가 재시도 상한에 도달했습니다.' }
         '^DF-FINAL-RENDERER$' { return '최종 산출물을 만드는 중 오류가 발생했습니다.' }
-        '^DF-PROVIDER-TIMEOUT$' { return '공급자 응답 대기 시간이 초과되었습니다.' }
-        '^DF-PROVIDER-QUOTA$' { return '공급자 구독 한도에 도달했습니다.' }
-        '^DF-PROVIDER-RATE-LIMIT$' { return '공급자 요청 한도에 도달했습니다.' }
-        '^DF-PROVIDER-AUTH$' { return '공급자 인증을 확인할 수 없습니다.' }
-        '^DF-PROVIDER-PROCESS$' { return '공급자 프로세스 실행에 실패했습니다.' }
-        '^DF-PROVIDER-' { return '공급자 호출 중 오류가 발생했습니다.' }
+        '^DF-PROVIDER-TIMEOUT$' { return 'AI 답변을 기다릴 수 있는 시간이 지났습니다.' }
+        '^DF-PROVIDER-QUOTA$' { return 'AI 서비스의 사용 한도에 도달했습니다.' }
+        '^DF-PROVIDER-RATE-LIMIT$' { return 'AI 서비스에 너무 많은 요청을 보내 잠시 기다려야 합니다.' }
+        '^DF-PROVIDER-AUTH$' { return 'AI 로그인 상태를 확인할 수 없습니다.' }
+        '^DF-PROVIDER-PROCESS$' { return 'AI 작업을 시작하지 못했습니다.' }
+        '^DF-PROVIDER-' { return 'AI 작업 중 오류가 발생했습니다.' }
         '^DF-CLI-' { return '명령을 처리할 수 없습니다.' }
         '^DF-RUN-' { return '실행을 처리하는 중 오류가 발생했습니다.' }
         '^DF-' { return 'DuoForge 작업 중 오류가 발생했습니다.' }

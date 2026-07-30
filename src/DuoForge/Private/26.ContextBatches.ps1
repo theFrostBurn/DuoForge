@@ -1034,7 +1034,7 @@ function New-DuoForgeContextBatchFilesV2Internal {
         $result.actualByteCoveragePercent = 100.0
         return $result
     }
-    if ([int]$Plan.selectedBatchCount -lt 1) { throw (New-DuoForgeException -Code 'DF-CONTEXT-NO-CAPACITY' -Message '대용량 문맥을 분석할 호출 예산이 없습니다. 입력 범위를 줄여 주세요.') }
+    if ([int]$Plan.selectedBatchCount -lt 1) { throw (New-DuoForgeException -Code 'DF-CONTEXT-NO-CAPACITY' -Message '큰 문서를 나눠 읽는 데 필요한 AI 요청 횟수가 부족합니다. 입력 범위를 줄여 주세요.') }
 
     $documents = @(Get-DuoForgePromptDocuments -RunDirectory $RunDirectory -Inventory $Inventory)
     $plannedSources = @($Plan.sourceBlueprints | Sort-Object sourceOrdinal)
@@ -1223,7 +1223,7 @@ function New-DuoForgeContextBatchFilesInternal {
         $result.actualByteCoveragePercent = 100.0
         return $result
     }
-    if ([int]$Plan.selectedBatchCount -lt 1) { throw (New-DuoForgeException -Code 'DF-CONTEXT-NO-CAPACITY' -Message '대용량 문맥을 분석할 호출 예산이 없습니다. 입력 범위를 줄여 주세요.') }
+    if ([int]$Plan.selectedBatchCount -lt 1) { throw (New-DuoForgeException -Code 'DF-CONTEXT-NO-CAPACITY' -Message '큰 문서를 나눠 읽는 데 필요한 AI 요청 횟수가 부족합니다. 입력 범위를 줄여 주세요.') }
 
     $documents = @(Get-DuoForgePromptDocuments -RunDirectory $RunDirectory -Inventory $Inventory)
     $pieces = [System.Collections.Generic.List[object]]::new()
@@ -1317,7 +1317,7 @@ function New-DuoForgeCoverageMarkdownInternal {
             "- 실행 배치: $(@($ContextPlan.batches).Count) / 필요 배치 $($ContextPlan.requiredBatchCount)", ''
         )
         if ([string]$ContextPlan.completionStatus -eq 'COMPLETED_PARTIAL') {
-            $lines += '> 일부 입력은 문맥·호출 예산 제한으로 분석되지 않았습니다. 이 결과는 전체 입력에 대한 단정적 결론이 아닙니다.'
+            $lines += '> 문서 크기와 AI 요청 횟수 제한 때문에 일부 내용은 읽지 못했습니다. 이 결과만으로 문서 전체를 판단하면 안 됩니다.'
             $lines += ''
         }
         $lines += '## 문서별 CORE 커버리지'
@@ -1362,7 +1362,7 @@ function New-DuoForgeCoverageMarkdownInternal {
         "- 실행 배치: $(@($ContextPlan.batches).Count) / 필요 배치 $($ContextPlan.requiredBatchCount)", ''
     )
     if ([string]$ContextPlan.completionStatus -eq 'COMPLETED_PARTIAL') {
-        $lines += '> 일부 입력은 문맥·호출 예산 제한으로 분석되지 않았습니다. 이 결과는 전체 입력에 대한 단정적 결론이 아닙니다.'
+        $lines += '> 문서 크기와 AI 요청 횟수 제한 때문에 일부 내용은 읽지 못했습니다. 이 결과만으로 문서 전체를 판단하면 안 됩니다.'
         $lines += ''
     }
     $lines += '| 배치 | 스냅샷 | 역할 | 원문 바이트 |'

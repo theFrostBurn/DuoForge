@@ -34,8 +34,8 @@ function Write-DuoForgeHelp {
     & $append @(New-DuoForgeListRowsInternal -Items @(
         'API 키 인증은 사용하지 않습니다.',
         '새 작업마다 Codex와 Claude의 모델과 분석 깊이를 명시적으로 선택합니다.',
-        '모델 호출 전 입력, 전송 범위와 최악 호출 수를 확인합니다.',
-        '3A는 현재 Windows 격리 후보가 필수 차단 계약을 충족하지 못해 비활성화되어 있습니다.'
+        'AI 작업 전 입력 문서, 전송 범위와 최대 요청 횟수를 확인합니다.',
+        '프로젝트 비교는 현재 Windows에서 안전을 충분히 확인하지 못해 사용할 수 없습니다.'
     ) -Layout $layout)
     & $append @(New-DuoForgeSectionRowsInternal -Title '호환 입력' -Body '' -Layout $layout)
     & $append @(New-DuoForgeListRowsInternal -Items @(
@@ -60,17 +60,17 @@ function Write-DuoForgeDoctorReport {
         $item = $Report.providers[$provider]
         $displayName = if ($provider -eq 'codex') { 'Codex' } else { 'Claude' }
         $kind = if ($item.status -eq 'READY_DOCUMENTS') { 'success' } else { 'error' }
-        & $append @(New-DuoForgeNoticeRowsInternal -Kind $kind -Title ("{0} · {1}" -f $displayName, $(if ($item.status -eq 'READY_DOCUMENTS') { '문서 작업 준비' } else { '확인 필요' })) -Message ("버전 {0} · 인증 {1} · 문서 프로필 {2}" -f $item.version, $item.authType, $(if ([bool]$item.documentProfileSupported) { '지원' } else { '미지원' })) -Layout $layout)
+        & $append @(New-DuoForgeNoticeRowsInternal -Kind $kind -Title ("{0} · {1}" -f $displayName, $(if ($item.status -eq 'READY_DOCUMENTS') { '문서 작업 준비' } else { '확인 필요' })) -Message ("버전 {0} · 로그인 방식 {1} · 문서 작업 기능 {2}" -f $item.version, $item.authType, $(if ([bool]$item.documentProfileSupported) { '지원' } else { '미지원' })) -Layout $layout)
     }
-    & $append @(New-DuoForgeSectionRowsInternal -Title '안전 경계' -Body '' -Layout $layout)
+    & $append @(New-DuoForgeSectionRowsInternal -Title '안전 확인' -Body '' -Layout $layout)
     if ($Report.apiCredentialConflicts.Count -gt 0) {
-        & $append @(New-DuoForgeNoticeRowsInternal -Kind error -Title 'API 인증 우선 조건이 있어 문서 작업을 시작할 수 없습니다.' -Message ('환경 변수 이름: {0}. 값은 읽거나 표시하지 않았습니다.' -f ($Report.apiCredentialConflicts -join ', ')) -NextAction '환경을 안전하게 정리한 뒤 다시 검사해 주세요.' -Layout $layout)
+        & $append @(New-DuoForgeNoticeRowsInternal -Kind error -Title 'API용 로그인 설정이 발견되어 문서 작업을 시작할 수 없습니다.' -Message ('확인된 설정 이름: {0}. 값은 읽거나 표시하지 않았습니다.' -f ($Report.apiCredentialConflicts -join ', ')) -NextAction '환경을 안전하게 정리한 뒤 다시 검사해 주세요.' -Layout $layout)
     }
     else {
-        & $append @(New-DuoForgeNoticeRowsInternal -Kind success -Title 'API 인증 우선 조건이 없습니다.' -Layout $layout)
+        & $append @(New-DuoForgeNoticeRowsInternal -Kind success -Title '문서 작업을 방해하는 API용 로그인 설정이 없습니다.' -Layout $layout)
     }
     & $append @(New-DuoForgeFieldRowsInternal -Label '문서 작업' -Value $(if ($Report.readyForDocumentModes) { '준비됨' } else { '준비되지 않음' }) -Layout $layout -KeyWidth 14)
-    & $append @(New-DuoForgeFieldRowsInternal -Label '프로젝트 비교 3A' -Value '비활성 · 범위 밖 읽기와 자식 프로세스 차단 실패' -Layout $layout -KeyWidth 14)
+    & $append @(New-DuoForgeFieldRowsInternal -Label '프로젝트 비교' -Value '준비 중 · 현재 Windows에서는 안전을 충분히 확인하지 못함' -Layout $layout -KeyWidth 14)
     if (@($Report.recommendations).Count -gt 0) {
         & $append @(New-DuoForgeSectionRowsInternal -Title '다음 행동' -Body '' -Layout $layout)
         & $append @(New-DuoForgeListRowsInternal -Items @($Report.recommendations) -Layout $layout)
@@ -87,7 +87,7 @@ function New-DuoForgeProviderSelectionRowsInternal {
     foreach ($provider in @('codex', 'claude')) {
         $options = Get-DuoForgeProviderSelectionOptionsInternal -Provider $provider
         $selection = Get-DuoForgeObjectValue -Object $ProviderSelections -Name $provider
-        foreach ($row in @(New-DuoForgeFieldRowsInternal -Label ([string]$options.displayName) -Value ('모델 {0} · 분석 깊이 {1}' -f $selection.model, $selection.reasoningEffort) -Layout $Layout -KeyWidth 8)) { $rows.Add($row) }
+        foreach ($row in @(New-DuoForgeFieldRowsInternal -Label ([string]$options.displayName) -Value ('모델 {0} · 분석 깊이 {1}' -f $selection.model, (Get-DuoForgeDisplayReasoningEffortLabelInternal -ReasoningEffort ([string]$selection.reasoningEffort))) -Layout $Layout -KeyWidth 8)) { $rows.Add($row) }
     }
     return @($rows)
 }
@@ -107,11 +107,11 @@ function Format-DuoForgeRemainingCallBudgetLineInternal {
         [Parameter(Mandatory)][System.Collections.IDictionary]$ProviderBudget
     )
 
-    return ('{0} 남은 호출: 기본 {1}회, 재시도 최대 {2}회, 총 최대 {3}회' -f `
-        $ProviderLabel,
-        [int]$ProviderBudget.baseCallsRemaining,
-        [int]$ProviderBudget.retryBudgetRemaining,
-        [int]$ProviderBudget.maximumPlannedAdditionalCalls)
+    $scheduled = [int](Get-DuoForgeObjectValue -Object $ProviderBudget -Name 'scheduledCallsRemaining' -Default ([int]$ProviderBudget.plannedRemaining))
+    $retry = [int](Get-DuoForgeObjectValue -Object $ProviderBudget -Name 'failureRetryCallsRemaining' -Default ([Math]::Max(0, [int]$ProviderBudget.maximumPlannedAdditionalCalls - $scheduled)))
+    $maximum = [int]$ProviderBudget.maximumPlannedAdditionalCalls
+    $retryText = if ($retry -eq 0) { '실패 시 추가 요청 없음' } else { "실패 시 추가 요청 최대 ${retry}회" }
+    return (('남은 작업 {0}개 · 예정 요청 {1}회' -f [int]$ProviderBudget.plannedRemaining, $scheduled) + [Environment]::NewLine + ('{0} · 모두 합쳐 최대 {1}회' -f $retryText, $maximum))
 }
 
 function Write-DuoForgeExecutionPlan {
@@ -140,22 +140,23 @@ function Write-DuoForgeExecutionPlan {
     }
     $contextPlan = Get-DuoForgeObjectValue -Object $Validation -Name 'contextPlan'
     if ($null -ne $contextPlan -and [bool](Get-DuoForgeObjectValue -Object $contextPlan -Name 'enabled' -Default $false)) {
-        & $append @(New-DuoForgeFieldRowsInternal -Label '분석 묶음' -Value ('{0}/{1} · 파일 {2}% · 바이트 {3}%' -f $contextPlan.selectedBatchCount, $contextPlan.requiredBatchCount, $contextPlan.predictedFileCoveragePercent, $contextPlan.predictedByteCoveragePercent) -Layout $layout -KeyWidth 10)
+        & $append @(New-DuoForgeFieldRowsInternal -Label '읽을 수 있는 파일' -Value ('전체 파일의 {0}%' -f $contextPlan.predictedFileCoveragePercent) -Layout $layout -KeyWidth 18)
+        & $append @(New-DuoForgeFieldRowsInternal -Label '읽을 수 있는 분량' -Value ('전체 문서 분량의 {0}%' -f $contextPlan.predictedByteCoveragePercent) -Layout $layout -KeyWidth 18)
         if ([bool]$contextPlan.requiresPartialConsent) { & $append @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '일부 내용만 분석합니다.' -Message '결과는 일부 범위만 완료된 것으로 표시됩니다.' -Layout $layout) }
     }
-    & $append @(New-DuoForgeSectionRowsInternal -Title 'AI 선택' -Body '' -Layout $layout)
+    & $append @(New-DuoForgeSectionRowsInternal -Title '사용할 AI 설정' -Body '' -Layout $layout)
     & $append @(New-DuoForgeProviderSelectionRowsInternal -ProviderSelections $Validation.request.providerSelections -Layout $layout)
-    & $append @(New-DuoForgeSectionRowsInternal -Title '호출 예산' -Body '' -Layout $layout)
+    & $append @(New-DuoForgeSectionRowsInternal -Title '예상 AI 요청 횟수' -Body '' -Layout $layout)
     foreach ($provider in @('codex', 'claude')) {
         $providerPlan = $Validation.executionPlan.providers[$provider]
         $providerLabel = if ($provider -eq 'codex') { 'Codex' } else { 'Claude' }
-        & $append @(New-DuoForgeFieldRowsInternal -Label $providerLabel -Value ('기본 {0}회 · 재시도 최대 {1}회 · 총 최대 {2}회 · 한도 {3}회' -f $providerPlan.baseCalls, $providerPlan.retryBudget, $providerPlan.maximumCalls, $providerPlan.limit) -Layout $layout -KeyWidth 8)
+        & $append @(New-DuoForgeFieldRowsInternal -Label $providerLabel -Value ('예정 요청 {0}회 · 실패 시 추가 요청 최대 {1}회 · 최대 {2}회' -f $providerPlan.baseCalls, $providerPlan.retryBudget, $providerPlan.maximumCalls) -Layout $layout -KeyWidth 8)
     }
     & $append @(New-DuoForgeSectionRowsInternal -Title '전송과 다음 단계' -Body '' -Layout $layout)
     foreach ($warning in @($Validation.warnings)) {
         & $append @(New-DuoForgeNoticeRowsInternal -Kind warning -Title ([string]$warning.message) -Code ([string]$warning.code) -Layout $layout)
     }
-    & $append @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '선택한 입력 내용은 Codex와 Claude에 전송될 수 있습니다.' -Message 'start는 확인된 입력 사본과 실행 기록만 만들며 AI를 호출하지 않습니다.' -NextAction '실제 호출은 이후 resume --live에서 전송 범위와 예산을 다시 확인한 뒤 시작합니다.' -Layout $layout)
+    & $append @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '선택한 문서 내용은 Codex와 Claude에 전송될 수 있습니다.' -Message '지금은 작업 시작 때 사용할 문서 사본과 작업 기록만 만들며 AI 작업은 시작하지 않습니다.' -NextAction 'AI 작업은 나중에 문서 전송 범위와 최대 요청 횟수를 다시 확인한 뒤 시작합니다.' -Layout $layout)
     Write-DuoForgeDisplayRowsInternal -Rows @($rows) -Layout $layout
 }
 
@@ -165,11 +166,11 @@ function Write-DuoForgeIssueList {
 
     $layout = Get-DuoForgeDisplayLayoutInternal
     if ($Issues.Count -eq 0) {
-        Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '등록된 검토 항목이 없습니다.' -Layout $layout) -Layout $layout
+        Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '확인할 내용이 없습니다.' -Layout $layout) -Layout $layout
         return
     }
     $rows = [System.Collections.Generic.List[object]]::new()
-    foreach ($row in @(New-DuoForgePageHeaderRowsInternal -Title '검토 항목' -Tag ("{0}개" -f $Issues.Count) -Layout $layout)) { $rows.Add($row) }
+    foreach ($row in @(New-DuoForgePageHeaderRowsInternal -Title '확인할 내용' -Tag ("{0}개" -f $Issues.Count) -Layout $layout)) { $rows.Add($row) }
     for ($index = 0; $index -lt $Issues.Count; $index++) {
         $issue = $Issues[$index]
         $issueId = [string](Get-DuoForgeObjectValue -Object $issue -Name 'issueId')
@@ -179,7 +180,7 @@ function Write-DuoForgeIssueList {
         $claim = [string](Get-DuoForgeObjectValue -Object $issue -Name 'claim')
         foreach ($row in @(New-DuoForgeSectionRowsInternal -Title ("{0} · {1}" -f $issueId, $status) -Body '' -Layout $layout -First:($index -eq 0))) { $rows.Add($row) }
         foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '중요도' -Value $severity -Layout $layout -KeyWidth 10)) { $rows.Add($row) }
-        foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '진행 차단' -Value $blocking -Layout $layout -KeyWidth 10)) { $rows.Add($row) }
+        foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '진행 전 해결 필요' -Value $blocking -Layout $layout -KeyWidth 18)) { $rows.Add($row) }
         foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '내용' -Value $claim -Layout $layout -KeyWidth 10 -PreserveParagraphs)) { $rows.Add($row) }
     }
     Write-DuoForgeDisplayRowsInternal -Rows @($rows) -Layout $layout

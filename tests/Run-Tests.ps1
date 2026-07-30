@@ -417,8 +417,9 @@ try {
         Assert-Equal ((@($surface.options.mode) -join ',')) 'shared-document,document-merge,dual-document,dual-project-audit'
         Assert-Equal (@($surface.options | Where-Object { [bool]$_.enabled }).Count) 3
         Assert-False ([bool]$surface.options[3].enabled)
-        Assert-ContainsText ([string]$surface.options[3].disabledReason) 'DF-PREFLIGHT-3A-ISOLATION'
-        Assert-Equal ((@($surface.modeLabels) -join ',')) '컨셉으로 공동 문서 만들기,두 문서를 하나로 합의하기,두 문서를 각각 개선하기,두 프로젝트 비교하기(비활성)'
+        Assert-ContainsText ([string]$surface.options[3].disabledReason) '안전 기능을 충분히 확인하지 못해 사용할 수 없습니다.'
+        Assert-NotContainsText ([string]$surface.options[3].disabledReason) 'DF-PREFLIGHT'
+        Assert-Equal ((@($surface.modeLabels) -join ',')) '요구사항으로 공동 문서 만들기,두 문서를 비교해 하나의 합의안 만들기,두 문서를 각각 개선하기,두 프로젝트 비교하기 · 준비 중'
         Assert-Equal ((@($surface.stageLabels) -join ',')) '각자 통합안 작성,두 문서 함께 검토,문서 수정,수정 문서 최종 확인'
         Assert-Equal ((@($surface.targetLabels) -join ',')) '문서 A,문서 B,공동 문서,합의 문서 C'
         Assert-Equal ((@($surface.stateLabels) -join ',')) '오류 발생 · 이어서 가능,사용 한도 회복 대기,실행 환경 문제로 멈춤'
@@ -822,12 +823,14 @@ try {
         Assert-Equal $missingGraphBudget.providers.claude.plannedRemaining 6
         Assert-Equal $missingGraphBudget.providers.codex.baseCallsRemaining 6
         Assert-Equal $missingGraphBudget.providers.codex.retryBudgetRemaining 6
+        Assert-Equal $missingGraphBudget.providers.codex.scheduledCallsRemaining 6
+        Assert-Equal $missingGraphBudget.providers.codex.failureRetryCallsRemaining 6
         Assert-Equal $missingGraphBudget.providers.codex.maximumPlannedAdditionalCalls 12
         $budgetLine = & $module {
             param($providerBudget)
             Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Codex' -ProviderBudget $providerBudget
         } $missingGraphBudget.providers.codex
-        Assert-Equal $budgetLine 'Codex 남은 호출: 기본 6회, 재시도 최대 6회, 총 최대 12회'
+        Assert-Equal $budgetLine ('남은 작업 6개 · 예정 요청 6회' + [Environment]::NewLine + '실패 시 추가 요청 최대 6회 · 모두 합쳐 최대 12회')
 
         $graph = & $module { param($directory) Initialize-DuoForgeStageGraph -RunDirectory $directory } $run.runDirectory
         Assert-Equal $graph.schemaVersion 1
@@ -887,6 +890,110 @@ try {
         foreach ($path in $fixtureHashesBefore.Keys) {
             Assert-Equal (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash $fixtureHashesBefore[$path]
         }
+    }
+
+    Test-Case '답변 변경 뒤 AI 요청 횟수와 마지막 완료 작업을 일반 문장으로 표시한다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'plain-language-budget\input\brief.md')
+        $workspace = Join-Path $tempRoot 'plain-language-budget\results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $graph = & $module { param($directory) Initialize-DuoForgeStageGraph -RunDirectory $directory } $run.runDirectory
+        foreach ($step in @($graph.steps)) {
+            $step.status = 'COMMITTED'
+            $step.attemptCount = 1
+        }
+        foreach ($provider in @('codex', 'claude')) {
+            $invalidated = @($graph.steps | Where-Object { $_.provider -eq $provider } | Select-Object -Last 2)
+            $invalidated[0].status = 'STALE'
+            $invalidated[0].attemptCount = 2
+            $invalidated[1].status = 'PENDING'
+            $invalidated[1].attemptCount = 3
+        }
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } (Join-Path $run.runDirectory 'steps.json') $graph
+
+        $budget = & $module { param($directory) Get-DuoForgeRemainingCallBudget -RunDirectory $directory } $run.runDirectory
+        foreach ($provider in @('codex', 'claude')) {
+            Assert-Equal $budget.providers[$provider].plannedRemaining 2
+            Assert-Equal $budget.providers[$provider].scheduledCallsRemaining 2
+            Assert-Equal $budget.providers[$provider].failureRetryCallsRemaining 0
+            Assert-Equal $budget.providers[$provider].maximumPlannedAdditionalCalls 2
+            Assert-True ([bool]$budget.providers[$provider].canContinue)
+        }
+        $line = & $module { param($value) Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Codex' -ProviderBudget $value } $budget.providers.codex
+        Assert-Equal $line ('남은 작업 2개 · 예정 요청 2회' + [Environment]::NewLine + '실패 시 추가 요청 없음 · 모두 합쳐 최대 2회')
+        foreach ($oldTerm in @('호출 예산', '기본 0회', '재시도')) { Assert-NotContainsText $line $oldTerm }
+        $budgetFrames = & $module {
+            param($value)
+            foreach ($width in @(72, 80)) {
+                $layout = Get-DuoForgeDisplayLayoutInternal -Width $width -NoColor
+                $rows = @(New-DuoForgeFieldRowsInternal -Label 'Codex' -Value (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Codex' -ProviderBudget $value) -Layout $layout -KeyWidth 8 -PreserveParagraphs)
+                [ordered]@{ width = $width; lineWidth = [int]$layout.lineWidth; lines = @($rows | ForEach-Object { [string]$_.text }) }
+            }
+        } $budget.providers.codex
+        foreach ($frame in @($budgetFrames)) {
+            Assert-Equal @($frame.lines).Count 2
+            Assert-True (@($frame.lines | ForEach-Object { & $module { param($text) Get-DuoForgeProgressTextWidthInternal -Text $text } $_ } | Where-Object { [int]$_ -gt [int]$frame.lineWidth }).Count -eq 0)
+            Assert-False ([string]$frame.lines[1].TrimStart() -match '^(·|\d+회$)')
+        }
+
+        $unknownProgress = & $module {
+            param($directory)
+            $view = [ordered]@{ runDirectory = $directory; lastLoggedCommittedStepKey = '' }
+            $event = [ordered]@{ type = 'STAGE_STARTED'; data = [ordered]@{ stepKey = 'future-internal-step' } }
+            (& { Write-DuoForgeProgressLogEventInternal -View $view -Event $event } 6>&1 | Out-String)
+        } $run.runDirectory
+        Assert-ContainsText $unknownProgress 'AI 작업 시작'
+        Assert-NotContainsText $unknownProgress 'future-internal-step'
+
+        $labels = & $module {
+            [ordered]@{
+                completed = Get-DuoForgeDisplayCheckpointLabelInternal -StepKey 'r02-claude-review-response'
+                snapshot = Get-DuoForgeDisplayCheckpointLabelInternal -StepKey 'input-snapshot'
+                unknown = Get-DuoForgeDisplayCheckpointLabelInternal -StepKey 'future-internal-step'
+                effort = Get-DuoForgeDisplayReasoningEffortLabelInternal -ReasoningEffort 'high'
+            }
+        }
+        Assert-Equal $labels.completed '2차 · Claude · 검토 의견 판단'
+        Assert-Equal $labels.snapshot '입력 문서 준비 완료'
+        Assert-Equal $labels.unknown '완료된 AI 작업'
+        Assert-Equal $labels.effort '높음'
+    }
+
+    Test-Case '실패 재시도를 모두 사용한 AI 작업은 확인 입력 전에 계속하기를 막는다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'exhausted-ai-work\input\brief.md')
+        $workspace = Join-Path $tempRoot 'exhausted-ai-work\results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $graph = & $module { param($directory) Initialize-DuoForgeStageGraph -RunDirectory $directory } $run.runDirectory
+        foreach ($step in @($graph.steps)) {
+            $step.status = 'COMMITTED'
+            $step.attemptCount = 1
+        }
+        $blockedStep = @($graph.steps | Where-Object provider -eq 'codex' | Select-Object -First 1)[0]
+        $blockedStep.status = 'FAILED'
+        $blockedStep.attemptCount = 2
+        $blockedStep.retryMode = 'RETRY_EXHAUSTED'
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } (Join-Path $run.runDirectory 'steps.json') $graph
+
+        $budget = & $module { param($directory) Get-DuoForgeRemainingCallBudget -RunDirectory $directory } $run.runDirectory
+        Assert-Equal $budget.providers.codex.plannedRemaining 1
+        Assert-Equal $budget.providers.codex.scheduledCallsRemaining 0
+        Assert-Equal $budget.providers.codex.blockedWorkItems 1
+        Assert-False ([bool]$budget.providers.codex.canContinue)
+
+        $calls = @{ input = 0; resume = 0 }
+        $output = & $module {
+            param($currentRun, $control)
+            $inputReader = { param($prompt) $control.input++; return 'LIVE' }.GetNewClosure()
+            $resumeInvoker = { param($runId, $resultsRoot, $consent) $control.resume++; throw '차단된 작업을 실행하면 안 됩니다.' }.GetNewClosure()
+            (& { Invoke-DuoForgeInteractiveLiveResume -Run $currentRun -InputReader $inputReader -ResumeInvoker $resumeInvoker } 6>&1 | Out-String)
+        } $run $calls
+        Assert-Equal $calls.input 0
+        Assert-Equal $calls.resume 0
+        Assert-ContainsText $output '계속할 수 없는 AI 작업이 있습니다.'
+        Assert-ContainsText $output '허용된 요청 횟수를 모두 사용한 작업이 1개 있습니다.'
     }
 
     Test-Case '직렬화된 workflow-v1 저장 fixture는 STARTED 체크포인트부터 원본 불변으로 재개된다' {
@@ -1609,7 +1716,7 @@ try {
 
         Assert-ContainsText $rendered.objectText 'OBJ-001'
         Assert-ContainsText $rendered.objectText '참고'
-        Assert-ContainsText $rendered.objectText '검토 중'
+        Assert-ContainsText $rendered.objectText '미해결'
         Assert-ContainsText $rendered.objectText '일반 객체 claim 표시'
         Assert-ContainsText $rendered.dictionaryText 'DICT-001'
         Assert-ContainsText $rendered.dictionaryText '중요'
@@ -1617,7 +1724,7 @@ try {
         Assert-ContainsText $rendered.dictionaryText '답변 필요'
         Assert-ContainsText $rendered.dictionaryText 'dictionary claim 첫 줄'
         Assert-ContainsText $rendered.dictionaryText 'dictionary claim 둘째 줄'
-        Assert-ContainsText $rendered.emptyText '등록된 검토 항목이 없습니다.'
+        Assert-ContainsText $rendered.emptyText '확인할 내용이 없습니다.'
     }
 
     Test-Case '인증 파서는 개인정보와 원문 비밀값을 결과에서 제거한다' {
@@ -2079,11 +2186,11 @@ try {
         Assert-True ($rendered.narrowBarriers -ge 3)
         Assert-ContainsText ($rendered.narrow -join "`n") '지금 상태  완료'
         Assert-ContainsText ($rendered.narrow -join "`n") '작업 종료 · 완료'
-        Assert-ContainsText ($rendered.narrow -join "`n") '검토 현황'
+        Assert-ContainsText ($rendered.narrow -join "`n") '확인할 내용'
         Assert-ContainsText ($rendered.narrow -join "`n") 'Enter 키를 누르면'
         Assert-ContainsText ($rendered.active -join "`n") '답변 도착 · 형식 확인 중'
-        Assert-ContainsText ($rendered.active -join "`n") 'P 안전 일시정지'
-        Assert-ContainsText ($rendered.pauseRequested -join "`n") '일시정지 요청됨 · 현재 호출 완료 후 다음 호출 전에 멈춥니다.'
+        Assert-ContainsText ($rendered.active -join "`n") 'P 현재 작업 후 멈추기'
+        Assert-ContainsText ($rendered.pauseRequested -join "`n") '멈추기 요청됨 · 현재 AI 작업이 끝난 뒤 멈춥니다.'
         Assert-ContainsText ($rendered.active -join "`n") '지금 작업 중  ⠼ Claude · 각자 초안 작성'
         Assert-ContainsText ($rendered.active -join "`n") '작업 대상  문서 A'
         Assert-ContainsText ($rendered.active -join "`n") 'Codex · 2차 최종 확인 · 문서 B'
@@ -2101,7 +2208,7 @@ try {
         Assert-Equal $rendered.sparseActionSummary '새 검토 항목: 중요 2 | 검토 의견 처리: 자료 필요 1 | 문서 반영: 미반영 1'
         Assert-ContainsText ($rendered.waiting -join "`n") '지금 작업 중  ⠼ Claude · 각자 초안 작성 · 문서 A · 답변을 기다리는 중 00:04'
         Assert-ContainsText ($rendered.waiting -join "`n") 'Codex ✓  Claude ●'
-        Assert-ContainsText ($rendered.active -join "`n") '검토 현황  전체 단계 완료 후 집계'
+        Assert-ContainsText ($rendered.active -join "`n") '확인할 내용  전체 단계 완료 후 집계'
         Assert-ContainsText ($rendered.retry -join "`n") '지금 작업 중  ↻ Codex · 문서 수정 · 문서 A · 답변 형식 다시 확인 대기'
         Assert-ContainsText ($rendered.standardRetry -join "`n") '지금 작업 중  ↻ Codex · 문서 수정 · 문서 A · AI 답변 재시도 대기'
         Assert-ContainsText ($rendered.failed -join "`n") '지금 작업 중  ! Claude · 수정 문서 최종 확인 · 문서 B · 오류 발생 · 이어서 가능'
@@ -2111,7 +2218,7 @@ try {
         Assert-False ([string]$rendered.logText -like "*`e*")
         Assert-Equal ([regex]::Matches($rendered.committedLogText, [regex]::Escape($rendered.committedSummary)).Count) 1
         Assert-Equal @($rendered.committedLogText -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count 2
-        Assert-Equal ([regex]::Matches($rendered.committedLogText, '확정').Count) 1
+        Assert-Equal ([regex]::Matches($rendered.committedLogText, '결과 저장 완료').Count) 1
         foreach ($previousSummary in @($rendered.previousCommittedSummaries)) { Assert-NotContainsText $rendered.committedLogText $previousSummary }
         Assert-False ([string]$rendered.committedLogText -like "*`e*")
         Assert-Equal $rendered.koreanWidth 5
@@ -2311,7 +2418,7 @@ try {
         Assert-Equal $surface.unknownState 'FUTURE_STATE'
     }
 
-    Test-Case '라이브 진행판의 P 키는 기존 안전 일시정지를 한 번만 요청한다' {
+    Test-Case 'AI 진행 화면의 P 키는 현재 작업 뒤 멈추기를 한 번만 요청한다' {
         $input = New-MarkdownFile -Path (Join-Path $tempRoot 'progress-pause-key\input\brief.md')
         $workspace = Join-Path $tempRoot 'progress-pause-key\results'
         $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
@@ -2340,8 +2447,8 @@ try {
         $pauseRecord = Get-Content -LiteralPath (Join-Path $run.runDirectory 'control\pause-request.json') -Raw | ConvertFrom-Json -Depth 20
         Assert-Equal $pauseRecord.status 'REQUESTED'
         Assert-Equal $pauseRecord.requestId $control.view.pauseRequestId
-        Assert-ContainsText $screen '일시정지를 요청했습니다.'
-        Assert-ContainsText $screen '현재 호출 완료 후 다음 호출 전에 멈춥니다.'
+        Assert-ContainsText $screen '멈추기를 요청했습니다.'
+        Assert-ContainsText $screen '현재 AI 작업이 끝난 뒤 멈춥니다.'
     }
 
     Test-Case '확정 피드는 단계 그래프 순서의 유효한 최근 3건을 선택하고 손상 항목을 이전 결과로 채운다' {
@@ -2429,8 +2536,8 @@ try {
         Assert-ContainsText ([string]$feed3Headers[1]) '공동 문서 작성'
         Assert-ContainsText ([string]$feed3Headers[2]) '최종 확인'
         Assert-ContainsText $feed.frameCounts['3'].text '지금 상태  완료'
-        Assert-ContainsText $feed.frameCounts['3'].text '검토 현황'
-        Assert-ContainsText $feed.frameCounts['3'].text 'P 안전 일시정지'
+        Assert-ContainsText $feed.frameCounts['3'].text '확인할 내용'
+        Assert-ContainsText $feed.frameCounts['3'].text 'P 현재 작업 후 멈추기'
     }
 
     Test-Case '자연어 행동 집계는 새 쟁점과 검토 응답 및 실제 편집을 분리하고 0건을 생략한다' {
@@ -4072,7 +4179,7 @@ try {
                 foreach ($selectedIndex in 0..($normalizedMenuItems.Count - 1)) {
                     $cardRows = @(Add-DuoForgeTrailingSpacerRowInternal -Rows @(New-DuoForgeInteractiveQuestionCardRowsInternal -Question $presentationQuestion -Presentation $presentation -Width $width -Height $height))
                     $menuLines = @(New-DuoForgeMenuFrameInternal -Items $normalizedMenuItems -Title '승인 요청: 번호로 선택하거나 O로 내 의견을 입력해 주세요.' -SelectedIndex $selectedIndex -Width $width -Height $height -ContextTransition)
-                    $allLines = @('질문 검토 3/3 · 현재 배치 3개 · 뒤에 2개', '마지막 검토입니다. 이후 새 질문은 자동으로 묻지 않습니다.') + @($cardRows | ForEach-Object { [string]$_.text }) + @($menuLines)
+                    $allLines = @('사용자 확인 단계 3/3 · 지금 볼 질문 3개 · 이후 2개', '마지막 사용자 확인 단계입니다. 이후 새 질문은 자동으로 묻지 않습니다.') + @($cardRows | ForEach-Object { [string]$_.text }) + @($menuLines)
                     [ordered]@{
                         width = $width
                         height = $height
@@ -4171,7 +4278,7 @@ try {
         foreach ($frame in @($cardResult.frames)) {
             Assert-True ($frame.lines.Count -le [int]$frame.height) "$($frame.width)x$($frame.height) 질문 카드가 화면 높이를 넘었습니다."
             Assert-True ([int]$frame.maximumWidth -lt [int]$frame.width) "$($frame.width)x$($frame.height) 질문 카드가 화면 폭을 넘었습니다."
-            Assert-True (@($frame.lines | Where-Object { $_ -like '*쟁점*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 핵심 쟁점이 보이지 않습니다."
+            Assert-True (@($frame.lines | Where-Object { $_ -like '*핵심 내용*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 확인할 핵심 내용이 보이지 않습니다."
             Assert-True (@($frame.lines | Where-Object { $_ -like '*AI*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 AI 처리 흐름이 보이지 않습니다."
             Assert-True (@($frame.lines | Where-Object { $_ -like '*요청*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 사용자 요청이 보이지 않습니다."
             Assert-True (@($frame.lines | Where-Object { $_ -like '*[[]1[]]*AI가 잠정*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 1안이 보이지 않습니다."
@@ -4179,7 +4286,7 @@ try {
             Assert-True (@($frame.lines | Where-Object { $_ -like '*[[]O[]]*내 의견 직접 입력*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 주관식 입력 동작이 보이지 않습니다."
             Assert-Equal ([string]$frame.cardLines[-1]) '' "$($frame.width)x$($frame.height) 질문 카드와 답변 메뉴 사이의 전환 여백이 없습니다."
             Assert-False ([string]::IsNullOrWhiteSpace([string]$frame.cardLines[-2])) "$($frame.width)x$($frame.height) 질문 카드 끝에 전환 여백이 중복되었습니다."
-            foreach ($sectionTitle in @('── 핵심 쟁점', '── AI 검토와 문서 처리', '── 사용자에게 필요한 결정')) {
+            foreach ($sectionTitle in @('── 확인할 핵심 내용', '── AI 검토와 문서 처리', '── 사용자에게 필요한 결정')) {
                 $sectionIndex = [Array]::IndexOf([object[]]$frame.lines, $sectionTitle)
                 Assert-True ($sectionIndex -ge 0 -and $sectionIndex + 1 -lt $frame.lines.Count -and [string]$frame.lines[$sectionIndex + 1] -match '^  \S') "$($frame.width)x$($frame.height)에서 $sectionTitle 제목과 본문이 분리되지 않았습니다."
             }
@@ -4271,7 +4378,7 @@ try {
             Assert-ContainsText $cardText '핵심전체끝' "$($frame.width)x$($frame.height)에서 핵심 쟁점이 잘렸습니다."
             Assert-ContainsText $cardText '제안전체끝' "$($frame.width)x$($frame.height)에서 제안 방향이 잘렸습니다."
             Assert-NotContainsText $cardText '…' "$($frame.width)x$($frame.height) D-040 카드에 불필요한 말줄임표가 있습니다."
-            $coreIndex = [Array]::IndexOf([object[]]$frame.card, '── 핵심 쟁점')
+            $coreIndex = [Array]::IndexOf([object[]]$frame.card, '── 확인할 핵심 내용')
             $proposalIndex = [Array]::IndexOf([object[]]$frame.card, '── 제안 방향')
             $requestIndex = [Array]::IndexOf([object[]]$frame.card, '── 사용자에게 필요한 결정')
             Assert-True ($coreIndex -ge 0 -and [string]$frame.card[$coreIndex + 1] -match '^  \S') '핵심 쟁점 제목과 2칸 들여쓴 본문이 분리되지 않았습니다.'
@@ -4311,7 +4418,7 @@ try {
 
         Assert-ContainsText ([string]$surface.items[0].label) 'D-EVIDENCE-001 · 문서 B · 빠진 데이터·검증 정의'
         Assert-NotContainsText ([string]$surface.items[0].label) '데이터 스키마의 검증 기준'
-        Assert-ContainsText ([string]$surface.items[0].detail) '줄이지 않고 보여줍니다'
+        Assert-ContainsText ([string]$surface.items[0].detail) '모두 보여줍니다'
         foreach ($frame in @($surface.frames)) {
             Assert-True ([int]$frame.maximumWidth -lt [int]$frame.width) "$($frame.width)열 자료 요청 상세가 폭을 넘었습니다."
             $frameText = $frame.lines -join "`n"
@@ -4319,7 +4426,7 @@ try {
             Assert-ContainsText $frameText '필요자료끝표식' "$($frame.width)열에서 필요한 자료 끝이 잘렸습니다."
             Assert-NotContainsText $frameText '…' "$($frame.width)열 자료 요청 상세에 불필요한 말줄임표가 있습니다."
             Assert-Equal ([string]$frame.lines[-1]) '' "$($frame.width)열 자료 상세와 경로 선택 메뉴 사이의 전환 여백이 없습니다."
-            foreach ($sectionTitle in @('── 핵심 쟁점', '── 필요한 자료')) {
+            foreach ($sectionTitle in @('── 확인할 핵심 내용', '── 필요한 자료')) {
                 $sectionIndex = [Array]::IndexOf([object[]]$frame.lines, $sectionTitle)
                 Assert-True ($sectionIndex -ge 0 -and $sectionIndex + 1 -lt $frame.lines.Count -and [string]$frame.lines[$sectionIndex + 1] -match '^  \S') "$($frame.width)열 자료 요청 상세에서 $sectionTitle 제목과 본문이 분리되지 않았습니다."
             }
@@ -4518,8 +4625,8 @@ try {
         $run = New-DuoForgeRun -ValidationResult $validation
         $control = @{ calls = 0 }
         $invokeCycle = {
-            param($directory, $controlState)
-            & $module {
+            param($moduleInfo, $directory, $controlState)
+            & $moduleInfo {
                 param($runDirectory, $sharedControl)
                 $callback = {
                     param($step)
@@ -4538,7 +4645,7 @@ try {
             } $directory $controlState
         }.GetNewClosure()
 
-        $firstGate = & $invokeCycle $run.runDirectory $control
+        $firstGate = & $invokeCycle $module $run.runDirectory $control
         Assert-Equal $firstGate.status 'AWAITING_USER' ($firstGate | ConvertTo-Json -Depth 20 -Compress)
         Assert-Equal $firstGate.decisionReviewCycle 1
         Assert-Equal $firstGate.maxDecisionReviewCycles 3
@@ -4559,7 +4666,7 @@ try {
             $seenIssueIds.Add($issueId)
             $answered = Set-DuoForgeIssueAnswer -RunId $run.runId -IssueId $issueId -Choice 1 -ResultsRoot $workspace
             Assert-Equal $answered.status 'PAUSED_USER'
-            $reviewed = & $invokeCycle $run.runDirectory $control
+            $reviewed = & $invokeCycle $module $run.runDirectory $control
             if ($cycle -lt 3) {
                 Assert-Equal $reviewed.status 'AWAITING_USER'
                 Assert-Equal $reviewed.decisionReviewCycle ($cycle + 1)
@@ -4585,7 +4692,7 @@ try {
             Set-DuoForgeIssueAnswer -RunId $run.runId -IssueId ([string]$limitedPending.questions[0].issueKey) -Choice 1 -ResultsRoot $workspace
         }
         $callsBeforeBlockedResume = [int]$control.calls
-        $blockedResume = & $invokeCycle $run.runDirectory $control
+        $blockedResume = & $invokeCycle $module $run.runDirectory $control
         Assert-Equal $blockedResume.status 'QUESTION_LIMIT_REACHED'
         Assert-Equal $blockedResume.invoked 0
         Assert-Equal $control.calls $callsBeforeBlockedResume
@@ -4606,7 +4713,7 @@ try {
                 stateLabel = Get-DuoForgeDisplayStateLabelInternal -Status 'QUESTION_LIMIT_REACHED'
             }
         } $run.runId $run.runDirectory
-        Assert-Equal $limitedMenu.stateLabel '질문 검토 한도 도달'
+        Assert-Equal $limitedMenu.stateLabel '사용자 확인을 3번 거친 뒤 멈춤'
         Assert-Equal (@($limitedMenu.items | ForEach-Object { [string]$_.value }) -join ',') 'I,O,B'
 
         $earlyWorkspace = Join-Path $tempRoot 'decision-review-early-results'
@@ -4614,8 +4721,8 @@ try {
         $earlyValidation = Test-DuoForgeStartRequest -Request $earlyRequest -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $earlyWorkspace)
         $earlyRun = New-DuoForgeRun -ValidationResult $earlyValidation
         $invokeEarly = {
-            param($directory)
-            & $module {
+            param($moduleInfo, $directory)
+            & $moduleInfo {
                 param($runDirectory)
                 $callback = {
                     param($step)
@@ -4630,12 +4737,12 @@ try {
                 Invoke-DuoForgeStageEngine -RunDirectory $runDirectory -ProviderInvoker $callback
             } $directory
         }.GetNewClosure()
-        $earlyGate = & $invokeEarly $earlyRun.runDirectory
+        $earlyGate = & $invokeEarly $module $earlyRun.runDirectory
         Assert-Equal $earlyGate.status 'AWAITING_USER'
         Assert-Equal $earlyGate.decisionReviewCycle 1
         $earlyPending = Get-Content -Raw -LiteralPath (Join-Path $earlyRun.runDirectory 'decisions\pending.json') | ConvertFrom-Json -Depth 50
         $null = Set-DuoForgeIssueAnswer -RunId $earlyRun.runId -IssueId ([string]$earlyPending.questions[0].issueKey) -Choice 1 -ResultsRoot $earlyWorkspace
-        $earlyCompleted = & $invokeEarly $earlyRun.runDirectory
+        $earlyCompleted = & $invokeEarly $module $earlyRun.runDirectory
         Assert-Equal $earlyCompleted.status 'COMPLETED'
         Assert-Equal $earlyCompleted.decisionReviewCycle 1
         Assert-False ([bool]$earlyCompleted.limitReached)
@@ -4794,13 +4901,13 @@ try {
             $frameText = $frame.lines -join ' '
             Assert-ContainsText $frameText '── 원래 질문'
             Assert-ContainsText $frameText '어떤 전략을 선택할까요?'
-            Assert-ContainsText $frameText '── 핵심 쟁점'
+            Assert-ContainsText $frameText '── 확인할 핵심 내용'
             Assert-ContainsText $frameText '배포 전략 선택이 필요합니다.'
             Assert-ContainsText $frameText '── 현재 답변'
             Assert-ContainsText $frameText '1안 · 점진 배포'
             Assert-Equal ([string]$frame.contextLines[-1]) '' "$($frame.width)x$($frame.height) 답변 변경 상세와 새 답변 메뉴 사이의 전환 여백이 없습니다."
             Assert-False ([string]::IsNullOrWhiteSpace([string]$frame.contextLines[-2])) "$($frame.width)x$($frame.height) 답변 변경 상세 끝에 전환 여백이 중복되었습니다."
-            foreach ($sectionTitle in @('── 원래 질문', '── 핵심 쟁점', '── 현재 답변')) {
+            foreach ($sectionTitle in @('── 원래 질문', '── 확인할 핵심 내용', '── 현재 답변')) {
                 $sectionIndex = [Array]::IndexOf([object[]]$frame.contextLines, $sectionTitle)
                 Assert-True ($sectionIndex -ge 0 -and $sectionIndex + 1 -lt $frame.contextLines.Count -and [string]$frame.contextLines[$sectionIndex + 1] -match '^  \S') "$($frame.width)x$($frame.height) 답변 변경 화면에서 $sectionTitle 제목과 본문이 분리되지 않았습니다."
             }
@@ -4812,7 +4919,7 @@ try {
             Assert-ContainsText $frameText '핵심쟁점끝표식' "$($frame.width)x$($frame.height)에서 핵심 쟁점 끝이 잘렸습니다."
             Assert-ContainsText $frameText '현재답변끝표식' "$($frame.width)x$($frame.height)에서 현재 답변 끝이 잘렸습니다."
             Assert-NotContainsText $frameText '…' "$($frame.width)x$($frame.height) 긴 답변 변경 화면에 불필요한 말줄임표가 있습니다."
-            foreach ($sectionTitle in @('── 원래 질문', '── 핵심 쟁점', '── 현재 답변')) {
+            foreach ($sectionTitle in @('── 원래 질문', '── 확인할 핵심 내용', '── 현재 답변')) {
                 $sectionIndex = [Array]::IndexOf([object[]]$frame.lines, $sectionTitle)
                 Assert-True ($sectionIndex -ge 0 -and $sectionIndex + 1 -lt $frame.lines.Count -and [string]$frame.lines[$sectionIndex + 1] -match '^  \S') "$($frame.width)x$($frame.height) 긴 답변 변경 화면에서 $sectionTitle 제목과 본문이 분리되지 않았습니다."
             }
@@ -5281,12 +5388,14 @@ Setext 결론
         Assert-True ([bool]$allowed.valid) ($allowed.errors | ConvertTo-Json -Depth 20 -Compress)
         Assert-True ($allowed.executionPlan.contextBatchCount -gt 0)
         $planText = & $module { param($validation) (& { Write-DuoForgeExecutionPlan -Validation $validation } 6>&1 | Out-String) } $allowed
-        Assert-ContainsText $planText '분석 묶음'
-        Assert-ContainsText $planText '── 호출 예산'
+        Assert-ContainsText $planText '읽을 수 있는 파일'
+        Assert-ContainsText $planText '읽을 수 있는 분량'
+        Assert-ContainsText $planText '── 예상 AI 요청 횟수'
         Assert-ContainsText $planText 'Codex'
-        Assert-ContainsText $planText '기본 '
-        Assert-ContainsText $planText '재시도 최대 '
-        Assert-ContainsText $planText '총 최대 '
+        Assert-ContainsText $planText '예정 요청 '
+        Assert-ContainsText $planText '실패 시 추가 요청 최대 '
+        Assert-ContainsText $planText '최대 '
+        Assert-NotContainsText $planText '호출 예산'
         Assert-NotContainsText $planText '최악'
         $run = New-DuoForgeRun -ValidationResult $allowed
         $contextPlan = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'inputs\context-plan.json') | ConvertFrom-Json -Depth 100
@@ -5300,7 +5409,7 @@ Setext 결론
         Assert-Equal $result.status 'COMPLETED_PARTIAL'
         Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'final\COVERAGE.md') -PathType Leaf)
         $coverageText = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'final\COVERAGE.md')
-        Assert-ContainsText $coverageText '전체 입력에 대한 단정적 결론이 아닙니다.'
+        Assert-ContainsText $coverageText '이 결과만으로 문서 전체를 판단하면 안 됩니다.'
     }
 
     foreach ($largeMode in @('document-merge', 'dual-document')) {

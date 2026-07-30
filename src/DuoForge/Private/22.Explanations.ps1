@@ -246,7 +246,7 @@ function Invoke-DuoForgeLiveProviderExplanationInternal {
         [int]$TimeoutSeconds = 900
     )
 
-    if (-not $LiveConsent) { throw (New-DuoForgeException -Code 'DF-LIVE-CONSENT' -Message '실제 설명 호출에는 명시적인 라이브 실행 동의가 필요합니다.') }
+    if (-not $LiveConsent) { throw (New-DuoForgeException -Code 'DF-LIVE-CONSENT' -Message 'AI에 실제 설명을 요청하기 전에 사용자의 명시적인 동의가 필요합니다.') }
     $operationKey = ('explain-{0}-{1}-{2}' -f $IssueId.ToLowerInvariant(), $Provider, [Guid]::NewGuid().ToString('N').Substring(0, 8))
     $schema = Read-DuoForgeJson -Path (Get-DuoForgeExplanationSchemaPathInternal)
     $spec = Get-DuoForgeStructuredProviderCommandSpecInternal -Provider $Provider -RunDirectory $RunDirectory -OperationKey $operationKey -Prompt $Prompt -Schema $schema -SchemaFileName 'explanation-result.schema.json'
@@ -296,10 +296,10 @@ function Invoke-DuoForgeIssueExplanationInternal {
     $providers = @()
     if ($Provider -eq 'both') { $providers = @('codex', 'claude') }
     else { $providers = @([string]$Provider) }
-    if ($null -eq $ProviderInvoker -and -not $LiveConsent) { throw (New-DuoForgeException -Code 'DF-LIVE-CONSENT' -Message '실제 설명 호출에는 명시적인 라이브 실행 동의가 필요합니다.') }
+    if ($null -eq $ProviderInvoker -and -not $LiveConsent) { throw (New-DuoForgeException -Code 'DF-LIVE-CONSENT' -Message 'AI에 실제 설명을 요청하기 전에 사용자의 명시적인 동의가 필요합니다.') }
     if ($null -eq $ProviderInvoker) {
         $doctor = Invoke-DuoForgeDoctorInternal
-        if (-not [bool]$doctor.readyForDocumentModes) { throw (New-DuoForgeException -Code 'DF-DOCTOR-BLOCKED' -Message '현재 환경 진단이 설명 호출을 허용하지 않습니다.') }
+        if (-not [bool]$doctor.readyForDocumentModes) { throw (New-DuoForgeException -Code 'DF-DOCTOR-BLOCKED' -Message '현재 실행 환경에서는 AI에 설명을 요청할 수 없습니다. 환경 확인 결과를 먼저 살펴봐 주세요.') }
     }
 
     return Invoke-WithDuoForgeRunLock -RunDirectory $directory -ScriptBlock {
@@ -307,7 +307,7 @@ function Invoke-DuoForgeIssueExplanationInternal {
         $issue = Get-DuoForgeIssueForExplanationInternal -RunDirectory $directory -IssueId $IssueId
         $budget = Get-DuoForgeExplanationBudgetInternal -RunDirectory $directory
         if ([int]$budget.remaining -lt $providers.Count) {
-            throw (New-DuoForgeException -Code 'DF-EXPLANATION-LIMIT' -Message "설명 호출 잔여 예산이 부족합니다: 남음 $($budget.remaining), 필요 $($providers.Count)")
+            throw (New-DuoForgeException -Code 'DF-EXPLANATION-LIMIT' -Message "추가 설명을 요청할 수 있는 횟수가 부족합니다: 남은 횟수 $($budget.remaining), 필요한 횟수 $($providers.Count)")
         }
 
         $records = [System.Collections.Generic.List[object]]::new()
