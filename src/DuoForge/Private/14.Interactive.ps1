@@ -726,7 +726,8 @@ function Get-DuoForgeInteractiveQuestionMenuItemsInternal {
             enabled = $true
         })
     }
-    $items.Add([ordered]@{ value = 'other'; label = '다른 방법 보기'; detail = '추가 토론, 조건 입력, 상세 설명과 의견 비교를 선택할 수 있습니다.'; shortcuts = @('M'); enabled = $true })
+    $items.Add([ordered]@{ value = 'custom'; label = '선택지에 없는 내 의견 직접 입력'; detail = '주관식 답변으로 확정하거나 여러 질문에 공통으로 적용할 전제를 추가합니다.'; shortcuts = @('O'); enabled = $true })
+    $items.Add([ordered]@{ value = 'other'; label = '다른 방법 보기'; detail = '추가 토론, 보충 조건, 상세 설명과 의견 비교를 선택할 수 있습니다.'; shortcuts = @('M'); enabled = $true })
     $items.Add([ordered]@{ value = 'back'; label = '이전으로'; shortcuts = @('Q'); enabled = $true })
     return @($items)
 }
@@ -737,7 +738,7 @@ function Get-DuoForgeInteractiveQuestionAlternativeMenuItemsInternal {
 
     $items = [System.Collections.Generic.List[object]]::new()
     if ($MaximumRounds -lt 3) { $items.Add([ordered]@{ value = 'round'; label = '한 토론 회차 더 진행'; shortcuts = @('R'); enabled = $true }) }
-    $items.Add([ordered]@{ value = 'constraint'; label = '추가 조건 직접 입력'; shortcuts = @('F'); enabled = $true })
+    $items.Add([ordered]@{ value = 'constraint'; label = '현재 답변과 함께 적용할 보충 조건 입력'; detail = '현재 질문의 답을 대신하지 않고 마지막 문서·검증 단계에 조건을 추가합니다.'; shortcuts = @('F'); enabled = $true })
     $items.Add([ordered]@{ value = 'explain'; label = '관점과 수준을 선택해 상세 설명'; shortcuts = @('E'); enabled = $true })
     $items.Add([ordered]@{ value = 'compare'; label = '양쪽 의견과 장단점 비교'; shortcuts = @('C'); enabled = $true })
     $items.Add([ordered]@{ value = 'back-to-question'; label = '결정 화면으로 돌아가기'; shortcuts = @('Q'); enabled = $true })
@@ -754,7 +755,7 @@ function New-DuoForgeInteractiveQuestionCardRowsInternal {
     )
 
     $lineWidth = [Math]::Max(20, $Width - 1)
-    $estimatedMenuLines = @($Presentation.options).Count + 7
+    $estimatedMenuLines = @($Presentation.options).Count + 8
     $budget = [Math]::Max(8, $Height - $estimatedMenuLines)
     $rows = [System.Collections.Generic.List[object]]::new()
     $add = {
@@ -829,6 +830,65 @@ function Get-DuoForgeInteractivePendingQuestionsInternal {
     return @(Get-DuoForgeObjectValue -Object $pending -Name 'questions' -Default @())
 }
 
+function Invoke-DuoForgeInteractiveCustomDecisionInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Run,
+        [Parameter(Mandatory)][string]$IssueId,
+        [scriptblock]$InputReader,
+        [scriptblock]$MenuInvoker
+    )
+
+    $readText = { param([string]$Prompt) if ($null -ne $InputReader) { return [string](& $InputReader $Prompt) }; return [string](Read-Host $Prompt) }
+    $scope = Invoke-DuoForgeMenuInternal -Items @(
+        [ordered]@{ value = 'answer'; label = '이 질문의 주관식 답변으로 사용'; detail = '객관식 선택 대신 직접 쓴 의견을 이 질문의 최종 답변으로 기록합니다.'; shortcuts = @('1'); enabled = $true },
+        [ordered]@{ value = 'common'; label = '여러 질문에 공통 전제로 추가'; detail = '현재·이후 답변과 함께 두 AI의 마지막 문서·검증 단계에 적용하며 이 질문은 미답변으로 남깁니다.'; shortcuts = @('2'); enabled = $true },
+        [ordered]@{ value = 'back'; label = '결정 화면으로 돌아가기'; shortcuts = @('Q'); enabled = $true }
+    ) -Title '내 의견을 어떻게 반영할까요?' -EscapeValue 'back' -InputReader $InputReader -MenuInvoker $MenuInvoker
+    if ($scope -eq 'back') { return $null }
+
+    $prompt = if ($scope -eq 'answer') { '이 질문에 대한 내 답변' } else { '여러 질문에 함께 적용할 공통 전제' }
+    $text = ([string](& $readText $prompt)).Trim()
+    $resultsRoot = [System.IO.Path]::GetDirectoryName([string]$Run.runDirectory)
+    try {
+        if ($scope -eq 'answer') {
+            $preview = New-DuoForgeCustomAnswerPreviewInternal -RunId ([string]$Run.state.runId) -IssueId $IssueId -Text $text -ResultsRoot $resultsRoot
+            Write-Host ''
+            Write-Host '주관식 답변 미리보기' -ForegroundColor Cyan
+            Write-Host ("입력 내용: {0}" -f $preview.normalizedAnswer)
+            Write-Host ("적용 대상: {0} · {1}" -f $IssueId, (Get-DuoForgeInteractiveDocumentLabelInternal -TargetDocumentId ([string]$preview.affectedTarget)))
+            Write-Host ("처리 결과: {0}" -f $(if ([bool]$preview.replacesPreviousAnswer) { '기존 답변을 이 주관식 답변으로 변경합니다.' } else { '이 질문을 답변 완료로 처리합니다.' }))
+            Write-Host ("적용 방식: {0}" -f $preview.application)
+            $confirmation = ([string](& $readText '이 내용으로 확정하려면 APPLY를 입력하세요')).Trim()
+            if ($confirmation -cne 'APPLY') { Write-Host '주관식 답변 입력을 취소했습니다.'; return $null }
+            $applied = Set-DuoForgeUserDecisionInternal -RunId ([string]$Run.state.runId) -IssueId $IssueId -Action answer -CustomText $text -ResultsRoot $resultsRoot -ReplacePrevious:([bool]$preview.replacesPreviousAnswer)
+            Write-Host ("주관식 답변을 기록했습니다. 다시 실행할 단계: {0}" -f ($applied.resetSteps -join ', ')) -ForegroundColor Green
+            return [ordered]@{ kind = 'answer'; result = $applied; preview = $preview }
+        }
+
+        $preview = New-DuoForgeDecisionConstraintPreviewInternal -RunId ([string]$Run.state.runId) -IssueId $IssueId -Text $text -ResultsRoot $resultsRoot
+        Write-Host ''
+        Write-Host '공통 전제 미리보기' -ForegroundColor Cyan
+        Write-Host ("입력 내용: {0}" -f $preview.normalizedConstraint)
+        Write-Host ("연결 기준: {0} · {1}" -f $IssueId, (Get-DuoForgeInteractiveDocumentLabelInternal -TargetDocumentId ([string]$preview.affectedTarget)))
+        Write-Host '적용 범위: 현재·이후의 객관식 및 주관식 답변과 함께 두 AI의 마지막 문서 생성·검증 단계에 적용합니다.'
+        Write-Host '현재 질문 처리: 이 의견은 공통 전제이므로 현재 질문은 미답변으로 유지됩니다.'
+        Write-Host '충돌 처리: 기존 답변과 양립할 수 없으면 AI가 새 차단 쟁점으로 알려야 합니다.'
+        $confirmation = ([string](& $readText '이 공통 전제를 적용하려면 APPLY를 입력하세요')).Trim()
+        if ($confirmation -cne 'APPLY') { Write-Host '공통 전제 입력을 취소했습니다.'; return $null }
+        $applied = Set-DuoForgeUserConstraintInternal -RunId ([string]$Run.state.runId) -IssueId $IssueId -Text $text -ResultsRoot $resultsRoot -Confirm
+        Write-Host ("공통 전제를 기록했습니다. 다시 실행할 단계: {0}" -f ($applied.resetSteps -join ', ')) -ForegroundColor Green
+        return [ordered]@{ kind = 'constraint'; result = $applied; preview = $preview }
+    }
+    catch {
+        if ([string]$_.Exception.Data['DuoForgeCode'] -in @('DF-DECISION-CUSTOM-EMPTY', 'DF-DECISION-CUSTOM-LENGTH', 'DF-CONSTRAINT-EMPTY', 'DF-CONSTRAINT-LENGTH')) {
+            Write-Host $_.Exception.Message -ForegroundColor Yellow
+            return $null
+        }
+        throw
+    }
+}
+
 function Invoke-DuoForgeInteractiveQuestion {
     [CmdletBinding()]
     param(
@@ -883,8 +943,21 @@ function Invoke-DuoForgeInteractiveQuestion {
             Write-Host @writeParameters
         }
         $questionItems = @(Get-DuoForgeInteractiveQuestionMenuItemsInternal -Presentation $presentation -MaximumRounds ([int]$Run.manifest.maxRounds))
-        $choice = Invoke-DuoForgeMenuInternal -Items $questionItems -Title ("{0}: 1안, 2안처럼 번호로 선택해 주세요." -f $presentation.requestKind) -EscapeValue 'back' -InputReader $InputReader -MenuInvoker $MenuInvoker
+        $choice = Invoke-DuoForgeMenuInternal -Items $questionItems -Title ("{0}: 번호로 선택하거나 O로 내 의견을 입력해 주세요." -f $presentation.requestKind) -EscapeValue 'back' -InputReader $InputReader -MenuInvoker $MenuInvoker
         if ($choice -eq 'back') { return }
+        if ($choice -eq 'custom') {
+            $customResult = Invoke-DuoForgeInteractiveCustomDecisionInternal -Run $Run -IssueId ([string]$question.issueKey) -InputReader $InputReader -MenuInvoker $MenuInvoker
+            if ($null -eq $customResult -or [string]$customResult.kind -eq 'constraint') { continue }
+            $remainingQuestions = @(Get-DuoForgeInteractivePendingQuestionsInternal -RunDirectory ([string]$Run.runDirectory))
+            if ($remainingQuestions.Count -gt 0) {
+                Write-Host ("아직 답하지 않은 질문이 {0}개 있습니다. 다음 질문 목록을 이어서 표시합니다. Q를 누르면 나중에 다시 답할 수 있습니다." -f $remainingQuestions.Count) -ForegroundColor Yellow
+                Invoke-DuoForgeInteractiveQuestion -Run $Run -InputReader $InputReader -MenuInvoker $MenuInvoker
+            }
+            else {
+                Write-Host '모든 대기 질문에 답했습니다. 이제 작업 계속하기를 선택하면 답변을 반영해 다시 검증합니다.' -ForegroundColor Green
+            }
+            return
+        }
         if ($choice -eq 'other') {
             $alternativeItems = @(Get-DuoForgeInteractiveQuestionAlternativeMenuItemsInternal -MaximumRounds ([int]$Run.manifest.maxRounds))
             $choice = Invoke-DuoForgeMenuInternal -Items $alternativeItems -Title '다른 방법을 선택해 주세요.' -EscapeValue 'back-to-question' -InputReader $InputReader -MenuInvoker $MenuInvoker
@@ -905,7 +978,7 @@ function Invoke-DuoForgeInteractiveQuestion {
             Write-Host ("정규화된 제약: {0}" -f $preview.normalizedConstraint)
             Write-Host ("영향 대상: {0}" -f $preview.affectedTarget)
             Write-Host ("적용 방식: {0}" -f $preview.application)
-            $confirmation = (Read-Host '이 구조화 미리보기대로 적용하려면 APPLY를 입력하세요').Trim()
+            $confirmation = ([string](& $readText '이 구조화 미리보기대로 적용하려면 APPLY를 입력하세요')).Trim()
             if ($confirmation -cne 'APPLY') { Write-Host '제약 조건 적용을 취소했습니다.'; continue }
             $applied = Set-DuoForgeUserConstraintInternal -RunId ([string]$Run.state.runId) -IssueId ([string]$question.issueKey) -Text $constraintText -ResultsRoot $resultsRoot -Confirm
             Write-Host ("제약 조건을 기록했습니다. 다시 실행할 단계: {0}" -f ($applied.resetSteps -join ', ')) -ForegroundColor Green
@@ -1009,8 +1082,13 @@ function Invoke-DuoForgeInteractiveDecisionChangeInternal {
         if (@($decision.questionOptions).Count -eq 2 -and $optionIndex -eq 1 -and $displayLabel -match '^현재 요구를 유지') { $displayLabel = '제안을 반영하지 않고 기존 요구를 유지' }
         $optionItems.Add([ordered]@{ value = $letter; label = $displayLabel; detail = ('{0}안으로 변경합니다.' -f ($optionIndex + 1)); shortcuts = @([string]($optionIndex + 1), $letter); enabled = $true })
     }
-    $choice = Invoke-DuoForgeMenuInternal -Items @($optionItems) -Title '새 답변을 1안, 2안처럼 번호로 선택해 주세요.' -EscapeValue '' -InputReader $InputReader -MenuInvoker $MenuInvoker
+    $optionItems.Add([ordered]@{ value = 'custom'; label = '선택지에 없는 내 의견 직접 입력'; detail = '기존 답변을 주관식 답변으로 바꾸거나 여러 질문에 공통 전제를 추가합니다.'; shortcuts = @('O'); enabled = $true })
+    $choice = Invoke-DuoForgeMenuInternal -Items @($optionItems) -Title '번호로 답변을 변경하거나 O로 내 의견을 입력해 주세요.' -EscapeValue '' -InputReader $InputReader -MenuInvoker $MenuInvoker
     if ([string]::IsNullOrWhiteSpace([string]$choice)) { return }
+    if ($choice -eq 'custom') {
+        $null = Invoke-DuoForgeInteractiveCustomDecisionInternal -Run $Run -IssueId ([string]$decision.issueId) -InputReader $InputReader -MenuInvoker $MenuInvoker
+        return
+    }
     $resultsRoot = [System.IO.Path]::GetDirectoryName([string]$Run.runDirectory)
     try {
         $changed = Set-DuoForgeUserDecisionInternal -RunId ([string]$Run.state.runId) -IssueId ([string]$decision.issueId) -Action answer -Choice $choice -ResultsRoot $resultsRoot -ReplacePrevious

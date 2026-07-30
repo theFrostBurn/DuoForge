@@ -84,6 +84,7 @@ function Set-DuoForgeUserDecisionInternal {
         [Parameter(Mandatory)][string]$IssueId,
         [ValidateSet('answer', 'defer')][string]$Action = 'answer',
         [string]$Choice,
+        [string]$CustomText,
         [string]$ResultsRoot,
         [switch]$ConfirmPartial,
         [switch]$ReplacePrevious
@@ -134,10 +135,19 @@ function Set-DuoForgeUserDecisionInternal {
 
         if ($Action -eq 'answer') {
             if ($question.Count -ne 1 -and $null -eq $previousDecision) { throw (New-DuoForgeException -Code 'DF-DECISION-NO-QUESTION' -Message '이 쟁점에 답변 가능한 질문 카드가 없습니다.') }
-            if ([string]::IsNullOrWhiteSpace($Choice)) { throw (New-DuoForgeException -Code 'DF-DECISION-CHOICE' -Message 'answer에는 선택값이 필요합니다.') }
+            $hasChoice = -not [string]::IsNullOrWhiteSpace($Choice)
+            $hasCustomText = -not [string]::IsNullOrWhiteSpace($CustomText)
+            if ($hasChoice -eq $hasCustomText) { throw (New-DuoForgeException -Code 'DF-DECISION-CHOICE' -Message 'answer에는 객관식 선택 또는 주관식 답변 중 하나만 필요합니다.') }
             $options = if ($question.Count -eq 1) { @($question[0].options) } else { @($previousDecision.questionOptions) }
             if ($options.Count -eq 0) { throw (New-DuoForgeException -Code 'DF-DECISION-NO-OPTIONS' -Message '기존 결정의 선택지 기록이 없어 변경할 수 없습니다.') }
-            $resolvedChoice = Resolve-DuoForgeDecisionChoice -Choice $Choice -Options $options
+            if ($hasCustomText) {
+                $normalizedCustomText = ($CustomText -replace '\s+', ' ').Trim()
+                if ($normalizedCustomText.Length -gt 2000) { throw (New-DuoForgeException -Code 'DF-DECISION-CUSTOM-LENGTH' -Message '주관식 답변은 2,000자 이하여야 합니다.') }
+                $resolvedChoice = [ordered]@{ code = 'CUSTOM'; option = $normalizedCustomText }
+            }
+            else {
+                $resolvedChoice = Resolve-DuoForgeDecisionChoice -Choice $Choice -Options $options
+            }
             $decisionRecord.choiceCode = [string]$resolvedChoice.code
             $decisionRecord.selectedOption = [string]$resolvedChoice.option
             $decisionRecord.questionOptions = $options

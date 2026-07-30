@@ -43,7 +43,43 @@ function New-DuoForgeDecisionConstraintPreviewInternal {
         normalizedConstraint = $normalized
         affectedTarget = Get-DuoForgeIssueTargetInternal -Issue $issue[0]
         appliesToProviders = @('codex', 'claude')
-        application = '구속력 있는 공통 제약으로 마지막 문서 생성과 검증 단계에 주입'
+        application = '객관식·주관식 답변과 함께 지켜야 할 공통 전제로 마지막 문서 생성과 검증 단계에 주입'
+        answersQuestion = $false
+        requiresConfirmation = $true
+    }
+}
+
+function New-DuoForgeCustomAnswerPreviewInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RunId,
+        [Parameter(Mandatory)][string]$IssueId,
+        [Parameter(Mandatory)][string]$Text,
+        [string]$ResultsRoot
+    )
+
+    $normalized = ($Text -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($normalized)) { throw (New-DuoForgeException -Code 'DF-DECISION-CUSTOM-EMPTY' -Message '주관식 답변이 비어 있습니다.') }
+    if ($normalized.Length -gt 2000) { throw (New-DuoForgeException -Code 'DF-DECISION-CUSTOM-LENGTH' -Message '주관식 답변은 2,000자 이하여야 합니다.') }
+    $run = Get-DuoForgeRunInternal -RunId $RunId -ResultsRoot $ResultsRoot
+    $issue = @($run.issues.issues | Where-Object { [string]$_.issueId -eq $IssueId } | Select-Object -First 1)
+    if ($issue.Count -ne 1) { throw (New-DuoForgeException -Code 'DF-ISSUE-NOT-FOUND' -Message "쟁점을 찾을 수 없습니다: $IssueId") }
+    $pendingPath = Join-Path ([string]$run.runDirectory) 'decisions\pending.json'
+    $pendingQuestions = if (Test-Path -LiteralPath $pendingPath -PathType Leaf) { @((Read-DuoForgeJson -Path $pendingPath).questions) } else { @() }
+    $question = @($pendingQuestions | Where-Object { [string]$_.issueKey -eq $IssueId } | Select-Object -Last 1)
+    $records = @(Read-DuoForgeJsonLines -Path (Join-Path ([string]$run.runDirectory) 'decisions\user-answers.jsonl') -AllowMissing)
+    $previous = @(Get-DuoForgeEffectiveUserDecisionsInternal -Records $records | Where-Object { [string]$_.action -eq 'ANSWER' -and [string]$_.issueId -eq $IssueId } | Select-Object -Last 1)
+    if ($question.Count -ne 1 -and $previous.Count -ne 1) { throw (New-DuoForgeException -Code 'DF-DECISION-NO-QUESTION' -Message '이 쟁점에 답변하거나 변경할 수 있는 질문 기록이 없습니다.') }
+    return [ordered]@{
+        schemaVersion = 1
+        runId = $RunId
+        issueId = $IssueId
+        normalizedAnswer = $normalized
+        affectedTarget = Get-DuoForgeIssueTargetInternal -Issue $issue[0]
+        replacesPreviousAnswer = $previous.Count -eq 1
+        previousAnswer = if ($previous.Count -eq 1) { [string]$previous[0].selectedOption } else { '' }
+        application = '이 질문의 객관식 선택을 대신하는 구속력 있는 주관식 답변으로 기록'
+        answersQuestion = $true
         requiresConfirmation = $true
     }
 }

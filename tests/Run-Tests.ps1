@@ -3973,7 +3973,7 @@ try {
                 $height = [int]$size[1]
                 foreach ($selectedIndex in 0..($normalizedMenuItems.Count - 1)) {
                     $cardRows = @(New-DuoForgeInteractiveQuestionCardRowsInternal -Question $presentationQuestion -Presentation $presentation -Width $width -Height $height)
-                    $menuLines = @(New-DuoForgeMenuFrameInternal -Items $normalizedMenuItems -Title '승인 요청: 1안, 2안처럼 번호로 선택해 주세요.' -SelectedIndex $selectedIndex)
+                    $menuLines = @(New-DuoForgeMenuFrameInternal -Items $normalizedMenuItems -Title '승인 요청: 번호로 선택하거나 O로 내 의견을 입력해 주세요.' -SelectedIndex $selectedIndex)
                     $allLines = @($cardRows | ForEach-Object { [string]$_.text }) + @($menuLines | ForEach-Object { Limit-DuoForgeProgressTextInternal -Text ([string]$_) -Width ($width - 1) })
                     [ordered]@{
                         width = $width
@@ -4045,9 +4045,15 @@ try {
         Assert-Equal $cardResult.menuItems[1].shortcuts[0] '2'
         Assert-True ('B' -in @($cardResult.menuItems[1].shortcuts))
         Assert-ContainsText $cardResult.menuItems[0].detail '권장 · 결과:'
-        Assert-Equal $cardResult.menuItems[2].value 'other'
-        Assert-Equal $cardResult.menuItems[2].shortcuts[0] 'M'
+        Assert-Equal $cardResult.menuItems[2].value 'custom'
+        Assert-Equal $cardResult.menuItems[2].shortcuts[0] 'O'
+        Assert-ContainsText $cardResult.menuItems[2].detail '주관식 답변'
+        Assert-ContainsText $cardResult.menuItems[2].detail '공통으로 적용할 전제'
+        Assert-Equal $cardResult.menuItems[3].value 'other'
+        Assert-Equal $cardResult.menuItems[3].shortcuts[0] 'M'
         Assert-Equal $cardResult.alternativeItems[0].value 'round'
+        Assert-ContainsText $cardResult.alternativeItems[1].label '보충 조건'
+        Assert-ContainsText $cardResult.alternativeItems[1].detail '현재 질문의 답을 대신하지 않고'
         Assert-Equal $cardResult.alternativeItems[-1].value 'back-to-question'
         foreach ($frame in @($cardResult.frames)) {
             Assert-True ($frame.lines.Count -le [int]$frame.height) "$($frame.width)x$($frame.height) 질문 카드가 화면 높이를 넘었습니다."
@@ -4057,6 +4063,7 @@ try {
             Assert-True (@($frame.lines | Where-Object { $_ -like '*요청*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 사용자 요청이 보이지 않습니다."
             Assert-True (@($frame.lines | Where-Object { $_ -like '*[[]1[]]*AI가 잠정*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 1안이 보이지 않습니다."
             Assert-True (@($frame.lines | Where-Object { $_ -like '*[[]2[]]*잠정 수정*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 2안이 보이지 않습니다."
+            Assert-True (@($frame.lines | Where-Object { $_ -like '*[[]O[]]*내 의견 직접 입력*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 주관식 입력 동작이 보이지 않습니다."
             if ([int]$frame.width -eq 72) {
                 Assert-ContainsText ($frame.lines -join ' ') '보장할 수 없습니다' '72x20에서 핵심 쟁점의 결론이 보이지 않습니다.'
             }
@@ -4117,7 +4124,7 @@ try {
                 param($items, $title, $escapeValue, $initialSelectedIndex)
                 $capture.titles.Add([string]$title)
                 if ([string]$title -eq '먼저 확인할 요청을 선택해 주세요.') { return '0' }
-                if ([string]$title -like '*1안, 2안처럼 번호로 선택해 주세요.*') {
+                if ([string]$title -like '*번호로 선택하거나 O로 내 의견을 입력해 주세요.*') {
                     $capture.questionMenus = [int]$capture.questionMenus + 1
                     if ([int]$capture.questionMenus -eq 1) { return 'answer:A' }
                     return 'back'
@@ -4132,7 +4139,7 @@ try {
         Assert-Equal $followup.questionMenus 2
         Assert-Equal $followup.pendingCount 1
         Assert-Equal $followup.status 'PAUSED_USER'
-        Assert-True (@($followup.titles | Where-Object { $_ -like '*1안, 2안처럼 번호로 선택해 주세요.*' }).Count -eq 2)
+        Assert-True (@($followup.titles | Where-Object { $_ -like '*번호로 선택하거나 O로 내 의견을 입력해 주세요.*' }).Count -eq 2)
 
         $pausedMenu = & $module {
             param($runId, $runDirectory, $resultsRoot)
@@ -4151,6 +4158,114 @@ try {
         Assert-True ([bool]$answerItem.enabled)
         Assert-False ([bool]$resumeItem.enabled)
         Assert-ContainsText ([string]$resumeItem.disabledReason) '아직 답하지 않은 질문이 1개'
+    }
+
+    Test-Case '선택지 밖 의견은 질문 답변이나 여러 질문의 공통 전제로 구분해 기록한다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'custom-answer\input\brief.md')
+        $workspace = Join-Path $tempRoot 'custom-answer-results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $waiting = & $module {
+            param($directory)
+            $callback = {
+                param($step)
+                $result = New-DuoForgeFakeStageResult -Step $step
+                if ([string]$step.stage -eq 'final-validation') {
+                    $result.finalApproved = $false
+                    $result.issues = @(
+                        [ordered]@{ issueKey = 'CUSTOM-R02-001'; targetDocumentId = 'merged'; category = 'preference'; severity = 'major'; claim = '음성 엔진을 확정해야 합니다.'; evidence = @(); proposal = '플랫폼 음성 인식을 사용합니다.'; requiresUser = $true; blockingProposal = $true },
+                        [ordered]@{ issueKey = 'CUSTOM-R02-002'; targetDocumentId = 'merged'; category = 'preference'; severity = 'major'; claim = '오프라인 정책을 확정해야 합니다.'; evidence = @(); proposal = '수동 전환을 사용합니다.'; requiresUser = $true; blockingProposal = $true }
+                    )
+                    $result.openQuestions = @(
+                        [ordered]@{ issueKey = 'CUSTOM-R02-001'; title = '음성 엔진'; question = '어떤 엔진을 사용할까요?'; options = @('플랫폼 음성 인식', '완전 온디바이스 엔진'); recommendedOption = '플랫폼 음성 인식'; reasonNow = '엔진을 확정해야 합니다.'; plainExplanation = '음성 처리 기반을 정합니다.'; codexOpinion = '플랫폼 기능을 권합니다.'; claudeOpinion = '온디바이스 엔진을 검토합니다.'; estimatedCost = '중간'; reversibility = 'moderate'; confidence = 'medium'; impactIfDeferred = '검증이 멈춥니다.'; safeDefault = '플랫폼 음성 인식'; experimentPossible = $true },
+                        [ordered]@{ issueKey = 'CUSTOM-R02-002'; title = '오프라인 정책'; question = '오프라인일 때 어떻게 할까요?'; options = @('수동 전환', '대표 맥락 제외'); recommendedOption = '수동 전환'; reasonNow = '오프라인 동작을 확정해야 합니다.'; plainExplanation = '연결이 없을 때의 동작을 정합니다.'; codexOpinion = '수동 전환을 권합니다.'; claudeOpinion = '범위 축소를 검토합니다.'; estimatedCost = '중간'; reversibility = 'moderate'; confidence = 'medium'; impactIfDeferred = '검증이 멈춥니다.'; safeDefault = '수동 전환'; experimentPossible = $true }
+                    )
+                }
+                return $result
+            }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory
+        Assert-Equal $waiting.status 'AWAITING_USER'
+
+        $customFlow = & $module {
+            param($runId, $resultsRoot)
+            $currentRun = ConvertTo-DuoForgeHashtable -InputObject (Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $resultsRoot)
+            $pendingBefore = @(Get-DuoForgeInteractivePendingQuestionsInternal -RunDirectory ([string]$currentRun.runDirectory))
+            $firstIssueId = [string]$pendingBefore[0].issueKey
+            $secondIssueId = [string]$pendingBefore[1].issueKey
+
+            $answerInputs = [System.Collections.Generic.Queue[string]]::new()
+            $answerInputs.Enqueue('  항상   별도의 로컬 오프라인 엔진으로 처리한다.  ')
+            $answerInputs.Enqueue('APPLY')
+            $answerReader = { param($prompt) return $answerInputs.Dequeue() }.GetNewClosure()
+            $answerMenu = { param($items, $title, $escapeValue, $initialSelectedIndex) return 'answer' }
+            $answer = Invoke-DuoForgeInteractiveCustomDecisionInternal -Run $currentRun -IssueId $firstIssueId -InputReader $answerReader -MenuInvoker $answerMenu
+            $pendingAfterAnswer = @(Get-DuoForgeInteractivePendingQuestionsInternal -RunDirectory ([string]$currentRun.runDirectory))
+
+            $constraintInputs = [System.Collections.Generic.Queue[string]]::new()
+            $constraintInputs.Enqueue('기기 기본 기능 대신 별도 로컬 엔진을 모든 음성 질문의 공통 전제로 사용한다.')
+            $constraintInputs.Enqueue('APPLY')
+            $constraintReader = { param($prompt) return $constraintInputs.Dequeue() }.GetNewClosure()
+            $constraintMenu = { param($items, $title, $escapeValue, $initialSelectedIndex) return 'common' }
+            $constraint = Invoke-DuoForgeInteractiveCustomDecisionInternal -Run $currentRun -IssueId $secondIssueId -InputReader $constraintReader -MenuInvoker $constraintMenu
+            $pendingAfterConstraint = @(Get-DuoForgeInteractivePendingQuestionsInternal -RunDirectory ([string]$currentRun.runDirectory))
+
+            $changeInputs = [System.Collections.Generic.Queue[string]]::new()
+            $changeInputs.Enqueue('별도 로컬 오프라인 엔진을 기준으로 일관된 품질을 개선한다.')
+            $changeInputs.Enqueue('APPLY')
+            $changeReader = { param($prompt) return $changeInputs.Dequeue() }.GetNewClosure()
+            $changed = Invoke-DuoForgeInteractiveCustomDecisionInternal -Run $currentRun -IssueId $firstIssueId -InputReader $changeReader -MenuInvoker $answerMenu
+
+            $records = @(Read-DuoForgeJsonLines -Path (Join-Path ([string]$currentRun.runDirectory) 'decisions\user-answers.jsonl') -AllowMissing)
+            $effective = @(Get-DuoForgeEffectiveUserDecisionsInternal -Records $records)
+            $effectiveAnswer = @($effective | Where-Object { [string]$_.action -eq 'ANSWER' -and [string]$_.issueId -eq $firstIssueId })[0]
+            $effectiveConstraint = @($effective | Where-Object { [string]$_.action -eq 'CONSTRAINT' -and [string]$_.issueId -eq $secondIssueId })[0]
+            $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path ([string]$currentRun.runDirectory) 'steps.json'))
+            $step = @($graph.steps | Where-Object { [string]$_.status -in @('PENDING', 'STALE') } | Select-Object -First 1)[0]
+            $prompt = New-DuoForgeStagePrompt -RunDirectory ([string]$currentRun.runDirectory) -Graph $graph -Step $step
+            $state = Read-DuoForgeJson -Path (Join-Path ([string]$currentRun.runDirectory) 'state.json')
+
+            [ordered]@{
+                firstIssueId = $firstIssueId
+                answer = $answer
+                constraint = $constraint
+                changed = $changed
+                pendingBefore = $pendingBefore.Count
+                pendingAfterAnswer = $pendingAfterAnswer.Count
+                pendingAfterConstraint = $pendingAfterConstraint.Count
+                records = $records
+                effective = $effective
+                effectiveAnswer = $effectiveAnswer
+                effectiveConstraint = $effectiveConstraint
+                promptHasAnswer = [string]$prompt.text -like '*별도 로컬 오프라인 엔진을 기준으로 일관된 품질을 개선한다.*'
+                promptHasConstraint = [string]$prompt.text -like '*기기 기본 기능 대신 별도 로컬 엔진을 모든 음성 질문의 공통 전제로 사용한다.*'
+                stateStatus = [string]$state.status
+            }
+        } $run.runId $workspace
+
+        Assert-Equal $customFlow.pendingBefore 2
+        Assert-Equal $customFlow.answer.kind 'answer'
+        Assert-True ([bool]$customFlow.answer.preview.answersQuestion)
+        Assert-False ([bool]$customFlow.answer.preview.replacesPreviousAnswer)
+        Assert-Equal $customFlow.answer.preview.normalizedAnswer '항상 별도의 로컬 오프라인 엔진으로 처리한다.'
+        Assert-Equal $customFlow.answer.result.choiceCode 'CUSTOM'
+        Assert-Equal $customFlow.pendingAfterAnswer 1
+        Assert-Equal $customFlow.constraint.kind 'constraint'
+        Assert-False ([bool]$customFlow.constraint.preview.answersQuestion)
+        Assert-Equal $customFlow.pendingAfterConstraint 1
+        Assert-True ([bool]$customFlow.changed.preview.replacesPreviousAnswer)
+        Assert-Equal $customFlow.changed.result.revision 2
+        Assert-Equal @($customFlow.records | Where-Object { $_.action -eq 'ANSWER' }).Count 2
+        Assert-Equal @($customFlow.records | Where-Object { $_.action -eq 'CONSTRAINT' }).Count 1
+        Assert-Equal @($customFlow.effective | Where-Object { $_.action -eq 'ANSWER' }).Count 1
+        Assert-Equal $customFlow.effectiveAnswer.choiceCode 'CUSTOM'
+        Assert-Equal $customFlow.effectiveAnswer.selectedOption '별도 로컬 오프라인 엔진을 기준으로 일관된 품질을 개선한다.'
+        Assert-Equal @($customFlow.effectiveAnswer.questionOptions).Count 2
+        Assert-Equal $customFlow.effectiveConstraint.normalizedConstraint '기기 기본 기능 대신 별도 로컬 엔진을 모든 음성 질문의 공통 전제로 사용한다.'
+        Assert-True ([bool]$customFlow.promptHasAnswer)
+        Assert-True ([bool]$customFlow.promptHasConstraint)
+        Assert-Equal $customFlow.stateStatus 'PAUSED_USER'
     }
 
     Test-Case '최신 사용자 결정은 과거 라운드의 동일 질문을 확정 처리한다' {
