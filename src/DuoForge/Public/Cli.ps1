@@ -8,6 +8,9 @@ function Invoke-DuoForgeCliCoreInternal {
         [scriptblock]$ValidationInvoker,
         [scriptblock]$RunInvoker,
         [scriptblock]$DecisionInvoker,
+        [scriptblock]$AbandonInvoker,
+        [scriptblock]$RestoreInvoker,
+        [scriptblock]$DeleteInvoker,
         [scriptblock]$InteractiveHostProbe,
         [scriptblock]$InteractiveHomeInvoker,
         [scriptblock]$ConfirmationKeyReader,
@@ -221,6 +224,84 @@ function Invoke-DuoForgeCliCoreInternal {
             elseif ($result.alreadyRequested) { Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '이미 일시정지가 요청되어 있습니다.' -Code ([string]$result.requestId) -Layout $layout) -Layout $layout }
             else { Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '멈추기를 요청했습니다.' -Message '현재 AI 작업이 있다면 끝난 뒤 멈춥니다.' -Code ([string]$result.requestId) -Layout $layout) -Layout $layout }
             return
+        }
+        'abandon' {
+            $null = Assert-DuoForgeCliOptionsInternal -Parsed $parsed -AllowedNames @('run', 'workspace', 'confirm-abandon')
+            $runId = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'run' -Default '')
+            if ([string]::IsNullOrWhiteSpace($runId)) { throw (New-DuoForgeException -Code 'DF-CLI-RUN' -Message 'abandon에는 --run <실행 ID>가 필요합니다.') }
+            $workspace = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')
+            $run = Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace
+            $confirmed = [bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'confirm-abandon' -Default $false)
+            if (-not $confirmed) {
+                if (-not (& $isInteractive)) { throw (New-DuoForgeException -Code 'DF-RUN-ABANDON-CONFIRM' -Message '비대화형 작업 포기에는 --confirm-abandon이 필요합니다.') }
+                $layout = Get-DuoForgeDisplayLayoutInternal
+                $rows = [System.Collections.Generic.List[object]]::new()
+                foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '이 작업을 포기하려고 합니다.' -Message 'AI 작업을 다시 이어갈 수 없게 되지만 문서 사본과 작업 기록은 보존됩니다.' -NextAction '계속하려면 확인어 ABANDON을 입력해 주세요.' -Layout $layout)) { $rows.Add($row) }
+                foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '작업 이름' -Value ([string]$run.manifest.name) -Layout $layout -KeyWidth 12)) { $rows.Add($row) }
+                foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '작업 ID' -Value $runId -Layout $layout -KeyWidth 12 -Role 'meta')) { $rows.Add($row) }
+                Write-DuoForgeDisplayRowsInternal -Rows @($rows) -Layout $layout
+                $confirmation = Read-DuoForgeExactConfirmationInternal -Token 'ABANDON' -Prompt '작업을 포기하려면 ABANDON을 입력하세요' -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -InputReader $InputReader -KeyReader $ConfirmationKeyReader -FrameWriter $ConfirmationFrameWriter -CapabilityProbe $ConfirmationCapabilityProbe
+                $confirmed = [string]$confirmation.action -eq 'submit'
+            }
+            if (-not $confirmed) { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '작업을 포기하지 않았습니다.' -Message '작업 상태와 저장 파일을 변경하지 않았습니다.' -Layout $layout) -Layout $layout; return $confirmation }
+            $result = if ($null -ne $AbandonInvoker) { & $AbandonInvoker $runId $workspace } else { Abandon-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace }
+            $layout = Get-DuoForgeDisplayLayoutInternal
+            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '작업을 포기했습니다.' -Message '문서 사본과 작업 기록은 보존되며 포기한 작업 관리에서 영구 삭제할 수 있습니다.' -Layout $layout) -Layout $layout
+            return $result
+        }
+        'restore' {
+            $null = Assert-DuoForgeCliOptionsInternal -Parsed $parsed -AllowedNames @('run', 'workspace', 'confirm-restore')
+            $runId = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'run' -Default '')
+            if ([string]::IsNullOrWhiteSpace($runId)) { throw (New-DuoForgeException -Code 'DF-CLI-RUN' -Message 'restore에는 --run <실행 ID>가 필요합니다.') }
+            $workspace = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')
+            $run = Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace
+            if ([string]$run.state.status -ne 'CANCELLED') { throw (New-DuoForgeException -Code 'DF-RUN-RESTORE-STATE' -Message '복원은 포기한 작업에만 사용할 수 있습니다.') }
+            $confirmRestore = Get-DuoForgeCliOption -Parsed $parsed -Name 'confirm-restore' -Default $false
+            if ($parsed.options.Contains('confirm-restore') -and $confirmRestore -isnot [bool]) {
+                throw (New-DuoForgeException -Code 'DF-CLI-OPTION' -Message '--confirm-restore는 값을 붙이지 않은 확인 플래그로만 사용할 수 있습니다.')
+            }
+            $confirmed = [bool]$confirmRestore
+            if (-not $confirmed) {
+                if (-not (& $isInteractive)) { throw (New-DuoForgeException -Code 'DF-RUN-RESTORE-CONFIRM' -Message '비대화형 작업 복원에는 --confirm-restore가 필요합니다.') }
+                $layout = Get-DuoForgeDisplayLayoutInternal
+                $rows = [System.Collections.Generic.List[object]]::new()
+                foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '이 작업을 복원하려고 합니다.' -Message '작업은 사용자 요청으로 멈춘 상태로 돌아가며 AI 작업은 시작되지 않습니다.' -NextAction '계속하려면 확인어 RESTORE를 입력해 주세요.' -Layout $layout)) { $rows.Add($row) }
+                foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '작업 이름' -Value ([string]$run.manifest.name) -Layout $layout -KeyWidth 12)) { $rows.Add($row) }
+                foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '작업 ID' -Value $runId -Layout $layout -KeyWidth 12 -Role 'meta')) { $rows.Add($row) }
+                Write-DuoForgeDisplayRowsInternal -Rows @($rows) -Layout $layout
+                $confirmation = Read-DuoForgeExactConfirmationInternal -Token 'RESTORE' -Prompt '포기한 작업을 복원하려면 RESTORE를 입력하세요' -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -InputReader $InputReader -KeyReader $ConfirmationKeyReader -FrameWriter $ConfirmationFrameWriter -CapabilityProbe $ConfirmationCapabilityProbe
+                $confirmed = [string]$confirmation.action -eq 'submit'
+            }
+            if (-not $confirmed) { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '작업을 복원하지 않았습니다.' -Message '작업 상태와 저장 파일을 변경하지 않았습니다.' -Layout $layout) -Layout $layout; return $confirmation }
+            $result = if ($null -ne $RestoreInvoker) { & $RestoreInvoker $runId $workspace } else { Restore-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace }
+            $layout = Get-DuoForgeDisplayLayoutInternal
+            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '작업을 복원했습니다.' -Message '사용자 요청으로 멈춘 상태로 돌아갔습니다. AI 작업은 시작하지 않았습니다.' -NextAction '내용을 확인한 뒤 resume 명령으로 직접 이어가 주세요.' -Layout $layout) -Layout $layout
+            return $result
+        }
+        'delete' {
+            $null = Assert-DuoForgeCliOptionsInternal -Parsed $parsed -AllowedNames @('run', 'workspace', 'confirm-delete')
+            $runId = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'run' -Default '')
+            if ([string]::IsNullOrWhiteSpace($runId)) { throw (New-DuoForgeException -Code 'DF-CLI-RUN' -Message 'delete에는 --run <실행 ID>가 필요합니다.') }
+            $workspace = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')
+            $run = Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace
+            if ([string]$run.state.status -ne 'CANCELLED') { throw (New-DuoForgeException -Code 'DF-RUN-DELETE-STATE' -Message '영구 삭제는 먼저 포기한 작업에만 사용할 수 있습니다.') }
+            $confirmed = [bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'confirm-delete' -Default $false)
+            if (-not $confirmed) {
+                if (-not (& $isInteractive)) { throw (New-DuoForgeException -Code 'DF-RUN-DELETE-CONFIRM' -Message '비대화형 영구 삭제에는 --confirm-delete가 필요합니다.') }
+                $layout = Get-DuoForgeDisplayLayoutInternal
+                $rows = [System.Collections.Generic.List[object]]::new()
+                foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind error -Title '이 작업을 영구 삭제하려고 합니다.' -Message '문서 사본, 작업 기록, 답변, 진단과 결과 파일이 모두 삭제되며 복구할 수 없습니다.' -NextAction '계속하려면 확인어 DELETE를 입력해 주세요.' -Layout $layout)) { $rows.Add($row) }
+                foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '작업 이름' -Value ([string]$run.manifest.name) -Layout $layout -KeyWidth 12)) { $rows.Add($row) }
+                foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '작업 ID' -Value $runId -Layout $layout -KeyWidth 12 -Role 'meta')) { $rows.Add($row) }
+                Write-DuoForgeDisplayRowsInternal -Rows @($rows) -Layout $layout
+                $confirmation = Read-DuoForgeExactConfirmationInternal -Token 'DELETE' -Prompt '작업과 모든 저장 파일을 영구 삭제하려면 DELETE를 입력하세요' -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -InputReader $InputReader -KeyReader $ConfirmationKeyReader -FrameWriter $ConfirmationFrameWriter -CapabilityProbe $ConfirmationCapabilityProbe
+                $confirmed = [string]$confirmation.action -eq 'submit'
+            }
+            if (-not $confirmed) { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '작업을 삭제하지 않았습니다.' -Message '작업 상태와 저장 파일을 변경하지 않았습니다.' -Layout $layout) -Layout $layout; return $confirmation }
+            $result = if ($null -ne $DeleteInvoker) { & $DeleteInvoker $runId $workspace } else { Remove-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace }
+            $layout = Get-DuoForgeDisplayLayoutInternal
+            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '작업을 영구 삭제했습니다.' -Message '이 작업의 저장 파일은 복구할 수 없습니다.' -Layout $layout) -Layout $layout
+            return $result
         }
         'resume' {
             $runId = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'run' -Default '')

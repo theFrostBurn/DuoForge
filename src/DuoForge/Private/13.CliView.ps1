@@ -25,7 +25,10 @@ function Write-DuoForgeHelp {
         'duoforge extend-round --run <실행 ID> [--workspace <폴더>]',
         'duoforge defer --run <실행 ID> --issue <쟁점 ID> [--workspace <폴더>] [--confirm-partial]',
         'duoforge pause --run <실행 ID> [--workspace <폴더>]',
-        'duoforge resume --run <실행 ID> [--workspace <폴더>] [--live]'
+        'duoforge resume --run <실행 ID> [--workspace <폴더>] [--live]',
+        'duoforge abandon --run <실행 ID> [--workspace <폴더>] [--confirm-abandon]',
+        'duoforge restore --run <실행 ID> [--workspace <폴더>] [--confirm-restore]',
+        'duoforge delete --run <실행 ID> [--workspace <폴더>] [--confirm-delete]'
     ) -Layout $layout)
     & $append @(New-DuoForgeSectionRowsInternal -Title '분석 깊이' -Body '' -Layout $layout)
     & $append @(New-DuoForgeFieldRowsInternal -Label 'Codex' -Value 'low, medium, high, xhigh, max, ultra' -Layout $layout -KeyWidth 8)

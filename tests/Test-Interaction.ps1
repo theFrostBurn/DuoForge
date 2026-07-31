@@ -841,6 +841,317 @@ Test-Case '메뉴 interaction seam은 EscapeValue 없이 구조화 결과와 세
     Assert-Equal $result.returnTarget 'work-menu'
 }
 
+Test-Case '작업 포기와 영구 삭제 확인은 취소 시 0건, 정확한 확인어에서만 1건 실행한다' {
+    $fixture = New-DuoForgeInteractionTestRun -Name 'run-lifecycle-confirmation'
+    $before = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
+    $calls = [ordered]@{ abandon = 0; delete = 0 }
+    $abandonInvoker = { param($runId, $root) $calls.abandon++; return [ordered]@{ runId = $runId; status = 'CANCELLED' } }.GetNewClosure()
+    $deleteInvoker = { param($runId, $root) $calls.delete++; return [ordered]@{ runId = $runId; status = 'DELETED'; deleted = $true } }.GetNewClosure()
+
+    $cancelAbandon = New-DuoForgeInteractionTestLineReader -Values @('Q')
+    $cancelledAbandon = & $module {
+        param($runValue, $reader, $invoker)
+        Invoke-DuoForgeInteractiveAbandonInternal -Run $runValue -InputReader $reader -AbandonInvoker $invoker 6>$null
+    } $fixture.run $cancelAbandon.reader $abandonInvoker
+    Assert-Equal $cancelledAbandon.interaction.action 'cancel'
+    Assert-Equal $calls.abandon 0
+
+    $cancelledRun = & $module { param($runValue) ConvertTo-DuoForgeHashtable -InputObject $runValue } $fixture.run
+    $cancelledRun.state.status = 'CANCELLED'
+    $cancelDelete = New-DuoForgeInteractionTestLineReader -Values @('B')
+    $cancelledDelete = & $module {
+        param($runValue, $reader, $invoker)
+        Invoke-DuoForgeInteractiveDeleteInternal -Run $runValue -InputReader $reader -DeleteInvoker $invoker 6>$null
+    } $cancelledRun $cancelDelete.reader $deleteInvoker
+    Assert-Equal $cancelledDelete.interaction.action 'back'
+    Assert-Equal $calls.delete 0
+    Assert-Equal (Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot) $before '취소된 포기·삭제 확인에서 파일이 변경되었습니다.'
+
+    $confirmAbandon = New-DuoForgeInteractionTestLineReader -Values @('ABANDON')
+    $confirmedAbandon = & $module {
+        param($runValue, $reader, $invoker)
+        Invoke-DuoForgeInteractiveAbandonInternal -Run $runValue -InputReader $reader -AbandonInvoker $invoker 6>$null
+    } $fixture.run $confirmAbandon.reader $abandonInvoker
+    Assert-Equal $confirmedAbandon.interaction.action 'submit'
+    Assert-Equal $calls.abandon 1
+
+    $confirmDelete = New-DuoForgeInteractionTestLineReader -Values @('DELETE')
+    $confirmedDelete = & $module {
+        param($runValue, $reader, $invoker)
+        Invoke-DuoForgeInteractiveDeleteInternal -Run $runValue -InputReader $reader -DeleteInvoker $invoker 6>$null
+    } $cancelledRun $confirmDelete.reader $deleteInvoker
+    Assert-Equal $confirmedDelete.interaction.action 'submit'
+    Assert-Equal $calls.delete 1
+}
+
+Test-Case '작업 복원 확인은 Esc/B/Q/Ctrl+C/오타/리디렉션에서 0건이고 RESTORE에서만 1건 실행한다' {
+    $fixture = New-DuoForgeInteractionTestRun -Name 'run-restore-confirmation'
+    $cancelledRun = & $module { param($runValue) ConvertTo-DuoForgeHashtable -InputObject $runValue } $fixture.run
+    $cancelledRun.state.status = 'CANCELLED'
+    $calls = [ordered]@{ restore = 0 }
+    $restoreInvoker = { param($runId, $root) $calls.restore++; return [ordered]@{ runId = $runId; status = 'PAUSED_USER'; restored = $true } }.GetNewClosure()
+
+    foreach ($case in @(Get-DuoForgeInteractionAbortCases)) {
+        $before = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
+        $keyInput = New-DuoForgeInteractionTestKeyReader -Keys @($case.keys)
+        $outcome = & $module {
+            param($runValue, $reader, $invoker)
+            Invoke-DuoForgeInteractiveRestoreInternal -Run $runValue -RestoreInvoker $invoker -ConfirmationKeyReader $reader -ConfirmationFrameWriter { param($lines) } -ConfirmationCapabilityProbe { $true } 6>$null
+        } $cancelledRun $keyInput.reader $restoreInvoker
+        Assert-Equal $outcome.interaction.action $case.expectedAction "복원/$($case.name)의 action이 다릅니다."
+        Assert-Equal $outcome.interaction.returnTarget 'work-menu' "복원/$($case.name)의 복귀 위치가 다릅니다."
+        Assert-Equal $keyInput.state.reads $case.expectedReads "복원/$($case.name)의 합성 키 소비 수가 다릅니다."
+        Assert-Equal $keyInput.state.remaining 0
+        Assert-Equal $calls.restore 0 "복원/$($case.name)에서 invoker가 호출되었습니다."
+        Assert-Equal (Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot) $before "복원/$($case.name)에서 파일이 변경되었습니다."
+    }
+
+    $beforeRedirected = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
+    $redirected = & $module {
+        param($runValue, $invoker)
+        Invoke-DuoForgeInteractiveRestoreInternal -Run $runValue -RestoreInvoker $invoker -ConfirmationCapabilityProbe { [ordered]@{ cursor = $false; renderMode = 'line'; reason = 'redirected' } } 6>$null
+    } $cancelledRun $restoreInvoker
+    Assert-Equal $redirected.interaction.action 'unavailable'
+    Assert-Equal $redirected.interaction.returnTarget 'work-menu'
+    Assert-Equal $calls.restore 0
+    Assert-Equal (Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot) $beforeRedirected '리디렉션 복원 확인에서 파일이 변경되었습니다.'
+
+    $confirmKeys = New-DuoForgeInteractionTestKeyReader -Keys @(New-DuoForgeInteractionTestTokenKeys -Token 'RESTORE')
+    $confirmed = & $module {
+        param($runValue, $reader, $invoker)
+        Invoke-DuoForgeInteractiveRestoreInternal -Run $runValue -RestoreInvoker $invoker -ConfirmationKeyReader $reader -ConfirmationFrameWriter { param($lines) } -ConfirmationCapabilityProbe { $true } 6>$null
+    } $cancelledRun $confirmKeys.reader $restoreInvoker
+    Assert-Equal $confirmed.interaction.action 'submit'
+    Assert-Equal $confirmed.result.status 'PAUSED_USER'
+    Assert-Equal $calls.restore 1
+    Assert-Equal $confirmKeys.state.remaining 0
+}
+
+Test-Case 'CLI abandon, restore, delete는 확인 이탈을 보존하고 정확한 확인에서만 실행한다' {
+    $fixture = New-DuoForgeInteractionTestRun -Name 'run-lifecycle-cli'
+    $calls = [ordered]@{ abandon = 0; restore = 0; delete = 0; resume = 0 }
+    $abandonInvoker = { param($runId, $root) $calls.abandon++; return [ordered]@{ runId = $runId; status = 'CANCELLED' } }.GetNewClosure()
+    $restoreInvoker = { param($runId, $root) $calls.restore++; return [ordered]@{ runId = $runId; status = 'PAUSED_USER'; restored = $true } }.GetNewClosure()
+    $deleteInvoker = { param($runId, $root) $calls.delete++; return [ordered]@{ runId = $runId; status = 'DELETED'; deleted = $true } }.GetNewClosure()
+    $resumeInvoker = { param($runId, $root, $live) $calls.resume++; throw '복원에서 resume를 호출하면 안 됩니다.' }.GetNewClosure()
+    $before = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
+
+    $cancelReader = (New-DuoForgeInteractionTestLineReader -Values @('Q')).reader
+    $cancelled = & $module {
+        param($runId, $root, $reader, $invoker)
+        Invoke-DuoForgeCliCoreInternal -Arguments @('abandon', '--run', $runId, '--workspace', $root) -InputReader $reader -AbandonInvoker $invoker -InteractiveHostProbe { $true } 6>$null
+    } ([string]$fixture.run.state.runId) $fixture.workspace $cancelReader $abandonInvoker
+    Assert-Equal $cancelled.action 'cancel'
+    Assert-Equal $calls.abandon 0
+    Assert-Equal (Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot) $before
+
+    $confirmReader = (New-DuoForgeInteractionTestLineReader -Values @('ABANDON')).reader
+    $confirmed = & $module {
+        param($runId, $root, $reader, $invoker)
+        Invoke-DuoForgeCliCoreInternal -Arguments @('abandon', '--run', $runId, '--workspace', $root) -InputReader $reader -AbandonInvoker $invoker -InteractiveHostProbe { $true } 6>$null
+    } ([string]$fixture.run.state.runId) $fixture.workspace $confirmReader $abandonInvoker
+    Assert-Equal $confirmed.status 'CANCELLED'
+    Assert-Equal $calls.abandon 1
+
+    Assert-ThrowsCode {
+        & $module {
+            param($runId, $root, $restore)
+            Invoke-DuoForgeCliCoreInternal -Arguments @('restore', '--run', $runId, '--workspace', $root, '--confirm-restore') -RestoreInvoker $restore -InteractiveHostProbe { $false } 6>$null
+        } ([string]$fixture.run.state.runId) $fixture.workspace $restoreInvoker
+    } 'DF-RUN-RESTORE-STATE'
+    Assert-Equal $calls.restore 0
+
+    $null = & $module {
+        param($directory)
+        $statePath = Join-Path $directory 'state.json'
+        $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $statePath)
+        $state.status = 'CANCELLED'
+        Write-DuoForgeJsonAtomic -Path $statePath -Value $state
+    } $fixture.run.runDirectory
+
+    $beforeRestore = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
+    $restoreCancelReader = (New-DuoForgeInteractionTestLineReader -Values @('Q')).reader
+    $cancelledRestore = & $module {
+        param($runId, $root, $reader, $restore, $resume)
+        Invoke-DuoForgeCliCoreInternal -Arguments @('restore', '--run', $runId, '--workspace', $root) -InputReader $reader -RestoreInvoker $restore -ResumeInvoker $resume -InteractiveHostProbe { $true } 6>$null
+    } ([string]$fixture.run.state.runId) $fixture.workspace $restoreCancelReader $restoreInvoker $resumeInvoker
+    Assert-Equal $cancelledRestore.action 'cancel'
+    Assert-Equal $calls.restore 0
+    Assert-Equal $calls.resume 0
+    Assert-Equal (Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot) $beforeRestore
+
+    $restoreConfirmReader = (New-DuoForgeInteractionTestLineReader -Values @('RESTORE')).reader
+    $confirmedRestore = & $module {
+        param($runId, $root, $reader, $restore, $resume)
+        Invoke-DuoForgeCliCoreInternal -Arguments @('restore', '--run', $runId, '--workspace', $root) -InputReader $reader -RestoreInvoker $restore -ResumeInvoker $resume -InteractiveHostProbe { $true } 6>$null
+    } ([string]$fixture.run.state.runId) $fixture.workspace $restoreConfirmReader $restoreInvoker $resumeInvoker
+    Assert-Equal $confirmedRestore.status 'PAUSED_USER'
+    Assert-Equal $calls.restore 1
+    Assert-Equal $calls.resume 0
+
+    Assert-ThrowsCode {
+        & $module {
+            param($runId, $root, $restore, $resume)
+            Invoke-DuoForgeCliCoreInternal -Arguments @('restore', '--run', $runId, '--workspace', $root) -RestoreInvoker $restore -ResumeInvoker $resume -InteractiveHostProbe { $false } 6>$null
+        } ([string]$fixture.run.state.runId) $fixture.workspace $restoreInvoker $resumeInvoker
+    } 'DF-RUN-RESTORE-CONFIRM'
+    Assert-Equal $calls.restore 1
+    Assert-Equal $calls.resume 0
+
+    $confirmedRestoreFlag = & $module {
+        param($runId, $root, $restore, $resume)
+        Invoke-DuoForgeCliCoreInternal -Arguments @('restore', '--run', $runId, '--workspace', $root, '--confirm-restore') -RestoreInvoker $restore -ResumeInvoker $resume -InteractiveHostProbe { $false } 6>$null
+    } ([string]$fixture.run.state.runId) $fixture.workspace $restoreInvoker $resumeInvoker
+    Assert-Equal $confirmedRestoreFlag.status 'PAUSED_USER'
+    Assert-Equal $calls.restore 2
+    Assert-Equal $calls.resume 0
+
+    Assert-ThrowsCode {
+        & $module {
+            param($runId, $root, $restore)
+            Invoke-DuoForgeCliCoreInternal -Arguments @('restore', '--run', $runId, '--workspace', $root, '--confirm-restore=false') -RestoreInvoker $restore -InteractiveHostProbe { $false } 6>$null
+        } ([string]$fixture.run.state.runId) $fixture.workspace $restoreInvoker
+    } 'DF-CLI-OPTION'
+    Assert-Equal $calls.restore 2
+
+    $beforeDelete = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
+    $deleteCancelReader = (New-DuoForgeInteractionTestLineReader -Values @('B')).reader
+    $cancelledDelete = & $module {
+        param($runId, $root, $reader, $invoker)
+        Invoke-DuoForgeCliCoreInternal -Arguments @('delete', '--run', $runId, '--workspace', $root) -InputReader $reader -DeleteInvoker $invoker -InteractiveHostProbe { $true } 6>$null
+    } ([string]$fixture.run.state.runId) $fixture.workspace $deleteCancelReader $deleteInvoker
+    Assert-Equal $cancelledDelete.action 'back'
+    Assert-Equal $calls.delete 0
+    Assert-Equal (Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot) $beforeDelete
+
+    $deleteConfirmReader = (New-DuoForgeInteractionTestLineReader -Values @('DELETE')).reader
+    $confirmedDelete = & $module {
+        param($runId, $root, $reader, $invoker)
+        Invoke-DuoForgeCliCoreInternal -Arguments @('delete', '--run', $runId, '--workspace', $root) -InputReader $reader -DeleteInvoker $invoker -InteractiveHostProbe { $true } 6>$null
+    } ([string]$fixture.run.state.runId) $fixture.workspace $deleteConfirmReader $deleteInvoker
+    Assert-Equal $confirmedDelete.status 'DELETED'
+    Assert-Equal $calls.delete 1
+
+    Assert-ThrowsCode {
+        & $module {
+            param($runId, $root, $invoker)
+            Invoke-DuoForgeCliCoreInternal -Arguments @('delete', '--run', $runId, '--workspace', $root) -DeleteInvoker $invoker -InteractiveHostProbe { $false } 6>$null
+        } ([string]$fixture.run.state.runId) $fixture.workspace $deleteInvoker
+    } 'DF-RUN-DELETE-CONFIRM'
+    Assert-Equal $calls.delete 1
+}
+
+Test-Case 'CLI 도움말은 포기한 작업 복원 명령과 확인 플래그를 안내한다' {
+    $help = (& $module { Write-DuoForgeHelp 6>&1 } | Out-String)
+    Assert-ContainsText $help 'duoforge restore --run <실행 ID> [--workspace <폴더>] [--confirm-restore]'
+}
+
+Test-Case '작업 메뉴와 홈은 포기와 영구 삭제를 별도 항목으로 표시한다' {
+    $fixture = New-DuoForgeInteractionTestRun -Name 'run-lifecycle-menus'
+    $activeCapture = [ordered]@{ items = $null }
+    $activeMenu = {
+        param($items, $title, $initialSelectedIndex, $returnTarget, $cancelReturnTarget, $interruptReturnTarget)
+        $activeCapture.items = @($items)
+        return [ordered]@{ action = 'back'; value = $null; source = 'line'; returnTarget = $returnTarget }
+    }.GetNewClosure()
+    $null = & $module {
+        param($runValue, $menuInvoker)
+        Invoke-DuoForgeInteractiveRun -RunRecord ([ordered]@{ runId = [string]$runValue.state.runId; runDirectory = [string]$runValue.runDirectory }) -MenuInvoker $menuInvoker 6>$null
+    } $fixture.run $activeMenu
+    Assert-Equal @($activeCapture.items | Where-Object value -eq 'abandon').Count 1
+    Assert-Equal @($activeCapture.items | Where-Object value -eq 'delete').Count 0
+
+    $null = & $module {
+        param($directory)
+        $statePath = Join-Path $directory 'state.json'
+        $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $statePath)
+        $state.status = 'CANCELLED'
+        Write-DuoForgeJsonAtomic -Path $statePath -Value $state
+    } $fixture.run.runDirectory
+    $cancelledCapture = [ordered]@{ items = $null }
+    $cancelledMenu = {
+        param($items, $title, $initialSelectedIndex, $returnTarget, $cancelReturnTarget, $interruptReturnTarget)
+        $cancelledCapture.items = @($items)
+        return [ordered]@{ action = 'back'; value = $null; source = 'line'; returnTarget = $returnTarget }
+    }.GetNewClosure()
+    $null = & $module {
+        param($runValue, $menuInvoker)
+        Invoke-DuoForgeInteractiveRun -RunRecord ([ordered]@{ runId = [string]$runValue.state.runId; runDirectory = [string]$runValue.runDirectory }) -MenuInvoker $menuInvoker 6>$null
+    } $fixture.run $cancelledMenu
+    Assert-Equal @($cancelledCapture.items | Where-Object value -eq 'abandon').Count 0
+    Assert-Equal @($cancelledCapture.items | Where-Object { $_.value -eq 'restore' -and 'R' -in @($_.shortcuts) }).Count 1
+    Assert-Equal @($cancelledCapture.items | Where-Object value -eq 'delete').Count 1
+
+    $restoreCalls = [ordered]@{ count = 0 }
+    $restoreInvoker = { param($runId, $root) $restoreCalls.count++; return [ordered]@{ runId = $runId; status = 'PAUSED_USER'; restored = $true } }.GetNewClosure()
+    $restoreMenu = {
+        param($items, $title, $initialSelectedIndex, $returnTarget, $cancelReturnTarget, $interruptReturnTarget)
+        if ($title -ne '다음 동작') { throw "예상하지 않은 메뉴입니다: $title" }
+        if (@($items | Where-Object { $_.value -eq 'restore' -and 'R' -in @($_.shortcuts) }).Count -ne 1) { throw '복원 메뉴 항목이나 R 단축키가 없습니다.' }
+        return [ordered]@{ action = 'submit'; value = 'restore'; source = 'key'; returnTarget = $returnTarget }
+    }
+    $restoreReader = (New-DuoForgeInteractionTestLineReader -Values @('RESTORE')).reader
+    $restoreResult = & $module {
+        param($runValue, $menuInvoker, $reader, $invoker)
+        Invoke-DuoForgeInteractiveRun -RunRecord ([ordered]@{ runId = [string]$runValue.state.runId; runDirectory = [string]$runValue.runDirectory }) -MenuInvoker $menuInvoker -InputReader $reader -RestoreInvoker $invoker 6>$null
+    } $fixture.run $restoreMenu $restoreReader $restoreInvoker
+    Assert-Equal $restoreResult.value 'restore'
+    Assert-Equal $restoreResult.returnTarget 'home'
+    Assert-Equal $restoreCalls.count 1
+
+    $homeCapture = [ordered]@{ items = $null }
+    $homeMenu = {
+        param($items, $title, $initialSelectedIndex, $returnTarget, $cancelReturnTarget, $interruptReturnTarget)
+        $homeCapture.items = @($items)
+        return [ordered]@{ action = 'submit'; value = 'exit'; source = 'line'; returnTarget = $returnTarget }
+    }.GetNewClosure()
+    $null = & $module {
+        param($runValue, $menuInvoker)
+        Invoke-DuoForgeInteractiveHome -SetupInvoker { [ordered]@{ readyForDocumentModes = $true } } -RunsInvoker { @([ordered]@{ runId = [string]$runValue.state.runId; name = '포기 작업'; mode = 'shared-document'; status = 'CANCELLED'; updatedAt = ''; runDirectory = [string]$runValue.runDirectory }) } -MenuInvoker $menuInvoker 6>$null
+    } $fixture.run $homeMenu
+    Assert-Equal @($homeCapture.items | Where-Object { [string]$_.label -eq '포기한 작업 관리 (1)' }).Count 1
+    Assert-Equal @($homeCapture.items | Where-Object { [string]$_.label -eq '실행 환경 확인, 로그인 및 설정' -and [string]$_.value -eq '5' }).Count 1
+}
+
+Test-Case '홈의 빈 진행/완료/포기 분류를 실제 선택해도 안내 뒤 홈에 남고 파일을 변경하지 않는다' {
+    $fixture = New-DuoForgeInteractionTestRun -Name 'empty-home-categories'
+    $cases = @(
+        [ordered]@{ choice = '2'; status = 'COMPLETED'; message = '진행 중인 작업이 없습니다.' }
+        [ordered]@{ choice = '3'; status = 'PAUSED_USER'; message = '완료된 결과가 없습니다.' }
+        [ordered]@{ choice = '4'; status = 'PAUSED_USER'; message = '포기한 작업이 없습니다.' }
+    )
+    foreach ($case in $cases) {
+        $before = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
+        $state = [ordered]@{ menuCalls = 0; runReads = 0 }
+        $menuInvoker = {
+            param($items, $title, $initialSelectedIndex, $returnTarget, $cancelReturnTarget, $interruptReturnTarget)
+            if ($title -ne 'DuoForge') { throw "빈 분류에서 작업 선택 메뉴로 진입했습니다: $title" }
+            $state.menuCalls++
+            if ($state.menuCalls -eq 1) { return [ordered]@{ action = 'submit'; value = [string]$case.choice; source = 'key'; returnTarget = $returnTarget } }
+            return [ordered]@{ action = 'submit'; value = 'exit'; source = 'key'; returnTarget = $returnTarget }
+        }.GetNewClosure()
+        $runsInvoker = {
+            $state.runReads++
+            return @([ordered]@{
+                runId = [string]$fixture.run.state.runId
+                name = '다른 분류 작업'
+                mode = 'shared-document'
+                status = [string]$case.status
+                updatedAt = ''
+                runDirectory = [string]$fixture.run.runDirectory
+            })
+        }.GetNewClosure()
+        $output = (& $module {
+            param($runs, $menu)
+            Invoke-DuoForgeInteractiveHome -SetupInvoker { [ordered]@{ readyForDocumentModes = $true } } -RunsInvoker $runs -MenuInvoker $menu 6>&1
+        } $runsInvoker $menuInvoker | Out-String)
+        Assert-ContainsText $output ([string]$case.message) "홈 [$($case.choice)] 빈 목록 안내가 없습니다."
+        Assert-Equal $state.menuCalls 2 "홈 [$($case.choice)]가 안내 뒤 홈으로 돌아오지 않았습니다."
+        Assert-Equal $state.runReads 2 "홈 [$($case.choice)]가 실행 목록을 다시 읽지 않았습니다."
+        Assert-Equal (Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot) $before "홈 [$($case.choice)] 빈 목록 선택에서 파일이 변경되었습니다."
+    }
+}
+
 Test-Case '레거시 메뉴 호출부는 실패 action별 화면 복귀 위치를 구조화 seam에 고정한다' {
     $fixture = New-DuoForgeInteractionTestRun -Name 'legacy-menu-targets'
     $selectionOptions = [ordered]@{

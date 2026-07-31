@@ -152,6 +152,16 @@ Claude CLI는 계정별 `/model` 전체 행을 기계 판독 목록으로 내보
 .\duoforge.cmd pause --run "run-20260727-..."
 ```
 
+더 이상 이어가지 않을 작업은 작업 메뉴의 `이 작업 포기`로 종료한다. 포기는 상태를 `CANCELLED`로 바꾸고 AI 작업 재개를 막지만 문서 사본, 답변, 진단과 감사 기록은 그대로 보존한다. 포기한 작업은 홈의 `포기한 작업 관리`에서 다시 확인할 수 있다. 정확한 `RESTORE` 확인으로 복원하면 이전 상태와 관계없이 `PAUSED_USER`로 돌아가며, 복원만으로 AI 작업이나 재개가 시작되지는 않는다. 영구 삭제는 포기한 작업에만 표시되며, 별도의 `DELETE` 확인 뒤 해당 `results\<run-id>` 폴더 전체를 삭제한다. 원본 입력 문서는 실행 폴더 밖에 있으므로 삭제 대상에 포함하지 않는다.
+
+```powershell
+.\duoforge.cmd abandon --run "run-20260727-..."
+.\duoforge.cmd restore --run "run-20260727-..."
+.\duoforge.cmd delete --run "run-20260727-..."
+```
+
+무인 자동화에서는 각각 `--confirm-abandon`, `--confirm-restore`, `--confirm-delete`를 명시해야 한다. 복원은 실행 잠금 안에서 `CANCELLED`를 다시 확인하고 상태와 `RUN_RESTORED` 이벤트를 원자적으로 기록한다. `delete`는 실행 결과 루트의 직계 `run-*` 폴더, 저장된 작업 ID 일치, `CANCELLED` 상태, 실행 잠금과 연결 지점 부재를 모두 확인한 뒤에만 동작한다.
+
 실제 Codex·Claude 작업은 대화형 PowerShell에서만 시작할 수 있다. 저장된 AI별 모델·분석 깊이와 전송할 문서, `예정 요청`, `실패 시 추가 요청`, `최대 요청`을 쉬운 문장으로 다시 보여준 뒤 확인어 `LIVE`를 입력해야 한다. `LIVE`는 제품 기능명이 아니라 문서 전송과 AI 작업 시작에 동의하는 확인어다. 선택 정보가 없는 이전 형식의 작업 기록은 이어서 실행할 수 없다.
 
 ```powershell

@@ -114,7 +114,7 @@ function Get-DuoForgeDisplayStateLabelInternal {
         'RESUMABLE_ERROR' { '오류 발생 · 이어서 가능' }
         'SOURCE_DRIFT' { '원본 파일이 변경됨' }
         'FAILED_STAGE' { '작업 실패' }
-        'CANCELLED' { '취소됨' }
+        'CANCELLED' { '포기함' }
         default { ConvertTo-DuoForgeProgressTextInternal -Text $Status -MaximumCharacters 120 }
     }
 }

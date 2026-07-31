@@ -180,6 +180,125 @@ try {
         Assert-False ([bool]$config.features.dualProjectAudit)
     }
 
+    Test-Case '작업 포기는 감사 기록을 보존하고 포기한 작업만 안전하게 영구 삭제한다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'run-lifecycle\input\brief.md') -Text '# 삭제되지 않아야 하는 원본'
+        $workspace = Join-Path $tempRoot 'run-lifecycle\results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd -Name '포기 테스트'
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $sourceHash = (Get-FileHash -LiteralPath $input -Algorithm SHA256).Hash
+
+        Assert-ThrowsCode { & $module { param($runId, $root) Remove-DuoForgeRunInternal -RunId $runId -ResultsRoot $root } $run.runId $workspace } 'DF-RUN-DELETE-STATE'
+        Assert-ThrowsCode { & $module { param($root) Remove-DuoForgeRunInternal -RunId '..\outside' -ResultsRoot $root } $workspace } 'DF-RUN-DELETE-TARGET'
+
+        $abandoned = & $module { param($runId, $root) Abandon-DuoForgeRunInternal -RunId $runId -ResultsRoot $root } $run.runId $workspace
+        Assert-True ([bool]$abandoned.abandoned)
+        Assert-Equal $abandoned.status 'CANCELLED'
+        Assert-Equal $abandoned.previousStatus 'SNAPSHOTTED'
+        $storedState = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'state.json') | ConvertFrom-Json -Depth 100
+        Assert-Equal $storedState.status 'CANCELLED'
+        Assert-Equal $storedState.abandonedFromStatus 'SNAPSHOTTED'
+        Assert-True (-not [string]::IsNullOrWhiteSpace([string]$storedState.abandonedAt))
+        Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'inputs\snapshots') -PathType Container)
+        $events = @(Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ForEach-Object { $_ | ConvertFrom-Json -Depth 30 })
+        Assert-Equal @($events | Where-Object type -eq 'RUN_ABANDONED').Count 1
+        Assert-Equal @($events | Where-Object { $_.type -eq 'RUN_ABANDONED' })[0].data.previousStatus 'SNAPSHOTTED'
+        $listed = @(Get-DuoForgeRuns -ResultsRoot $workspace | Where-Object runId -eq $run.runId)
+        Assert-Equal $listed.Count 1
+        Assert-Equal $listed[0].status 'CANCELLED'
+
+        $again = & $module { param($runId, $root) Abandon-DuoForgeRunInternal -RunId $runId -ResultsRoot $root } $run.runId $workspace
+        Assert-True ([bool]$again.alreadyAbandoned)
+        Assert-Equal @(Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ForEach-Object { $_ | ConvertFrom-Json -Depth 30 } | Where-Object type -eq 'RUN_ABANDONED').Count 1
+
+        Assert-ThrowsCode {
+            & $module {
+                param($runId, $root, $directory)
+                Invoke-WithDuoForgeRunLock -RunDirectory $directory -ScriptBlock { Remove-DuoForgeRunInternal -RunId $runId -ResultsRoot $root }
+            } $run.runId $workspace $run.runDirectory
+        } 'DF-RUN-LOCKED'
+
+        $deleted = & $module { param($runId, $root) Remove-DuoForgeRunInternal -RunId $runId -ResultsRoot $root } $run.runId $workspace
+        Assert-True ([bool]$deleted.deleted)
+        Assert-Equal $deleted.status 'DELETED'
+        Assert-False (Test-Path -LiteralPath $run.runDirectory)
+        Assert-False (Test-Path -LiteralPath (Join-Path $workspace '.deleting'))
+        Assert-True (Test-Path -LiteralPath $input -PathType Leaf)
+        Assert-Equal (Get-FileHash -LiteralPath $input -Algorithm SHA256).Hash $sourceHash
+        Assert-Equal @(Get-DuoForgeRuns -ResultsRoot $workspace | Where-Object runId -eq $run.runId).Count 0
+    }
+
+    Test-Case '포기한 작업 복원은 잠금과 원자 변경으로 PAUSED_USER만 만들고 AI 작업을 시작하지 않는다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'run-restore\input\brief.md') -Text '# 복원 뒤에도 보존되어야 하는 원본'
+        $workspace = Join-Path $tempRoot 'run-restore\results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd -Name '복원 테스트'
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $statePath = Join-Path $run.runDirectory 'state.json'
+        $eventsPath = Join-Path $run.runDirectory 'events.jsonl'
+
+        $initialStateHash = (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash
+        $initialEventsHash = (Get-FileHash -LiteralPath $eventsPath -Algorithm SHA256).Hash
+        Assert-ThrowsCode { & $module { param($runId, $root) Restore-DuoForgeRunInternal -RunId $runId -ResultsRoot $root } $run.runId $workspace } 'DF-RUN-RESTORE-STATE'
+        Assert-Equal (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash $initialStateHash
+        Assert-Equal (Get-FileHash -LiteralPath $eventsPath -Algorithm SHA256).Hash $initialEventsHash
+
+        $null = & $module { param($runId, $root) Abandon-DuoForgeRunInternal -RunId $runId -ResultsRoot $root } $run.runId $workspace
+        $abandonedState = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json -Depth 100
+        $abandonedAt = [string]$abandonedState.abandonedAt
+        $abandonedFromStatus = [string]$abandonedState.abandonedFromStatus
+        $eventsBefore = @(Get-Content -LiteralPath $eventsPath | ForEach-Object { $_ | ConvertFrom-Json -Depth 30 })
+        $providerCallsBefore = @($eventsBefore | Where-Object type -eq 'PROVIDER_CALL_STARTED').Count
+        $preservedBefore = @(Get-ChildItem -LiteralPath $run.runDirectory -File -Recurse -Force | ForEach-Object {
+            $relative = [System.IO.Path]::GetRelativePath($run.runDirectory, $_.FullName)
+            if ($relative -notin @('state.json', 'events.jsonl', 'run.lock')) {
+                [ordered]@{ path = $relative; length = [long]$_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
+            }
+        } | Sort-Object path) | ConvertTo-Json -Depth 10 -Compress
+
+        $lockedStateHash = (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash
+        $lockedEventsHash = (Get-FileHash -LiteralPath $eventsPath -Algorithm SHA256).Hash
+        Assert-ThrowsCode {
+            & $module {
+                param($runId, $root, $directory)
+                Invoke-WithDuoForgeRunLock -RunDirectory $directory -ScriptBlock { Restore-DuoForgeRunInternal -RunId $runId -ResultsRoot $root }
+            } $run.runId $workspace $run.runDirectory
+        } 'DF-RUN-LOCKED'
+        Assert-Equal (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash $lockedStateHash
+        Assert-Equal (Get-FileHash -LiteralPath $eventsPath -Algorithm SHA256).Hash $lockedEventsHash
+
+        $restored = & $module { param($runId, $root) Restore-DuoForgeRunInternal -RunId $runId -ResultsRoot $root } $run.runId $workspace
+        Assert-True ([bool]$restored.restored)
+        Assert-Equal $restored.status 'PAUSED_USER'
+        Assert-Equal $restored.previousStatus 'CANCELLED'
+        $storedState = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json -Depth 100
+        Assert-Equal $storedState.status 'PAUSED_USER'
+        Assert-Equal $storedState.updatedAt $storedState.restoredAt
+        Assert-True (-not [string]::IsNullOrWhiteSpace([string]$storedState.restoredAt))
+        Assert-Equal ([string]$storedState.abandonedAt) $abandonedAt
+        Assert-Equal $storedState.abandonedFromStatus $abandonedFromStatus
+        $eventsAfter = @(Get-Content -LiteralPath $eventsPath | ForEach-Object { $_ | ConvertFrom-Json -Depth 30 })
+        $restoredEvents = @($eventsAfter | Where-Object type -eq 'RUN_RESTORED')
+        Assert-Equal $restoredEvents.Count 1
+        Assert-Equal $restoredEvents[0].status 'PAUSED_USER'
+        Assert-Equal $restoredEvents[0].data.previousStatus 'CANCELLED'
+        Assert-Equal @($eventsAfter | Where-Object type -eq 'PROVIDER_CALL_STARTED').Count $providerCallsBefore
+        $preservedAfter = @(Get-ChildItem -LiteralPath $run.runDirectory -File -Recurse -Force | ForEach-Object {
+            $relative = [System.IO.Path]::GetRelativePath($run.runDirectory, $_.FullName)
+            if ($relative -notin @('state.json', 'events.jsonl', 'run.lock')) {
+                [ordered]@{ path = $relative; length = [long]$_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
+            }
+        } | Sort-Object path) | ConvertTo-Json -Depth 10 -Compress
+        Assert-Equal $preservedAfter $preservedBefore '복원이 state/events 밖의 작업 파일을 변경했습니다.'
+        Assert-True (Test-Path -LiteralPath $input -PathType Leaf)
+
+        $restoredStateHash = (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash
+        $restoredEventsHash = (Get-FileHash -LiteralPath $eventsPath -Algorithm SHA256).Hash
+        Assert-ThrowsCode { & $module { param($runId, $root) Restore-DuoForgeRunInternal -RunId $runId -ResultsRoot $root } $run.runId $workspace } 'DF-RUN-RESTORE-STATE'
+        Assert-Equal (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash $restoredStateHash
+        Assert-Equal (Get-FileHash -LiteralPath $eventsPath -Algorithm SHA256).Hash $restoredEventsHash
+    }
+
     Test-Case '3A는 격리 게이트가 닫힌 동안 요청 단계에서 실패 폐쇄한다' {
         $codexProject = Join-Path $tempRoot '3a-gate\codex-project'
         $claudeProject = Join-Path $tempRoot '3a-gate\claude-project'
