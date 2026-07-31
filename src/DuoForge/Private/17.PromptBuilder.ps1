@@ -163,6 +163,24 @@ function Get-DuoForgePriorStageArtifacts {
     return @($artifacts)
 }
 
+function Get-DuoForgeIssueKeyExampleInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Step,
+        [Parameter(Mandatory)][string]$IssueTargetToken,
+        [ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion = 'workflow-v1'
+    )
+
+    $inputGeneration = [int](Get-DuoForgeObjectValue -Object $Step -Name 'inputGeneration' -Default 1)
+    $generationToken = if ($inputGeneration -gt 1) { '-G{0:D2}' -f $inputGeneration } else { '' }
+    if ($WorkflowVersion -eq 'workflow-v1') {
+        return '{0}-R{1:D2}{2}-001' -f $Step.provider.ToUpperInvariant(), [int]$Step.round, $generationToken
+    }
+    $contextBatchId = [string](Get-DuoForgeObjectValue -Object $Step -Name 'contextBatchId' -Default '')
+    $batchToken = if ([string]::IsNullOrWhiteSpace($contextBatchId)) { '' } else { '-' + (($contextBatchId.ToUpperInvariant() -replace '[^A-Z0-9]+', '-').Trim('-')) }
+    return '{0}-R{1:D2}-{2}-{3}{4}{5}-001' -f $Step.provider.ToUpperInvariant(), [int]$Step.round, $Step.stage.ToUpperInvariant(), $IssueTargetToken.ToUpperInvariant(), $batchToken, $generationToken
+}
+
 function New-DuoForgeStagePrompt {
     [CmdletBinding()]
     param(
@@ -271,6 +289,7 @@ function New-DuoForgeStagePrompt {
         $payload.allowedEvidenceSourceDocumentIds = @($lineagePolicy.evidenceSourceDocumentIds)
         $payload.allowedAdoptionTargetDocumentIds = @($lineagePolicy.adoptionTargetDocumentIds)
         $payload.allowedAdoptionSourceDocumentIds = @($lineagePolicy.adoptionSourceDocumentIds)
+        $payload.inputGeneration = [int](Get-DuoForgeObjectValue -Object $Step -Name 'inputGeneration' -Default 1)
     }
     $payloadJson = $payload | ConvertTo-Json -Depth 100 -Compress
     $workflowContract = if ($workflowVersion -eq 'workflow-v2') {
@@ -301,9 +320,9 @@ function New-DuoForgeStagePrompt {
     $issueTargetToken = [string](Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId' -Default '')
     if ([string]::IsNullOrWhiteSpace($issueTargetToken)) {
         $stepSources = @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @())
-        $issueTargetToken = if ('A' -in $stepSources -and 'B' -in $stepSources) { 'AB' } elseif ('brief' -in $stepSources) { 'MERGED' } else { 'NONE' }
+        $issueTargetToken = if ('A' -in $stepSources -and 'B' -in $stepSources) { 'AB' } elseif ('A' -in $stepSources) { 'A' } elseif ('B' -in $stepSources) { 'B' } elseif ('brief' -in $stepSources) { 'MERGED' } else { 'NONE' }
     }
-    $issueKeyExample = '{0}-R{1:D2}-{2}-{3}-001' -f $Step.provider.ToUpperInvariant(), [int]$Step.round, $Step.stage.ToUpperInvariant(), $issueTargetToken.ToUpperInvariant()
+    $issueKeyExample = Get-DuoForgeIssueKeyExampleInternal -Step $Step -IssueTargetToken $issueTargetToken -WorkflowVersion $workflowVersion
     $issueReferenceContract = if ($workflowVersion -eq 'workflow-v2') {
         @"
 - 새 쟁점 issueKey는 공급자, 라운드, 단계와 대상이 포함된 '$issueKeyExample' 형식으로 실행 전체에서 고유하게 부여하고, 근거 없는 주장은 만들지 마세요.
@@ -311,7 +330,7 @@ function New-DuoForgeStagePrompt {
 "@
     }
     else {
-        "- 쟁점 issueKey는 공급자와 라운드가 포함된 '$($Step.provider.ToUpperInvariant())-R$('{0:D2}' -f [int]$Step.round)-001' 형식으로 고유하게 부여하고, 근거 없는 주장은 만들지 마세요."
+        "- 쟁점 issueKey는 공급자와 라운드가 포함된 '$issueKeyExample' 형식으로 고유하게 부여하고, 근거 없는 주장은 만들지 마세요."
     }
     $prompt = @"
 당신은 DuoForge의 제한된 문서 토론 단계 실행자입니다.

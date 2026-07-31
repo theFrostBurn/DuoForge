@@ -119,7 +119,7 @@ function Invoke-DuoForgeCompositeRunRecoveryInternal {
     foreach ($step in @($restore)) {
         $wrapper = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path ([string]$step.artifactPath))
         $maps = Get-DuoForgeIssueTargetMapsInternal -RunDirectory $directory -Graph $graph -ExcludeStepKey ([string]$step.stepKey)
-        $null = Test-DuoForgeStageResultInternal -Result $wrapper.result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -DefinitionIssueTargets $maps.definitionTargets -ReferenceIssueTargets $maps.referenceTargets -ThrowOnError
+        $null = Test-DuoForgeStageResultInternal -Result $wrapper.result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -DefinitionIssueTargets $maps.definitionTargets -ReferenceIssueTargets $maps.referenceTargets -ReservedIssueFingerprints $maps.reservedFingerprints -ThrowOnIssueReferenceIntegrityError -ThrowOnError
     }
     $pendingPath = Join-Path $directory 'decisions\pending.json'
     $pendingCount = if (Test-Path -LiteralPath $pendingPath -PathType Leaf) { @((Read-DuoForgeJson -Path $pendingPath).questions).Count } else { 0 }

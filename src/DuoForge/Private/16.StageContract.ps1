@@ -24,6 +24,18 @@ function Get-DuoForgeObjectValue {
     return $property.Value
 }
 
+function Get-DuoForgeIssueFingerprintInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Target,
+        [Parameter(Mandatory)][string]$Category,
+        [Parameter(Mandatory)][string]$Claim
+    )
+
+    $normalized = (($Target + '|' + $Category + '|' + $Claim).ToLowerInvariant() -replace '\s+', ' ').Trim()
+    return Get-DuoForgeSha256 -Bytes ([System.Text.UTF8Encoding]::new($false).GetBytes($normalized))
+}
+
 function Get-DuoForgeStageLineagePolicyInternal {
     [CmdletBinding()]
     param(
@@ -66,7 +78,9 @@ function Test-DuoForgeStageResultInternal {
         [AllowNull()][System.Collections.IDictionary]$KnownIssueTargets,
         [AllowNull()][System.Collections.IDictionary]$DefinitionIssueTargets,
         [AllowNull()][System.Collections.IDictionary]$ReferenceIssueTargets,
+        [AllowNull()][System.Collections.IDictionary]$ReservedIssueFingerprints,
         [AllowNull()][System.Collections.IDictionary]$ContextEvidenceContract,
+        [switch]$ThrowOnIssueReferenceIntegrityError,
         [switch]$ThrowOnError
     )
 
@@ -158,6 +172,8 @@ function Test-DuoForgeStageResultInternal {
     foreach ($issue in @($issueItems)) {
         $issueKey = [string](Get-DuoForgeObjectValue -Object $issue -Name 'issueKey')
         $issueTargetValue = [string](Get-DuoForgeObjectValue -Object $issue -Name 'targetDocumentId')
+        $issueCategoryValue = [string](Get-DuoForgeObjectValue -Object $issue -Name 'category')
+        $issueClaimValue = [string](Get-DuoForgeObjectValue -Object $issue -Name 'claim')
         if (-not [string]::IsNullOrWhiteSpace($issueKey)) {
             if ($resultIssueTargets.Contains($issueKey)) {
                 $errors.Add("issues.issueKey가 결과 안에서 중복되었습니다: $issueKey")
@@ -167,6 +183,24 @@ function Test-DuoForgeStageResultInternal {
             }
             if ($WorkflowVersion -eq 'workflow-v2' -and $null -ne $DefinitionIssueTargets -and $DefinitionIssueTargets.Contains($issueKey)) {
                 $errors.Add("issues.issueKey가 이전 단계에서 이미 정의되었습니다: $issueKey")
+            }
+            if (
+                $WorkflowVersion -eq 'workflow-v2' -and
+                $null -ne $ReservedIssueFingerprints -and
+                $ReservedIssueFingerprints.Contains($issueKey) -and
+                -not [string]::IsNullOrWhiteSpace($issueTargetValue) -and
+                -not [string]::IsNullOrWhiteSpace($issueCategoryValue) -and
+                -not [string]::IsNullOrWhiteSpace($issueClaimValue)
+            ) {
+                $issueFingerprint = Get-DuoForgeIssueFingerprintInternal -Target $issueTargetValue -Category $issueCategoryValue -Claim $issueClaimValue
+                if ([string]$ReservedIssueFingerprints[$issueKey] -cne $issueFingerprint) {
+                    if ($ThrowOnIssueReferenceIntegrityError) {
+                        throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "issueKey가 보존된 다른 쟁점에서 이미 사용되었습니다: $issueKey")
+                    }
+                    else {
+                        $errors.Add("issues.issueKey가 보존된 다른 쟁점에서 이미 사용되었습니다: $issueKey")
+                    }
+                }
             }
         }
         $severity = [string](Get-DuoForgeObjectValue -Object $issue -Name 'severity')
@@ -349,6 +383,7 @@ function Get-DuoForgeIssueTargetMapsInternal {
 
     $definitionTargets = [ordered]@{}
     $referenceTargets = [ordered]@{}
+    $reservedFingerprints = [ordered]@{}
     $definitionKeys = @{}
     foreach ($step in @($Graph.steps | Where-Object { [string]$_.status -eq 'COMMITTED' -and [string]$_.stepKey -ne $ExcludeStepKey })) {
         $artifactPath = [string](Get-DuoForgeObjectValue -Object $step -Name 'artifactPath' -Default '')
@@ -376,6 +411,16 @@ function Get-DuoForgeIssueTargetMapsInternal {
         $ledger = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $ledgerPath)
         foreach ($issue in @(Get-DuoForgeObjectValue -Object $ledger -Name 'issues' -Default @())) {
             $target = Get-DuoForgeIssueTargetInternal -Issue $issue
+            $category = [string](Get-DuoForgeObjectValue -Object $issue -Name 'category' -Default '')
+            $claim = [string](Get-DuoForgeObjectValue -Object $issue -Name 'claim' -Default '')
+            $storedFingerprint = [string](Get-DuoForgeObjectValue -Object $issue -Name 'fingerprint' -Default '')
+            $fingerprint = if (-not [string]::IsNullOrWhiteSpace([string]$target) -and -not [string]::IsNullOrWhiteSpace($category) -and -not [string]::IsNullOrWhiteSpace($claim)) {
+                Get-DuoForgeIssueFingerprintInternal -Target ([string]$target) -Category $category -Claim $claim
+            }
+            else { '' }
+            if (-not [string]::IsNullOrWhiteSpace($storedFingerprint) -and $storedFingerprint -cne $fingerprint) {
+                throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "쟁점 원장의 내용 지문이 현재 내용과 일치하지 않습니다: $([string](Get-DuoForgeObjectValue -Object $issue -Name 'issueId' -Default ''))")
+            }
             $keys = @([string](Get-DuoForgeObjectValue -Object $issue -Name 'issueId' -Default '')) + @(Get-DuoForgeObjectValue -Object $issue -Name 'externalKeys' -Default @())
             foreach ($keyValue in $keys) {
                 $key = [string]$keyValue
@@ -384,12 +429,19 @@ function Get-DuoForgeIssueTargetMapsInternal {
                     throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "쟁점 원장의 issueKey 대상이 단계 산출물과 충돌합니다: $key")
                 }
                 $referenceTargets[$key] = [string]$target
+                if (-not [string]::IsNullOrWhiteSpace($fingerprint)) {
+                    if ($reservedFingerprints.Contains($key) -and [string]$reservedFingerprints[$key] -cne $fingerprint) {
+                        throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "쟁점 원장의 issueKey가 서로 다른 내용 지문에 연결됩니다: $key")
+                    }
+                    $reservedFingerprints[$key] = $fingerprint
+                }
             }
         }
     }
     return [ordered]@{
         definitionTargets = $definitionTargets
         referenceTargets = $referenceTargets
+        reservedFingerprints = $reservedFingerprints
     }
 }
 
@@ -463,6 +515,15 @@ function Assert-DuoForgeIssueLedgerV2Internal {
             (Get-DuoForgeObjectValue -Object $issue -Name 'blocking') -isnot [bool] -or
             [string](Get-DuoForgeObjectValue -Object $issue -Name 'resolutionStatus' -Default '') -notin @('OPEN', 'AWAITING_EVIDENCE', 'AWAITING_USER', 'DEFERRED', 'RESOLVED', 'SUPERSEDED')) {
             $errors.Add("workflow-v2 쟁점 필수 필드가 잘못되었습니다: $issueId")
+        }
+        $storedFingerprint = [string](Get-DuoForgeObjectValue -Object $issue -Name 'fingerprint' -Default '')
+        if (-not [string]::IsNullOrWhiteSpace($target) -and
+            -not [string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $issue -Name 'category' -Default '')) -and
+            -not [string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $issue -Name 'claim' -Default ''))) {
+            $expectedFingerprint = Get-DuoForgeIssueFingerprintInternal -Target $target -Category ([string]$issue.category) -Claim ([string]$issue.claim)
+            if ([string]::IsNullOrWhiteSpace($storedFingerprint) -or $storedFingerprint -cne $expectedFingerprint) {
+                $errors.Add("fingerprint가 쟁점 내용과 일치하지 않습니다: $issueId")
+            }
         }
         $history = $null
         if ($issue.Contains('history')) { $history = $issue.history }

@@ -297,7 +297,7 @@ function Repair-DuoForgeCorruptedStageArtifactsInternal {
                 $wrapper = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $path)
                 $issueTargets = if ($workflowVersion -eq 'workflow-v2') { Get-DuoForgeIssueTargetMapsInternal -RunDirectory $RunDirectory -Graph $Graph -ExcludeStepKey ([string]$step.stepKey) } else { $null }
                 $contextEvidenceContract = Get-DuoForgeContextEvidenceContractForStepInternal -RunDirectory $RunDirectory -Step $step
-                $null = Test-DuoForgeStageResultInternal -Result $wrapper.result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -DefinitionIssueTargets $(if ($null -eq $issueTargets) { $null } else { $issueTargets.definitionTargets }) -ReferenceIssueTargets $(if ($null -eq $issueTargets) { $null } else { $issueTargets.referenceTargets }) -ContextEvidenceContract $contextEvidenceContract -ThrowOnError
+                $null = Test-DuoForgeStageResultInternal -Result $wrapper.result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -DefinitionIssueTargets $(if ($null -eq $issueTargets) { $null } else { $issueTargets.definitionTargets }) -ReferenceIssueTargets $(if ($null -eq $issueTargets) { $null } else { $issueTargets.referenceTargets }) -ReservedIssueFingerprints $(if ($null -eq $issueTargets) { $null } else { $issueTargets.reservedFingerprints }) -ContextEvidenceContract $contextEvidenceContract -ThrowOnIssueReferenceIntegrityError -ThrowOnError
             }
             catch {
                 if ($_.Exception.Data.Contains('DuoForgeCode') -and [string]$_.Exception.Data['DuoForgeCode'] -eq 'DF-ISSUE-REFERENCE-INTEGRITY') { throw }
@@ -343,6 +343,11 @@ function Repair-DuoForgeCorruptedStageArtifactsInternal {
         if ($step.Contains('history')) { foreach ($entry in @($step.history)) { $existingHistory.Add($entry) } }
         $existingHistory.Add($historyRecord)
         $step.history = @($existingHistory)
+        if ([string]$historyRecord.previousStatus -eq 'COMMITTED') {
+            if (-not $step.Contains('totalAttemptCount')) { $step.totalAttemptCount = [int](Get-DuoForgeObjectValue -Object $step -Name 'attemptCount' -Default 0) }
+            $step.attemptCount = 0
+            $step.inputGeneration = [int](Get-DuoForgeObjectValue -Object $step -Name 'inputGeneration' -Default 1) + 1
+        }
         $step.status = 'STALE'
         $step.inputHash = $null
         $step.artifactPath = $null
@@ -559,7 +564,7 @@ function Invoke-DuoForgeStageEngine {
                     })
                     $issueTargets = if ($workflowVersion -eq 'workflow-v2') { Get-DuoForgeIssueTargetMapsInternal -RunDirectory $RunDirectory -Graph $graph -ExcludeStepKey ([string]$step.stepKey) } else { $null }
                     $contextEvidenceContract = Get-DuoForgeContextEvidenceContractForStepInternal -RunDirectory $RunDirectory -Step $step
-                    $null = Test-DuoForgeStageResultInternal -Result $result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -DefinitionIssueTargets $(if ($null -eq $issueTargets) { $null } else { $issueTargets.definitionTargets }) -ReferenceIssueTargets $(if ($null -eq $issueTargets) { $null } else { $issueTargets.referenceTargets }) -ContextEvidenceContract $contextEvidenceContract -ThrowOnError
+                    $null = Test-DuoForgeStageResultInternal -Result $result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -DefinitionIssueTargets $(if ($null -eq $issueTargets) { $null } else { $issueTargets.definitionTargets }) -ReferenceIssueTargets $(if ($null -eq $issueTargets) { $null } else { $issueTargets.referenceTargets }) -ReservedIssueFingerprints $(if ($null -eq $issueTargets) { $null } else { $issueTargets.reservedFingerprints }) -ContextEvidenceContract $contextEvidenceContract -ThrowOnError
                     $artifactDirectory = Join-Path $RunDirectory ("rounds\round-{0:D2}\raw-redacted" -f [int]$step.round)
                     [System.IO.Directory]::CreateDirectory($artifactDirectory) | Out-Null
                     $artifactPath = Join-Path $artifactDirectory ($step.stepKey + '.json')
@@ -636,7 +641,7 @@ function Invoke-DuoForgeStageEngine {
                         retryable = $retryable
                         attempt = [int]$step.attemptCount
                         at = Get-DuoForgeUtcNow
-                        validationErrors = if ($formatRecovery) { @('응답 구조가 요구 스키마를 충족하지 않았습니다.') } else { @() }
+                        validationErrors = if ($formatRecovery -and $_.Exception.Data.Contains('DuoForgeValidationErrors')) { @($_.Exception.Data['DuoForgeValidationErrors']) } elseif ($formatRecovery) { @('응답 구조가 요구 스키마를 충족하지 않았습니다.') } else { @() }
                         diagnosticId = $correlation.diagnosticId
                         diagnosticsLocation = $correlation.diagnosticsLocation
                         diagnosticsRelativePath = $correlation.diagnosticsRelativePath

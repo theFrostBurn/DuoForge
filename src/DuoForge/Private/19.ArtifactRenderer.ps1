@@ -31,8 +31,7 @@ function Get-DuoForgeIssueFingerprint {
         [Parameter(Mandatory)][string]$Claim
     )
 
-    $normalized = (($Target + '|' + $Category + '|' + $Claim).ToLowerInvariant() -replace '\s+', ' ').Trim()
-    return Get-DuoForgeSha256 -Bytes ([System.Text.UTF8Encoding]::new($false).GetBytes($normalized))
+    return Get-DuoForgeIssueFingerprintInternal -Target $Target -Category $Category -Claim $Claim
 }
 
 function Apply-DuoForgeUserEvidenceRecordsInternal {
@@ -80,7 +79,8 @@ function Apply-DuoForgeUserDecisionRecordsInternal {
     [CmdletBinding()]
     param(
         [AllowEmptyCollection()][Parameter(Mandatory)][object[]]$Issues,
-        [AllowEmptyCollection()][Parameter(Mandatory)][object[]]$DecisionRecords
+        [AllowEmptyCollection()][Parameter(Mandatory)][object[]]$DecisionRecords,
+        [AllowEmptyCollection()][object[]]$Questions = @()
     )
 
     $effective = @(Get-DuoForgeEffectiveUserDecisionsInternal -Records $DecisionRecords)
@@ -89,6 +89,19 @@ function Apply-DuoForgeUserDecisionRecordsInternal {
         $issue = @($Issues | Where-Object { [string]$_.issueId -eq $issueId } | Select-Object -First 1)
         if ($issue.Count -ne 1) { continue }
         $issue = $issue[0]
+        $decisionFingerprint = [string](Get-DuoForgeObjectValue -Object $decision -Name 'issueFingerprint' -Default '')
+        if (-not [string]::IsNullOrWhiteSpace($decisionFingerprint) -and $decisionFingerprint -cne [string]$issue.fingerprint) { continue }
+        $currentQuestion = @($Questions | Where-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'issueKey' -Default '') -eq $issueId } | Select-Object -Last 1)
+        if ($currentQuestion.Count -eq 1) {
+            $recordedQuestionText = ([string](Get-DuoForgeObjectValue -Object $decision -Name 'questionText' -Default '') -replace '\s+', ' ').Trim()
+            $currentQuestionText = ([string](Get-DuoForgeObjectValue -Object $currentQuestion[0] -Name 'question' -Default '') -replace '\s+', ' ').Trim()
+            $recordedOptions = @((Get-DuoForgeObjectValue -Object $decision -Name 'questionOptions' -Default @()) | ForEach-Object { ([string]$_ -replace '\s+', ' ').Trim() })
+            $currentOptions = @((Get-DuoForgeObjectValue -Object $currentQuestion[0] -Name 'options' -Default @()) | ForEach-Object { ([string]$_ -replace '\s+', ' ').Trim() })
+            if ((-not [string]::IsNullOrWhiteSpace($recordedQuestionText) -and $recordedQuestionText -cne $currentQuestionText) -or
+                ($recordedOptions.Count -gt 0 -and ($recordedOptions -join "`n") -cne ($currentOptions -join "`n"))) {
+                continue
+            }
+        }
         $decisionId = [string](Get-DuoForgeObjectValue -Object $decision -Name 'decisionId' -Default '')
         if (-not $issue.Contains('responses') -or $null -eq $issue.responses) { $issue.responses = [ordered]@{} }
         $userResponses = [System.Collections.Generic.List[object]]::new()
@@ -165,9 +178,9 @@ function Merge-DuoForgeStageIssues {
                     throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "단계 결과에 중복 issueKey 정의가 있습니다: $externalKey")
                 }
                 $definedExternalKeys[$externalKey] = $fingerprint
-                if ($byExternalKey.ContainsKey($externalKey) -and [string]$byExternalKey[$externalKey].fingerprint -cne $fingerprint) {
-                    throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "issueKey가 서로 다른 A/B 쟁점에 연결됩니다: $externalKey")
-                }
+            }
+            if ($byExternalKey.ContainsKey($externalKey) -and [string]$byExternalKey[$externalKey].fingerprint -cne $fingerprint) {
+                throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "issueKey가 서로 다른 쟁점에 연결됩니다: $externalKey")
             }
             if ($byFingerprint.ContainsKey($fingerprint)) {
                 $issue = $byFingerprint[$fingerprint]
@@ -409,7 +422,7 @@ function Merge-DuoForgeStageIssues {
         $issues = [System.Collections.Generic.List[object]]::new(@(Apply-DuoForgeUserEvidenceRecordsInternal -Issues @($issues) -EvidenceRecords @($UserEvidenceRecords)))
     }
     if ($null -ne $UserDecisionRecords -and @($UserDecisionRecords | Where-Object { $null -ne $_ }).Count -gt 0) {
-        $issues = [System.Collections.Generic.List[object]]::new(@(Apply-DuoForgeUserDecisionRecordsInternal -Issues @($issues) -DecisionRecords @($UserDecisionRecords)))
+        $issues = [System.Collections.Generic.List[object]]::new(@(Apply-DuoForgeUserDecisionRecordsInternal -Issues @($issues) -DecisionRecords @($UserDecisionRecords) -Questions @($questions)))
     }
 
     foreach ($issue in @($issues | Where-Object { [string]$_.resolutionStatus -notin @('RESOLVED', 'SUPERSEDED') })) {
@@ -658,7 +671,7 @@ function Render-DuoForgeFinalArtifacts {
     $finalDirectory = Join-Path $RunDirectory 'final'
     $files = [System.Collections.Generic.List[string]]::new()
     if ([string]$manifest.mode -eq 'shared-document') {
-        $latest = @($stageResults | Where-Object { $_.stage -eq 'synthesis' } | Sort-Object round -Descending | Select-Object -First 1)
+        $latest = @($stageResults | Where-Object { $_.stage -eq 'synthesis' } | Sort-Object @{ Expression = { [int](Get-DuoForgeObjectValue -Object $_ -Name 'round' -Default 0) }; Descending = $true } | Select-Object -First 1)
         if ($latest.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$latest[0].result.document)) {
             throw (New-DuoForgeException -Code 'DF-FINAL-DOCUMENT' -Message '완료된 공동 문서 산출물을 찾을 수 없습니다.')
         }
@@ -676,7 +689,7 @@ function Render-DuoForgeFinalArtifacts {
         }
     }
     elseif ([string]$manifest.mode -eq 'document-merge') {
-        $latest = @($stageResults | Where-Object { $_.stage -eq 'synthesis' } | Sort-Object round -Descending | Select-Object -First 1)
+        $latest = @($stageResults | Where-Object { $_.stage -eq 'synthesis' } | Sort-Object @{ Expression = { [int](Get-DuoForgeObjectValue -Object $_ -Name 'round' -Default 0) }; Descending = $true } | Select-Object -First 1)
         if ($latest.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$latest[0].result.document)) {
             throw (New-DuoForgeException -Code 'DF-FINAL-DOCUMENT' -Message '완료된 병합 문서 산출물을 찾을 수 없습니다.')
         }
@@ -722,7 +735,7 @@ function Render-DuoForgeFinalArtifacts {
     }
     elseif ($workflowVersion -eq 'workflow-v2') {
         foreach ($documentId in @('A', 'B')) {
-            $latest = @($stageResults | Where-Object { [string]$_.targetDocumentId -eq $documentId -and $_.stage -eq 'document-revision' } | Sort-Object round -Descending | Select-Object -First 1)
+            $latest = @($stageResults | Where-Object { [string]$_.targetDocumentId -eq $documentId -and $_.stage -eq 'document-revision' } | Sort-Object @{ Expression = { [int](Get-DuoForgeObjectValue -Object $_ -Name 'round' -Default 0) }; Descending = $true } | Select-Object -First 1)
             if ($latest.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$latest[0].result.document)) {
                 throw (New-DuoForgeException -Code 'DF-FINAL-DOCUMENT' -Message "문서 $documentId 최종 개정 산출물을 찾을 수 없습니다.")
             }
@@ -766,7 +779,7 @@ function Render-DuoForgeFinalArtifacts {
     }
     else {
         foreach ($provider in @('codex', 'claude')) {
-            $latest = @($stageResults | Where-Object { $_.provider -eq $provider -and $_.stage -eq 'owned-document-revision' } | Sort-Object round -Descending | Select-Object -First 1)
+            $latest = @($stageResults | Where-Object { $_.provider -eq $provider -and $_.stage -eq 'owned-document-revision' } | Sort-Object @{ Expression = { [int](Get-DuoForgeObjectValue -Object $_ -Name 'round' -Default 0) }; Descending = $true } | Select-Object -First 1)
             if ($latest.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$latest[0].result.document)) {
                 throw (New-DuoForgeException -Code 'DF-FINAL-DOCUMENT' -Message "$provider 최종 문서 산출물을 찾을 수 없습니다.")
             }

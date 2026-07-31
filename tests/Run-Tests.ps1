@@ -1186,6 +1186,8 @@ try {
         foreach ($name in @('codex-final.md', 'claude-final.md', 'comparison.md', 'adoption-log.md', 'OPEN_QUESTIONS.md')) {
             Assert-True (Test-Path -LiteralPath (Join-Path $runDirectory "final\$name") -PathType Leaf)
         }
+        Assert-ContainsText (Get-Content -LiteralPath (Join-Path $runDirectory 'final\codex-final.md') -Raw) '라운드: 2'
+        Assert-ContainsText (Get-Content -LiteralPath (Join-Path $runDirectory 'final\claude-final.md') -Raw) '라운드: 2'
         $events = @(Get-Content -LiteralPath (Join-Path $runDirectory 'events.jsonl') | ForEach-Object { $_ | ConvertFrom-Json -Depth 30 })
         Assert-True (@($events | Where-Object type -eq 'STAGE_INTERRUPTED_RECOVERED').Count -eq 1)
         foreach ($path in $fixtureHashesBefore.Keys) {
@@ -3279,6 +3281,34 @@ try {
             Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -DefinitionIssueTargets ([ordered]@{}) -ReferenceIssueTargets ([ordered]@{ 'SELF-A' = 'A' })
         } $revisionStep
         Assert-True ([bool]$ledgerSelfResult.valid) ($ledgerSelfResult.errors -join ' | ')
+
+        $reservedFingerprint = & $module {
+            Get-DuoForgeIssueFingerprintInternal -Target 'A' -Category 'correctness' -Claim '이전 세대의 쟁점입니다.'
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+            & $module {
+                param($step, $fingerprint)
+                $result = New-DuoForgeFakeStageResult -Step $step
+                $result.issues = @([ordered]@{ issueKey = 'SELF-A'; targetDocumentId = 'A'; category = 'correctness'; severity = 'major'; claim = '재실행에서 새로 생긴 다른 쟁점입니다.'; evidence = @(); proposal = '수정합니다.'; requiresUser = $false; blockingProposal = $false })
+                Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -DefinitionIssueTargets ([ordered]@{}) -ReferenceIssueTargets ([ordered]@{ 'SELF-A' = 'A' }) -ReservedIssueFingerprints ([ordered]@{ 'SELF-A' = $fingerprint }) -ThrowOnError
+            } $revisionStep $reservedFingerprint
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-ISSUE-REFERENCE-INTEGRITY' -Body {
+            & $module {
+                param($step, $fingerprint)
+                $result = New-DuoForgeFakeStageResult -Step $step
+                $result.issues = @([ordered]@{ issueKey = 'SELF-A'; targetDocumentId = 'A'; category = 'correctness'; severity = 'major'; claim = '재실행에서 새로 생긴 다른 쟁점입니다.'; evidence = @(); proposal = '수정합니다.'; requiresUser = $false; blockingProposal = $false })
+                Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -DefinitionIssueTargets ([ordered]@{}) -ReferenceIssueTargets ([ordered]@{ 'SELF-A' = 'A' }) -ReservedIssueFingerprints ([ordered]@{ 'SELF-A' = $fingerprint }) -ThrowOnIssueReferenceIntegrityError -ThrowOnError
+            } $revisionStep $reservedFingerprint
+        }
+        $sameFingerprintResult = & $module {
+            param($step, $fingerprint)
+            $result = New-DuoForgeFakeStageResult -Step $step
+            $result.issues = @([ordered]@{ issueKey = 'SELF-A'; targetDocumentId = 'A'; category = 'correctness'; severity = 'major'; claim = '이전 세대의 쟁점입니다.'; evidence = @(); proposal = '수정합니다.'; requiresUser = $false; blockingProposal = $false })
+            Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -DefinitionIssueTargets ([ordered]@{}) -ReferenceIssueTargets ([ordered]@{ 'SELF-A' = 'A' }) -ReservedIssueFingerprints ([ordered]@{ 'SELF-A' = $fingerprint })
+        } $revisionStep $reservedFingerprint
+        Assert-True ([bool]$sameFingerprintResult.valid) ($sameFingerprintResult.errors -join ' | ')
+
         Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
             & $module {
                 param($step)
@@ -3349,6 +3379,33 @@ try {
                 Merge-DuoForgeStageIssues -StageResults @($record) -WorkflowVersion workflow-v2
             }
         }
+        Assert-ThrowsCode -ExpectedCode 'DF-ISSUE-REFERENCE-INTEGRITY' -Body {
+            & $module {
+                $oldRecord = [ordered]@{
+                    stepKey = 'old'; provider = 'claude'; stage = 'cross-review'; round = 1
+                    result = [ordered]@{ issues = @([ordered]@{ issueKey = 'LEGACY-SAME'; target = 'document'; category = 'old'; severity = 'major'; claim = '이전 의미'; evidence = @(); proposal = '이전 제안'; requiresUser = $true; blockingProposal = $true }); issueResponses = @(); adoptions = @(); openQuestions = @(); finalApproved = $null }
+                }
+                $preserved = Merge-DuoForgeStageIssues -StageResults @($oldRecord)
+                $newRecord = [ordered]@{
+                    stepKey = 'new'; provider = 'claude'; stage = 'cross-review'; round = 1
+                    result = [ordered]@{ issues = @([ordered]@{ issueKey = 'LEGACY-SAME'; target = 'document'; category = 'new'; severity = 'major'; claim = '새 의미'; evidence = @(); proposal = '새 제안'; requiresUser = $true; blockingProposal = $true }); issueResponses = @(); adoptions = @(); openQuestions = @(); finalApproved = $null }
+                }
+                Merge-DuoForgeStageIssues -StageResults @($newRecord) -PreservedIssues @($preserved.issues)
+            }
+        }
+    }
+
+    Test-Case 'workflow-v2 재실행 프롬프트는 입력 세대를 issueKey에 포함한다' {
+        $examples = & $module {
+            $step = [ordered]@{ provider = 'claude'; round = 2; stage = 'document-validation'; inputGeneration = 1 }
+            $first = Get-DuoForgeIssueKeyExampleInternal -Step $step -IssueTargetToken B -WorkflowVersion workflow-v2
+            $step.inputGeneration = 2
+            $second = Get-DuoForgeIssueKeyExampleInternal -Step $step -IssueTargetToken B -WorkflowVersion workflow-v2
+            [ordered]@{ first = $first; second = $second }
+        }
+
+        Assert-Equal $examples.first 'CLAUDE-R02-DOCUMENT-VALIDATION-B-001'
+        Assert-Equal $examples.second 'CLAUDE-R02-DOCUMENT-VALIDATION-B-G02-001'
     }
 
     Test-Case '문서별 최종 검증 거부는 대상 계보의 Critical 쟁점으로 실패 폐쇄한다' {
@@ -3470,6 +3527,14 @@ try {
                 param($source)
                 $issue = ConvertTo-DuoForgeHashtable -InputObject (($source | ConvertTo-Json -Depth 50) | ConvertFrom-Json -Depth 50)
                 $issue.resolutionStatus = 'NOT_A_STATUS'
+                Assert-DuoForgeIssueLedgerV2Internal -Issues @($issue)
+            } $afterRevision.issues[0]
+        }
+        Assert-ThrowsCode -ExpectedCode 'DF-ISSUE-LEDGER-CONTRACT' -Body {
+            & $module {
+                param($source)
+                $issue = ConvertTo-DuoForgeHashtable -InputObject (($source | ConvertTo-Json -Depth 50) | ConvertFrom-Json -Depth 50)
+                $issue.fingerprint = 'sha256:tampered'
                 Assert-DuoForgeIssueLedgerV2Internal -Issues @($issue)
             } $afterRevision.issues[0]
         }
@@ -3937,6 +4002,7 @@ try {
         foreach ($name in @('PRD.md', 'source-trace.md', 'DEBATE_SUMMARY.md', 'DECISIONS.md', 'OPEN_QUESTIONS.md')) {
             Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory "final\$name") -PathType Leaf)
         }
+        Assert-ContainsText (Get-Content -LiteralPath (Join-Path $run.runDirectory 'final\PRD.md') -Raw) '라운드: 2'
         $trace = Get-Content -LiteralPath (Join-Path $run.runDirectory 'final\source-trace.md') -Raw
         Assert-ContainsText $trace '| 쟁점 | 원천 문서 | 제안 작업자 | 대상 문서 | 채택 상태 | 이유 | 반영 위치 | 라운드 |'
         Assert-ContainsText $trace '| D-001 | A | codex | merged | ACCEPTED | 안전 조건을 합의 문서에 채택했습니다. | 안전 경계 | 1 |'
@@ -3983,6 +4049,8 @@ try {
         foreach ($name in @('document-A-final.md', 'document-B-final.md', 'comparison.md', 'adoption-log.md', 'OPEN_QUESTIONS.md')) {
             Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory "final\$name") -PathType Leaf)
         }
+        Assert-ContainsText (Get-Content -LiteralPath (Join-Path $run.runDirectory 'final\document-A-final.md') -Raw) '라운드: 2'
+        Assert-ContainsText (Get-Content -LiteralPath (Join-Path $run.runDirectory 'final\document-B-final.md') -Raw) '라운드: 2'
         $adoptionLog = Get-Content -LiteralPath (Join-Path $run.runDirectory 'final\adoption-log.md') -Raw
         Assert-ContainsText $adoptionLog '| 쟁점 | 원천 문서 | 제안 작업자 | 편집 작업자 | 대상 문서 | 채택 상태 | 이유 | 반영 위치 | 라운드 |'
         Assert-ContainsText $adoptionLog '| D-001 | B | claude | codex | A | PARTIALLY_ACCEPTED | 문서 A의 목적에 맞는 정의만 반영했습니다. | 용어 정의 | 1 |'
@@ -5108,6 +5176,31 @@ try {
         Assert-Equal @($resolvedIssue.history | Where-Object { $_.event -eq 'USER_DECISION_APPLIED' -and $_.decisionId -eq 'decision-current' }).Count 1
     }
 
+    Test-Case '질문이나 선택지가 바뀌면 과거 답변을 새 질문에 자동 적용하지 않는다' {
+        $changedQuestion = & $module {
+            $oldStage = [ordered]@{
+                stepKey = 'old-question'; provider = 'claude'; stage = 'cross-review'; round = 1
+                result = [ordered]@{
+                    issues = @([ordered]@{ issueKey = 'QUESTION-STABLE'; target = 'document'; category = 'choice'; severity = 'major'; claim = '저장 주기를 정해야 합니다.'; evidence = @(); proposal = '저장 주기 선택'; requiresUser = $true; blockingProposal = $true })
+                    issueResponses = @(); adoptions = @(); openQuestions = @([ordered]@{ issueKey = 'QUESTION-STABLE'; title = '저장 주기'; question = '어떻게 저장할까요?'; options = @('5초', '10초'); recommendedOption = '5초' }); finalApproved = $null
+                }
+            }
+            $first = Merge-DuoForgeStageIssues -StageResults @($oldStage)
+            $issue = $first.issues[0]
+            $decision = [ordered]@{
+                decisionId = 'decision-contract'; issueId = [string]$issue.issueId; issueFingerprint = [string]$issue.fingerprint
+                action = 'ANSWER'; revision = 1; selectedOption = '5초'; questionText = '어떻게 저장할까요?'; questionOptions = @('5초', '10초'); recordedAt = '2026-07-27T00:00:00Z'
+            }
+            $newStage = ConvertTo-DuoForgeHashtable -InputObject $oldStage
+            $newStage.stepKey = 'new-question'
+            $newStage.result.openQuestions = @([ordered]@{ issueKey = 'QUESTION-STABLE'; title = '저장 방식'; question = '어떤 방식으로 저장할까요?'; options = @('자동', '수동'); recommendedOption = '자동' })
+            Merge-DuoForgeStageIssues -StageResults @($newStage) -PreservedIssues @($first.issues) -UserDecisionRecords @($decision)
+        }
+        Assert-Equal @($changedQuestion.questions).Count 1
+        Assert-Equal $changedQuestion.issues[0].resolutionStatus 'AWAITING_USER'
+        Assert-False $changedQuestion.issues[0].responses.Contains('user')
+    }
+
     Test-Case '사용자는 이전 질문과 현재 답변을 확인해 결정을 변경하고 자유 제약 및 3라운드를 사용할 수 있다' {
         $input = New-MarkdownFile -Path (Join-Path $tempRoot 'decision-round\input\brief.md')
         $workspace = Join-Path $tempRoot 'decision-round-results'
@@ -5814,6 +5907,17 @@ Setext 결론
             $expectedContextCalls = @($plan.batches).Count * 2
             Assert-Equal @($trace.steps | Where-Object { $_ -like 'context-batch-analysis|*' }).Count $expectedContextCalls
             Assert-True (@($trace.steps | Select-Object -First $expectedContextCalls | Where-Object { $_ -notlike 'context-batch-analysis|*' }).Count -eq 0) '문맥 배치 장벽 전에 일반 토론 단계가 실행됐습니다.'
+            $contextIssueKeyExamples = @()
+            foreach ($promptKey in @($trace.prompts.Keys | Where-Object { $_ -like 'context-*' })) {
+                $match = [regex]::Match([string]$trace.prompts[$promptKey], "새 쟁점 issueKey는[^']*'(?<key>[^']+)' 형식")
+                Assert-True $match.Success "문맥 배치 $promptKey 프롬프트에서 issueKey 예시를 찾지 못했습니다."
+                $contextIssueKeyExamples += $match.Groups['key'].Value
+            }
+            Assert-Equal @($contextIssueKeyExamples | Sort-Object -Unique).Count $expectedContextCalls '문맥 배치별 issueKey namespace가 고유하지 않습니다.'
+            if ($largeMode -eq 'dual-document') {
+                Assert-True @($contextIssueKeyExamples | Where-Object { $_ -like '*-A-*' }).Count '문서 A 문맥 배치 키에 대상 토큰이 없습니다.'
+                Assert-True @($contextIssueKeyExamples | Where-Object { $_ -like '*-B-*' }).Count '문서 B 문맥 배치 키에 대상 토큰이 없습니다.'
+            }
             $storedGraph = Get-Content -LiteralPath (Join-Path $run.runDirectory 'steps.json') -Raw | ConvertFrom-Json -Depth 100
             foreach ($contextStep in @($storedGraph.steps | Where-Object { $_.stage -eq 'context-batch-analysis' })) {
                 $stepBatch = @($plan.batches | Where-Object { [string]$_.batchId -eq [string]$contextStep.contextBatchId })[0]
@@ -5891,10 +5995,10 @@ Setext 결론
         $unaffected = @($graphBefore.steps | Where-Object { $_.stepKey -eq 'r01-claude-independent-draft' })[0]
         $unaffectedHash = [string]$unaffected.artifactHash
         [System.IO.File]::WriteAllText([string]$damaged.artifactPath, '{broken-json', [System.Text.UTF8Encoding]::new($false))
-        $control = @{ steps = @() }
+        $control = @{ steps = @(); attempts = @{} }
         $recovered = & $module {
             param($directory, $counter)
-            $callback = { param($step) $counter.steps = @($counter.steps) + @([string]$step.stepKey); New-DuoForgeFakeStageResult -Step $step }
+            $callback = { param($step) $counter.steps = @($counter.steps) + @([string]$step.stepKey); $counter.attempts[[string]$step.stepKey] = [int]$step.attemptCount; New-DuoForgeFakeStageResult -Step $step }
             Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
         } $run.runDirectory $control
         Assert-Equal $recovered.status 'COMPLETED'
@@ -5904,6 +6008,9 @@ Setext 결론
         Assert-Equal @($graphAfter.steps | Where-Object { $_.stepKey -eq 'r01-claude-independent-draft' })[0].artifactHash $unaffectedHash
         Assert-True ((Get-ChildItem -LiteralPath (Join-Path $run.runDirectory 'history\stages') -File).Count -gt 0)
         $recoveredStep = @($graphAfter.steps | Where-Object { $_.stepKey -eq 'r01-codex-independent-draft' })[0]
+        Assert-Equal $recoveredStep.inputGeneration 2
+        Assert-Equal $recoveredStep.attemptCount 1
+        Assert-Equal $control.attempts['r01-codex-independent-draft'] 1
         Assert-RegularArtifactHistoryFile -Step $recoveredStep -Entry (@($recoveredStep.history)[-1])
         [System.IO.File]::WriteAllText([string]$recoveredStep.artifactPath, '{broken-again', [System.Text.UTF8Encoding]::new($false))
         $secondRecovery = & $module {
@@ -5913,7 +6020,10 @@ Setext 결론
         } $run.runDirectory
         Assert-Equal $secondRecovery.status 'COMPLETED'
         $graphAfterSecondRecovery = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'steps.json') | ConvertFrom-Json -Depth 100
-        Assert-Equal @(@($graphAfterSecondRecovery.steps | Where-Object { $_.stepKey -eq 'r01-codex-independent-draft' })[0].history).Count 2
+        $secondRecoveredStep = @($graphAfterSecondRecovery.steps | Where-Object { $_.stepKey -eq 'r01-codex-independent-draft' })[0]
+        Assert-Equal @($secondRecoveredStep.history).Count 2
+        Assert-Equal $secondRecoveredStep.inputGeneration 3
+        Assert-Equal $secondRecoveredStep.attemptCount 1
         $events = Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ForEach-Object { $_ | ConvertFrom-Json }
         Assert-Equal @($events | Where-Object { $_.type -eq 'COMPLETED_OUTPUT_CORRUPTION_DETECTED' }).Count 2
     }
