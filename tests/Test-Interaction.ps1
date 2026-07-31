@@ -500,12 +500,12 @@ Test-Case '세 APPLY 확인의 Esc/B/Q/Ctrl+C/오타는 답변·제약 기록과
     }
 }
 
-Test-Case 'CLI DEFER 확인의 Esc/B/Q/Ctrl+C/오타는 답변 기록과 영구 변경을 만들지 않는다' {
+Test-Case 'CLI DEFER 확인의 Esc/B/Q/Ctrl+C/오타는 interaction 출력, 답변 기록과 영구 변경을 만들지 않는다' {
     foreach ($case in @(Get-DuoForgeInteractionAbortCases)) {
         $before = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
         $control = [ordered]@{ decision = 0 }
         $keyInput = New-DuoForgeInteractionTestKeyReader -Keys @($case.keys)
-        $interaction = & $module {
+        $output = @(& $module {
             param($state, $keyReader, $workspace)
             $decisionInvoker = {
                 param($runId, $issueId, $action, $resultsRoot, $confirmPartial)
@@ -513,10 +513,10 @@ Test-Case 'CLI DEFER 확인의 Esc/B/Q/Ctrl+C/오타는 답변 기록과 영구 
                 throw '이탈 경로에서 보류 답변을 기록하면 안 됩니다.'
             }.GetNewClosure()
             Invoke-DuoForgeCliCoreInternal -Arguments @('defer', '--run', 'synthetic-run', '--issue', 'D-001', '--workspace', $workspace) -DecisionInvoker $decisionInvoker -InteractiveHostProbe { $true } -ConfirmationKeyReader $keyReader -ConfirmationCapabilityProbe { $true } -ConfirmationFrameWriter { param($lines) } 6>$null
-        } $control $keyInput.reader $tempRoot
+        } $control $keyInput.reader $tempRoot)
         $after = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
-        Assert-Equal $interaction.action $case.expectedAction "$($case.name)의 DEFER action이 다릅니다."
-        Assert-Equal $interaction.returnTarget 'shell' "$($case.name)의 DEFER 복귀 위치가 다릅니다."
+        $interactions = @($output | Where-Object { $_ -is [System.Collections.IDictionary] -and $_.Contains('action') })
+        Assert-Equal $interactions.Count 0 "$($case.name)의 DEFER 취소 interaction이 성공 출력에 노출되었습니다."
         Assert-Equal $control.decision 0 "$($case.name)에서 보류 답변 invoker가 호출되었습니다."
         Assert-Equal $keyInput.state.reads $case.expectedReads "$($case.name)의 DEFER 합성 키 소비 수가 다릅니다."
         Assert-Equal $keyInput.state.remaining 0
@@ -620,7 +620,7 @@ Test-Case 'PARTIAL/ROUND/APPLY/DEFER 줄 입력 폴백은 ReturnTarget과 mutati
                     }
                     'round' { return Invoke-DuoForgeInteractiveRoundConfirmationInternal -Run $runValue -InputReader $reader -RoundInvoker $mutationInvoker 6>$null }
                     'apply' { return Invoke-DuoForgeInteractiveApplyBoundaryInternal -Boundary supplement -Run $runValue -IssueId 'D-001' -Text 'B' -InputReader $reader -ConstraintInvoker $mutationInvoker 6>$null }
-                    'defer' { return Invoke-DuoForgeCliCoreInternal -Arguments @('defer', '--run', 'synthetic-run', '--issue', 'D-001', '--workspace', $workspace) -InputReader $reader -DecisionInvoker $mutationInvoker -InteractiveHostProbe { $true } 6>$null }
+                    'defer' { return Read-DuoForgeExactConfirmationInternal -Token 'DEFER' -Prompt '확인' -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -InputReader $reader 6>$null }
                 }
             } $fixture.run $boundary $control $lineInput.reader $tempRoot
             $after = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
@@ -646,7 +646,7 @@ Test-Case 'ROUND/APPLY/DEFER 리디렉션은 입력과 mutation 없이 unavailab
             switch ($boundaryValue) {
                 'round' { return Invoke-DuoForgeInteractiveRoundConfirmationInternal -Run $runValue -RoundInvoker $mutationInvoker -ConfirmationCapabilityProbe $redirected 6>$null }
                 'apply' { return Invoke-DuoForgeInteractiveApplyBoundaryInternal -Boundary common -Run $runValue -IssueId 'D-001' -Text 'Q' -ConstraintInvoker $mutationInvoker -ConfirmationCapabilityProbe $redirected 6>$null }
-                'defer' { return Invoke-DuoForgeCliCoreInternal -Arguments @('defer', '--run', 'synthetic-run', '--issue', 'D-001', '--workspace', $workspace) -DecisionInvoker $mutationInvoker -InteractiveHostProbe { $true } -ConfirmationCapabilityProbe $redirected 6>$null }
+                'defer' { return Read-DuoForgeExactConfirmationInternal -Token 'DEFER' -Prompt '확인' -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -CapabilityProbe $redirected 6>$null }
             }
         } $fixture.run $boundary $control $tempRoot
         $after = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
@@ -675,7 +675,7 @@ Test-Case 'PARTIAL/ROUND/APPLY/DEFER 오타는 같은 확인 화면에 정확 �
                 }
                 'round' { return Invoke-DuoForgeInteractiveRoundConfirmationInternal -Run $runValue -RoundInvoker $mutationInvoker -ConfirmationKeyReader $reader -ConfirmationCapabilityProbe { $true } -ConfirmationFrameWriter $frameWriter 6>$null }
                 'apply' { return Invoke-DuoForgeInteractiveApplyBoundaryInternal -Boundary answer -Run $runValue -IssueId 'D-001' -Text 'B' -DecisionInvoker $mutationInvoker -ConfirmationKeyReader $reader -ConfirmationCapabilityProbe { $true } -ConfirmationFrameWriter $frameWriter 6>$null }
-                'defer' { return Invoke-DuoForgeCliCoreInternal -Arguments @('defer', '--run', 'synthetic-run', '--issue', 'D-001', '--workspace', $workspace) -DecisionInvoker $mutationInvoker -InteractiveHostProbe { $true } -ConfirmationKeyReader $reader -ConfirmationCapabilityProbe { $true } -ConfirmationFrameWriter $frameWriter 6>$null }
+                'defer' { return Read-DuoForgeExactConfirmationInternal -Token 'DEFER' -Prompt '확인' -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -KeyReader $reader -CapabilityProbe { $true } -FrameWriter $frameWriter 6>$null }
             }
         } $fixture.run $boundary $control $keyInput.reader $tempRoot
         $after = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
@@ -937,11 +937,11 @@ Test-Case 'CLI abandon, restore, delete는 확인 이탈을 보존하고 정확�
     $before = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
 
     $cancelReader = (New-DuoForgeInteractionTestLineReader -Values @('Q')).reader
-    $cancelled = & $module {
+    $cancelled = @(& $module {
         param($runId, $root, $reader, $invoker)
         Invoke-DuoForgeCliCoreInternal -Arguments @('abandon', '--run', $runId, '--workspace', $root) -InputReader $reader -AbandonInvoker $invoker -InteractiveHostProbe { $true } 6>$null
-    } ([string]$fixture.run.state.runId) $fixture.workspace $cancelReader $abandonInvoker
-    Assert-Equal $cancelled.action 'cancel'
+    } ([string]$fixture.run.state.runId) $fixture.workspace $cancelReader $abandonInvoker)
+    Assert-Equal (@($cancelled | Where-Object { $_ -is [System.Collections.IDictionary] -and $_.Contains('action') }).Count) 0
     Assert-Equal $calls.abandon 0
     Assert-Equal (Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot) $before
 
@@ -971,11 +971,11 @@ Test-Case 'CLI abandon, restore, delete는 확인 이탈을 보존하고 정확�
 
     $beforeRestore = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
     $restoreCancelReader = (New-DuoForgeInteractionTestLineReader -Values @('Q')).reader
-    $cancelledRestore = & $module {
+    $cancelledRestore = @(& $module {
         param($runId, $root, $reader, $restore, $resume)
         Invoke-DuoForgeCliCoreInternal -Arguments @('restore', '--run', $runId, '--workspace', $root) -InputReader $reader -RestoreInvoker $restore -ResumeInvoker $resume -InteractiveHostProbe { $true } 6>$null
-    } ([string]$fixture.run.state.runId) $fixture.workspace $restoreCancelReader $restoreInvoker $resumeInvoker
-    Assert-Equal $cancelledRestore.action 'cancel'
+    } ([string]$fixture.run.state.runId) $fixture.workspace $restoreCancelReader $restoreInvoker $resumeInvoker)
+    Assert-Equal (@($cancelledRestore | Where-Object { $_ -is [System.Collections.IDictionary] -and $_.Contains('action') }).Count) 0
     Assert-Equal $calls.restore 0
     Assert-Equal $calls.resume 0
     Assert-Equal (Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot) $beforeRestore
@@ -1016,11 +1016,11 @@ Test-Case 'CLI abandon, restore, delete는 확인 이탈을 보존하고 정확�
 
     $beforeDelete = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
     $deleteCancelReader = (New-DuoForgeInteractionTestLineReader -Values @('B')).reader
-    $cancelledDelete = & $module {
+    $cancelledDelete = @(& $module {
         param($runId, $root, $reader, $invoker)
         Invoke-DuoForgeCliCoreInternal -Arguments @('delete', '--run', $runId, '--workspace', $root) -InputReader $reader -DeleteInvoker $invoker -InteractiveHostProbe { $true } 6>$null
-    } ([string]$fixture.run.state.runId) $fixture.workspace $deleteCancelReader $deleteInvoker
-    Assert-Equal $cancelledDelete.action 'back'
+    } ([string]$fixture.run.state.runId) $fixture.workspace $deleteCancelReader $deleteInvoker)
+    Assert-Equal (@($cancelledDelete | Where-Object { $_ -is [System.Collections.IDictionary] -and $_.Contains('action') }).Count) 0
     Assert-Equal $calls.delete 0
     Assert-Equal (Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot) $beforeDelete
 
@@ -1152,6 +1152,140 @@ Test-Case '홈의 빈 진행/완료/포기 분류를 실제 선택해도 안내 
     }
 }
 
+Test-Case '홈과 작업 제어기는 interaction 객체를 성공 출력으로 노출하지 않는다' {
+    $fixture = New-DuoForgeInteractionTestRun -Name 'controller-success-output'
+    $runRecord = [ordered]@{
+        runId = [string]$fixture.run.state.runId
+        name = '합성 작업'
+        mode = 'shared-document'
+        status = [string]$fixture.run.state.status
+        updatedAt = ''
+        runDirectory = [string]$fixture.run.runDirectory
+    }
+
+    $workBackState = [ordered]@{ homeCalls = 0 }
+    $workBackMenu = {
+        param($items, $title, $initialSelectedIndex, $returnTarget)
+        if ($title -eq 'DuoForge') {
+            $workBackState.homeCalls++
+            $value = if ($workBackState.homeCalls -eq 1) { '2' } else { 'exit' }
+            return [ordered]@{ action = 'submit'; value = $value; source = 'key'; returnTarget = $returnTarget }
+        }
+        if ($title -eq '작업을 선택해 주세요.') { return [ordered]@{ action = 'submit'; value = '0'; source = 'key'; returnTarget = $returnTarget } }
+        if ($title -eq '다음 동작') { return [ordered]@{ action = 'back'; value = $null; source = 'key'; returnTarget = $returnTarget } }
+        throw "예상하지 않은 메뉴입니다: $title"
+    }.GetNewClosure()
+    $workBackOutput = @(& $module {
+        param($record, $menu)
+        $runsInvoker = { @($record) }.GetNewClosure()
+        Invoke-DuoForgeInteractiveHome -SetupInvoker { [ordered]@{ readyForDocumentModes = $true } } -RunsInvoker $runsInvoker -MenuInvoker $menu 6>$null
+    } $runRecord $workBackMenu)
+
+    $newBackState = [ordered]@{ homeCalls = 0 }
+    $newBackMenu = {
+        param($items, $title, $initialSelectedIndex, $returnTarget)
+        if ($title -eq 'DuoForge') {
+            $newBackState.homeCalls++
+            $value = if ($newBackState.homeCalls -eq 1) { '1' } else { 'exit' }
+            return [ordered]@{ action = 'submit'; value = $value; source = 'key'; returnTarget = $returnTarget }
+        }
+        if ($title -eq '무엇을 하시겠습니까?') { return [ordered]@{ action = 'back'; value = $null; source = 'key'; returnTarget = $returnTarget } }
+        throw "예상하지 않은 메뉴입니다: $title"
+    }.GetNewClosure()
+    $newBackOutput = @(& $module {
+        param($menu)
+        Invoke-DuoForgeInteractiveHome -SetupInvoker { [ordered]@{ readyForDocumentModes = $true } } -RunsInvoker { @() } -MenuInvoker $menu 6>$null
+    } $newBackMenu)
+
+    $liveCancelState = [ordered]@{ homeCalls = 0; workCalls = 0 }
+    $liveCancelMenu = {
+        param($items, $title, $initialSelectedIndex, $returnTarget)
+        if ($title -eq 'DuoForge') {
+            $liveCancelState.homeCalls++
+            $value = if ($liveCancelState.homeCalls -eq 1) { '2' } else { 'exit' }
+            return [ordered]@{ action = 'submit'; value = $value; source = 'key'; returnTarget = $returnTarget }
+        }
+        if ($title -eq '작업을 선택해 주세요.') { return [ordered]@{ action = 'submit'; value = '0'; source = 'key'; returnTarget = $returnTarget } }
+        if ($title -eq '다음 동작') {
+            $liveCancelState.workCalls++
+            if ($liveCancelState.workCalls -eq 1) { return [ordered]@{ action = 'submit'; value = 'R'; source = 'key'; returnTarget = $returnTarget } }
+            return [ordered]@{ action = 'back'; value = $null; source = 'key'; returnTarget = $returnTarget }
+        }
+        throw "예상하지 않은 메뉴입니다: $title"
+    }.GetNewClosure()
+    $liveCancelOutput = @(& $module {
+        param($record, $menu)
+        $runsInvoker = { @($record) }.GetNewClosure()
+        Invoke-DuoForgeInteractiveHome -SetupInvoker { [ordered]@{ readyForDocumentModes = $true } } -RunsInvoker $runsInvoker -InputReader { param($prompt) 'Q' } -MenuInvoker $menu 6>$null
+    } $runRecord $liveCancelMenu)
+
+    $homeExitOutput = @(& $module {
+        $homeInvoker = {
+            Invoke-DuoForgeInteractiveHome `
+                -SetupInvoker { [ordered]@{ readyForDocumentModes = $true } } `
+                -RunsInvoker { @() } `
+                -InputReader { param($prompt) 'Q' }
+        }
+        Invoke-DuoForgeCliCoreInternal -Arguments $null -InteractiveHostProbe { $true } -InteractiveHomeInvoker $homeInvoker 6>$null
+    })
+
+    $deferOutput = @(& $module {
+        param($workspace)
+        $decisionInvoker = { throw '취소 경로에서 보류 답변을 기록하면 안 됩니다.' }
+        Invoke-DuoForgeCliCoreInternal -Arguments @('defer', '--run', 'synthetic-run', '--issue', 'D-001', '--workspace', $workspace) -InputReader { param($prompt) 'Q' } -DecisionInvoker $decisionInvoker -InteractiveHostProbe { $true } 6>$null
+    } $tempRoot)
+
+    foreach ($case in @(
+        [ordered]@{ name = '홈 -> 작업 -> 뒤로 -> 홈 종료'; output = $workBackOutput }
+        [ordered]@{ name = '홈 -> 새 작업 -> 뒤로 -> 홈 종료'; output = $newBackOutput }
+        [ordered]@{ name = '홈 -> 작업 -> LIVE 취소 -> 뒤로 -> 홈 종료'; output = $liveCancelOutput }
+        [ordered]@{ name = '무인자 CLI -> 홈 Q 종료'; output = $homeExitOutput }
+        [ordered]@{ name = '명시적 CLI DEFER 취소'; output = $deferOutput }
+    )) {
+        $interactions = @($case.output | Where-Object { $_ -is [System.Collections.IDictionary] -and $_.Contains('action') })
+        Assert-Equal $interactions.Count 0 "$($case.name) 성공 출력에 interaction 객체가 노출되었습니다."
+    }
+}
+
+Test-Case '실제 작업 상세 ContextTransition 메뉴는 높이 24행 이상에서 푸터 앞 빈 행을 둔다' {
+    $fixture = New-DuoForgeInteractionTestRun -Name 'work-menu-transition-spacing'
+    $capture = [ordered]@{ items = @(); title = '' }
+    $menuInvoker = {
+        param($items, $title, $initialSelectedIndex, $returnTarget)
+        $capture.items = @($items)
+        $capture.title = [string]$title
+        return [ordered]@{ action = 'back'; value = $null; source = 'key'; returnTarget = $returnTarget }
+    }.GetNewClosure()
+    $null = & $module {
+        param($runValue, $menu)
+        Invoke-DuoForgeInteractiveRun -RunRecord ([ordered]@{ runId = [string]$runValue.state.runId; runDirectory = [string]$runValue.runDirectory }) -MenuInvoker $menu 6>$null
+    } $fixture.run $menuInvoker
+
+    Assert-Equal $capture.title '다음 동작'
+    $frames = & $module {
+        param($items, $title)
+        $result = [ordered]@{}
+        $normalizedItems = @(ConvertTo-DuoForgeMenuItemsInternal -Items $items)
+        foreach ($size in @(@(72, 20), @(80, 24), @(100, 30), @(120, 32))) {
+            $width = [int]$size[0]
+            $height = [int]$size[1]
+            $result["${width}x${height}"] = @(New-DuoForgeMenuFrameInternal -Items $normalizedItems -Title $title -Width $width -Height $height -ContextTransition)
+        }
+        return $result
+    } $capture.items $capture.title
+    foreach ($size in @(@(72, 20), @(80, 24), @(100, 30), @(120, 32))) {
+        $width = [int]$size[0]
+        $height = [int]$size[1]
+        $lines = @($frames["${width}x${height}"])
+        if ($height -le 23) {
+            Assert-False ([string]::IsNullOrWhiteSpace([string]$lines[-2])) "${width}x${height} compact 작업 메뉴의 푸터 앞 압축이 유지되지 않았습니다."
+        }
+        else {
+            Assert-Equal ([string]$lines[-2]) '' "${width}x${height} 작업 메뉴의 마지막 항목과 푸터 사이 빈 행이 없습니다."
+        }
+    }
+}
+
 Test-Case '레거시 메뉴 호출부는 실패 action별 화면 복귀 위치를 구조화 seam에 고정한다' {
     $fixture = New-DuoForgeInteractionTestRun -Name 'legacy-menu-targets'
     $selectionOptions = [ordered]@{
@@ -1221,6 +1355,8 @@ Test-Case '표시된 이전 행의 Enter와 B 단축키는 같은 back 결과를
 Test-Case '레거시 EscapeValue와 화면별 magic string 메뉴 어댑터는 제품 코드에 남지 않는다' {
     $menuSource = Get-Content -LiteralPath (Join-Path $projectRoot 'src\DuoForge\Private\13.MenuView.ps1') -Raw
     $interactionSource = Get-Content -LiteralPath (Join-Path $projectRoot 'src\DuoForge\Private\13.Interaction.ps1') -Raw
+    $interactiveControllerSource = Get-Content -LiteralPath (Join-Path $projectRoot 'src\DuoForge\Private\14.Interactive.ps1') -Raw
+    $cliControllerSource = Get-Content -LiteralPath (Join-Path $projectRoot 'src\DuoForge\Public\Cli.ps1') -Raw
     $productSources = @(
         'src\DuoForge\Private\08.ModelSelection.ps1'
         'src\DuoForge\Private\11.RecentPaths.ps1'
@@ -1233,6 +1369,12 @@ Test-Case '레거시 EscapeValue와 화면별 magic string 메뉴 어댑터는 �
     Assert-NotContainsText ($productSources -join "`n") 'Invoke-DuoForgeMenuInternal'
     Assert-NotContainsText $interactionSource 'back-to-question'
     Assert-NotContainsText $interactionSource "& `$MenuInvoker `$Items `$Title 'back'"
+    Assert-ContainsText $interactiveControllerSource '$null = Invoke-DuoForgeInteractiveLiveResume -Run $run'
+    Assert-ContainsText $interactiveControllerSource '$null = Invoke-DuoForgeInteractiveNew -InputReader $InputReader'
+    Assert-ContainsText $interactiveControllerSource '$null = Invoke-DuoForgeInteractiveRun -RunRecord $selected'
+    Assert-NotContainsText $cliControllerSource 'return $confirmation'
+    Assert-NotContainsText $cliControllerSource 'return $partialConfirmation.interaction'
+    Assert-NotContainsText $cliControllerSource 'return $creation.interaction'
 }
 
 Test-Case '직접 Read-Host와 원시 ReadKey는 공통 interaction 저수준 경계에만 남는다' {

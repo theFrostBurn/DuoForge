@@ -1864,7 +1864,7 @@ function Invoke-DuoForgeInteractiveRun {
             if ($null -ne $decisionChangeResult -and [string](Get-DuoForgeObjectValue -Object $decisionChangeResult -Name 'returnTarget') -eq 'work-menu') { continue }
             continue
         }
-        if ($choice -ieq 'R' -and $pendingQuestionCount -eq 0 -and [string]$run.state.status -notin @('AWAITING_EVIDENCE') -and [string]$run.state.status -notin $terminalStates) { Invoke-DuoForgeInteractiveLiveResume -Run $run -InputReader $InputReader; continue }
+        if ($choice -ieq 'R' -and $pendingQuestionCount -eq 0 -and [string]$run.state.status -notin @('AWAITING_EVIDENCE') -and [string]$run.state.status -notin $terminalStates) { $null = Invoke-DuoForgeInteractiveLiveResume -Run $run -InputReader $InputReader; continue }
         if ($choice -ieq 'P' -and [string]$run.state.status -notin @('PAUSED_USER', 'COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED')) {
             $pause = Request-DuoForgePauseInternal -RunId ([string]$run.state.runId) -ResultsRoot $resultsRoot
             if ($pause.alreadyRequested) { Write-DuoForgeTextInternal ('이미 일시정지가 요청되어 있습니다: {0}' -f $pause.requestId) }
@@ -1924,7 +1924,7 @@ function Invoke-DuoForgeInteractiveHome {
             [ordered]@{ value = '5'; label = '실행 환경 확인, 로그인 및 설정'; shortcuts = @('5'); enabled = $true }
             [ordered]@{ value = 'exit'; label = '종료'; shortcuts = @('Q'); enabled = $true }
         )
-        if ([string]$choiceInteraction.action -ne 'submit') { return $choiceInteraction }
+        if ([string]$choiceInteraction.action -ne 'submit') { return }
         $choice = [string]$choiceInteraction.value
         switch -Regex ($choice) {
             '^(1)$' {
@@ -1932,7 +1932,7 @@ function Invoke-DuoForgeInteractiveHome {
                     $setupReport = & $invokeSetup $false
                     if (-not [bool]$setupReport.readyForDocumentModes) { Write-DuoForgeTextInternal '두 구독 실행 환경이 준비되기 전에는 새 작업을 시작할 수 없습니다.' -ForegroundColor Yellow; continue }
                 }
-                Invoke-DuoForgeInteractiveNew -InputReader $InputReader -MenuInvoker $MenuInvoker
+                $null = Invoke-DuoForgeInteractiveNew -InputReader $InputReader -MenuInvoker $MenuInvoker
             }
             '^(2|3|4)$' {
                 if ($runs.Count -eq 0) { Write-DuoForgeTextInternal '저장된 실행이 없습니다.'; continue }
@@ -1949,7 +1949,7 @@ function Invoke-DuoForgeInteractiveHome {
                     continue
                 }
                 $selected = Select-DuoForgeInteractiveRun -Runs $candidates -Prompt '작업을 선택해 주세요.' -InputReader $InputReader -MenuInvoker $MenuInvoker
-                if ($null -ne $selected) { Invoke-DuoForgeInteractiveRun -RunRecord $selected -InputReader $InputReader -MenuInvoker $MenuInvoker }
+                if ($null -ne $selected) { $null = Invoke-DuoForgeInteractiveRun -RunRecord $selected -InputReader $InputReader -MenuInvoker $MenuInvoker }
             }
             '^(5)$' {
                 $setupReport = & $invokeSetup $true

@@ -22,8 +22,8 @@ function Invoke-DuoForgeCliCoreInternal {
     $isInteractive = { if ($null -ne $InteractiveHostProbe) { return [bool](& $InteractiveHostProbe) }; return [bool](Test-DuoForgeInteractiveHost) }
     if ($Arguments.Count -eq 0) {
         if (& $isInteractive) {
-            if ($null -ne $InteractiveHomeInvoker) { & $InteractiveHomeInvoker }
-            else { Invoke-DuoForgeInteractiveHome }
+            if ($null -ne $InteractiveHomeInvoker) { $null = & $InteractiveHomeInvoker }
+            else { $null = Invoke-DuoForgeInteractiveHome }
         }
         else {
             Write-DuoForgeHelp
@@ -203,7 +203,7 @@ function Invoke-DuoForgeCliCoreInternal {
                 $confirmation = Read-DuoForgeExactConfirmationInternal -Token 'DEFER' -Prompt '반드시 확인할 내용을 보류하면 일부 범위만 완료됩니다. DEFER를 입력하세요' -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -InputReader $InputReader -KeyReader $ConfirmationKeyReader -FrameWriter $ConfirmationFrameWriter -CapabilityProbe $ConfirmationCapabilityProbe
                 $confirmed = [string]$confirmation.action -eq 'submit'
             }
-            if (-not $confirmed) { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '보류를 적용하지 않았습니다.' -Message '답변·파일·단계 상태를 변경하지 않았습니다.' -Layout $layout) -Layout $layout; return $confirmation }
+            if (-not $confirmed) { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '보류를 적용하지 않았습니다.' -Message '답변·파일·단계 상태를 변경하지 않았습니다.' -Layout $layout) -Layout $layout; return }
             $workspace = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')
             $result = if ($null -ne $DecisionInvoker) {
                 & $DecisionInvoker $runId $issueId 'defer' $workspace $true
@@ -243,7 +243,7 @@ function Invoke-DuoForgeCliCoreInternal {
                 $confirmation = Read-DuoForgeExactConfirmationInternal -Token 'ABANDON' -Prompt '작업을 포기하려면 ABANDON을 입력하세요' -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -InputReader $InputReader -KeyReader $ConfirmationKeyReader -FrameWriter $ConfirmationFrameWriter -CapabilityProbe $ConfirmationCapabilityProbe
                 $confirmed = [string]$confirmation.action -eq 'submit'
             }
-            if (-not $confirmed) { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '작업을 포기하지 않았습니다.' -Message '작업 상태와 저장 파일을 변경하지 않았습니다.' -Layout $layout) -Layout $layout; return $confirmation }
+            if (-not $confirmed) { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '작업을 포기하지 않았습니다.' -Message '작업 상태와 저장 파일을 변경하지 않았습니다.' -Layout $layout) -Layout $layout; return }
             $result = if ($null -ne $AbandonInvoker) { & $AbandonInvoker $runId $workspace } else { Abandon-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace }
             $layout = Get-DuoForgeDisplayLayoutInternal
             Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '작업을 포기했습니다.' -Message '문서 사본과 작업 기록은 보존되며 포기한 작업 관리에서 영구 삭제할 수 있습니다.' -Layout $layout) -Layout $layout
@@ -272,7 +272,7 @@ function Invoke-DuoForgeCliCoreInternal {
                 $confirmation = Read-DuoForgeExactConfirmationInternal -Token 'RESTORE' -Prompt '포기한 작업을 복원하려면 RESTORE를 입력하세요' -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -InputReader $InputReader -KeyReader $ConfirmationKeyReader -FrameWriter $ConfirmationFrameWriter -CapabilityProbe $ConfirmationCapabilityProbe
                 $confirmed = [string]$confirmation.action -eq 'submit'
             }
-            if (-not $confirmed) { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '작업을 복원하지 않았습니다.' -Message '작업 상태와 저장 파일을 변경하지 않았습니다.' -Layout $layout) -Layout $layout; return $confirmation }
+            if (-not $confirmed) { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '작업을 복원하지 않았습니다.' -Message '작업 상태와 저장 파일을 변경하지 않았습니다.' -Layout $layout) -Layout $layout; return }
             $result = if ($null -ne $RestoreInvoker) { & $RestoreInvoker $runId $workspace } else { Restore-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace }
             $layout = Get-DuoForgeDisplayLayoutInternal
             Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '작업을 복원했습니다.' -Message '사용자 요청으로 멈춘 상태로 돌아갔습니다. AI 작업은 시작하지 않았습니다.' -NextAction '내용을 확인한 뒤 resume 명령으로 직접 이어가 주세요.' -Layout $layout) -Layout $layout
@@ -297,7 +297,7 @@ function Invoke-DuoForgeCliCoreInternal {
                 $confirmation = Read-DuoForgeExactConfirmationInternal -Token 'DELETE' -Prompt '작업과 모든 저장 파일을 영구 삭제하려면 DELETE를 입력하세요' -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -InputReader $InputReader -KeyReader $ConfirmationKeyReader -FrameWriter $ConfirmationFrameWriter -CapabilityProbe $ConfirmationCapabilityProbe
                 $confirmed = [string]$confirmation.action -eq 'submit'
             }
-            if (-not $confirmed) { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '작업을 삭제하지 않았습니다.' -Message '작업 상태와 저장 파일을 변경하지 않았습니다.' -Layout $layout) -Layout $layout; return $confirmation }
+            if (-not $confirmed) { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '작업을 삭제하지 않았습니다.' -Message '작업 상태와 저장 파일을 변경하지 않았습니다.' -Layout $layout) -Layout $layout; return }
             $result = if ($null -ne $DeleteInvoker) { & $DeleteInvoker $runId $workspace } else { Remove-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace }
             $layout = Get-DuoForgeDisplayLayoutInternal
             Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '작업을 영구 삭제했습니다.' -Message '이 작업의 저장 파일은 복구할 수 없습니다.' -Layout $layout) -Layout $layout
@@ -407,7 +407,7 @@ function Invoke-DuoForgeCliCoreInternal {
             if ($null -ne $partialConfirmation.interaction -and [string]$partialConfirmation.interaction.action -ne 'submit') {
                 $layout = Get-DuoForgeDisplayLayoutInternal
                 Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '부분 분석 동의를 적용하지 않았습니다.' -Message '새 작업, 문서 사본 또는 실행 기록을 만들지 않았습니다.' -Layout $layout) -Layout $layout
-                return $partialConfirmation.interaction
+                return
             }
             if (-not $validation.valid) { Write-DuoForgeValidationErrors -Validation $validation; throw (New-DuoForgeException -Code 'DF-START-BLOCKED' -Message '실행 전 검증에 실패했습니다.') }
             Write-DuoForgeExecutionPlan -Validation $validation
@@ -416,7 +416,7 @@ function Invoke-DuoForgeCliCoreInternal {
                 throw (New-DuoForgeException -Code 'DF-CONFIRM-NONINTERACTIVE' -Message '새 작업을 만들기 전에 대화형 사용자 확인이 필요합니다. 비대화형 환경에서는 --plan-only를 사용해 주세요.')
             }
             $creation = Invoke-DuoForgeRunCreationBoundaryInternal -Validation $validation -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -InputReader $InputReader -RunInvoker $RunInvoker -ConfirmationKeyReader $ConfirmationKeyReader -ConfirmationFrameWriter $ConfirmationFrameWriter -ConfirmationCapabilityProbe $ConfirmationCapabilityProbe
-            if ([string]$creation.interaction.action -ne 'submit') { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '작업 생성을 취소했습니다.' -Message '문서 사본과 작업 기록을 만들지 않았습니다.' -Layout $layout) -Layout $layout; return $creation.interaction }
+            if ([string]$creation.interaction.action -ne 'submit') { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '작업 생성을 취소했습니다.' -Message '문서 사본과 작업 기록을 만들지 않았습니다.' -Layout $layout) -Layout $layout; return }
             $run = $creation.run
             $run | ConvertTo-Json -Depth 20
             return

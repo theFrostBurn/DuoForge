@@ -282,7 +282,7 @@ function New-DuoForgeMenuFrameRowsInternal {
     $layout = Get-DuoForgeDisplayLayoutInternal -Width $Width -Height $Height -Ascii:$Ascii -NoColor
     $rows = [System.Collections.Generic.List[object]]::new()
     if (-not [string]::IsNullOrWhiteSpace($Title)) {
-        foreach ($row in @(New-DuoForgePageHeaderRowsInternal -Title $Title -Layout $layout -NoTrailingSpacer:([bool]$layout.compact))) { $rows.Add($row) }
+        foreach ($row in @(New-DuoForgePageHeaderRowsInternal -Title $Title -Layout $layout -NoTrailingSpacer:([bool]$layout.compact -or $ContextTransition))) { $rows.Add($row) }
     }
     if ($Items.Count -eq 0) {
         foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind info -Title '선택할 수 있는 항목이 없습니다.' -Layout $layout)) { $rows.Add($row) }
@@ -321,7 +321,7 @@ function New-DuoForgeMenuFrameRowsInternal {
         foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title $Message -Layout $layout)) { $rows.Add($row) }
     }
     if (-not [string]::IsNullOrWhiteSpace($Footer)) {
-        if (-not [bool]$layout.compact -and -not $ContextTransition) { $rows.Add((New-DuoForgeDisplayRowInternal -Text '' -Role 'spacer')) }
+        if (-not [bool]$layout.compact) { $rows.Add((New-DuoForgeDisplayRowInternal -Text '' -Role 'spacer')) }
         foreach ($row in @(New-DuoForgeTextRowsInternal -Text $Footer -Layout $layout -MaximumLines 2 -Role 'meta')) { $rows.Add($row) }
     }
     return @($rows)

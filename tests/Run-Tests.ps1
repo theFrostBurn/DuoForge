@@ -812,18 +812,29 @@ try {
                 [ordered]@{ value = '1'; label = '첫 번째 선택'; detail = '작은 화면에서도 이 설명은 한 행까지만 사용합니다.'; shortcuts = @('1'); enabled = $true }
                 [ordered]@{ value = 'B'; label = '이전으로'; shortcuts = @('B'); enabled = $true }
             ))
+            $transitionMenus = [ordered]@{}
+            foreach ($height in @(20, 23, 24, 32)) {
+                $transitionMenus[[string]$height] = @(New-DuoForgeMenuFrameInternal -Items $items -Title '다음 메뉴' -Width 72 -Height $height -ContextTransition)
+            }
             [ordered]@{
                 once = @($once | ForEach-Object { [string]$_.text })
                 twice = @($twice | ForEach-Object { [string]$_.text })
                 regularMenu = @(New-DuoForgeMenuFrameInternal -Items $items -Title '다음 메뉴' -Width 72 -Height 20)
-                transitionMenu = @(New-DuoForgeMenuFrameInternal -Items $items -Title '다음 메뉴' -Width 72 -Height 20 -ContextTransition)
+                transitionMenus = $transitionMenus
             }
         }
 
         Assert-Equal $surface.once.Count 2
         Assert-Equal ([string]$surface.once[-1]) ''
         Assert-Equal $surface.twice.Count 2 '이미 있는 전환 여백이 중복 추가되었습니다.'
-        Assert-True ($surface.transitionMenu.Count -le $surface.regularMenu.Count) '작은 화면의 전환 메뉴가 기존 메뉴보다 커졌습니다.'
+        foreach ($height in @(20, 23)) {
+            $menu = @($surface.transitionMenus[[string]$height])
+            Assert-False ([string]::IsNullOrWhiteSpace([string]$menu[-2])) "72x$height compact 전환 메뉴의 푸터 앞 압축이 유지되지 않았습니다."
+        }
+        foreach ($height in @(24, 32)) {
+            $menu = @($surface.transitionMenus[[string]$height])
+            Assert-Equal ([string]$menu[-2]) '' "72x$height 전환 메뉴의 마지막 항목과 푸터 사이 빈 행이 없습니다."
+        }
     }
 
     Test-Case '공통 interaction 결과는 정확 확인과 자유 입력의 B/Q를 분리한다' {
@@ -4917,7 +4928,7 @@ try {
                 $height = [int]$size[1]
                 $card = @(New-DuoForgeInteractiveQuestionCardRowsInternal -Question $question -Presentation $presentation -Width $width -Height $height | ForEach-Object { [string]$_.text })
                 $detail = @(New-DuoForgeInteractiveQuestionDetailRowsInternal -Question $question -Presentation $presentation -Issue $issue -Width $width | ForEach-Object { [string]$_.text })
-                $menu = @(New-DuoForgeMenuFrameInternal -Items $items -Title '선택 요청: 번호로 선택하거나 O로 내 의견을 입력해 주세요.' -SelectedIndex 0 -Width $width -Height $height)
+                $menu = @(New-DuoForgeMenuFrameInternal -Items $items -Title '선택 요청: 번호로 선택하거나 O로 내 의견을 입력해 주세요.' -SelectedIndex 0 -Width $width -Height $height -ContextTransition)
                 $lines = @($card + $menu)
                 [ordered]@{
                     width = $width
