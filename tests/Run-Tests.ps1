@@ -2550,7 +2550,7 @@ try {
         Assert-ContainsText ($rendered.active -join "`n") '답변 도착 · 형식 확인 중'
         Assert-ContainsText ($rendered.active -join "`n") 'P 현재 작업 후 멈추기'
         Assert-ContainsText ($rendered.pauseRequested -join "`n") '멈추기 요청됨 · 현재 AI 작업이 끝난 뒤 멈춥니다.'
-        Assert-ContainsText ($rendered.active -join "`n") '지금 작업 중  ⠼ Claude · 각자 초안 작성'
+        Assert-ContainsText ($rendered.active -join "`n") '지금 작업 중  ░░█░░ Claude · 각자 초안 작성'
         Assert-ContainsText ($rendered.active -join "`n") '작업 대상  문서 A'
         Assert-ContainsText ($rendered.active -join "`n") 'Codex · 2차 최종 확인 · 문서 B'
         Assert-ContainsText ($rendered.active -join "`n") '검증 요약'
@@ -2565,7 +2565,7 @@ try {
         Assert-False ([string]($rendered.unsafe -join "`n") -like "*`e*")
         Assert-Equal $rendered.actionSummary '새 검토 항목: 반드시 해결 1 · 중요 2 · 참고 3 | 검토 의견 처리: 수용 4 · 일부 수용 5 · 거부 6 | 문서 반영: 반영 7 · 일부 반영 8'
         Assert-Equal $rendered.sparseActionSummary '새 검토 항목: 중요 2 | 검토 의견 처리: 자료 필요 1 | 문서 반영: 미반영 1'
-        Assert-ContainsText ($rendered.waiting -join "`n") '지금 작업 중  ⠼ Claude · 각자 초안 작성 · 문서 A · 답변을 기다리는 중 00:04'
+        Assert-ContainsText ($rendered.waiting -join "`n") '지금 작업 중  ░░█░░ Claude · 각자 초안 작성 · 문서 A · 답변을 기다리는 중 00:04'
         Assert-ContainsText ($rendered.waiting -join "`n") 'Codex ✓  Claude ●'
         Assert-ContainsText ($rendered.active -join "`n") '확인할 내용  전체 단계 완료 후 집계'
         Assert-ContainsText ($rendered.retry -join "`n") '지금 작업 중  ↻ Codex · 문서 수정 · 문서 A · 답변 형식 다시 확인 대기'
@@ -2602,7 +2602,7 @@ try {
         Assert-True ($tampered.latestStepKey -ne $tampered.finalStepKey)
     }
 
-    Test-Case 'LIVE 개요와 상세 화면은 네 지원 크기에서 높이별 확장, 스피너와 단일 스크롤을 지킨다' {
+    Test-Case 'LIVE 개요와 상세 화면은 네 지원 크기에서 높이별 확장, heartbeat와 단일 스크롤을 지킨다' {
         $surface = & $module {
             $stages = @('independent-draft', 'cross-review', 'author-response', 'synthesis', 'final-validation', 'document-validation')
             $steps = [System.Collections.Generic.List[object]]::new()
@@ -2673,11 +2673,11 @@ try {
                 }
             }
 
-            $spinnerLines = [System.Collections.Generic.List[string]]::new()
-            foreach ($elapsed in 0..2) {
-                $view = [ordered]@{ screenMode = 'overview'; selectedCommittedIndex = -1; providerElapsedSeconds = $elapsed; unicodeSpinner = $true }
+            $heartbeatLines = [System.Collections.Generic.List[string]]::new()
+            foreach ($frameIndex in 0..2) {
+                $view = [ordered]@{ screenMode = 'overview'; selectedCommittedIndex = -1; providerElapsedSeconds = 0; providerHeartbeatFrameIndex = $frameIndex; unicodeSpinner = $true }
                 $frame = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 80 -Height 24 -ViewState $view)
-                $spinnerLines.Add([string](@($frame | Where-Object { [string]$_ -like '지금 작업 중*' })[0]))
+                $heartbeatLines.Add([string](@($frame | Where-Object { [string]$_ -like '지금 작업 중*' })[0]))
             }
             $asciiLayout = Get-DuoForgeDisplayLayoutInternal -Width 80 -Height 24 -Ascii -NoColor
             $asciiView = [ordered]@{ screenMode = 'overview'; selectedCommittedIndex = -1; providerElapsedSeconds = 2; unicodeSpinner = $false }
@@ -2722,10 +2722,11 @@ try {
 
             [ordered]@{
                 matrix = $matrix
-                spinnerLines = @($spinnerLines)
-                spinnerWidths = @($spinnerLines | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text $_ })
-                unicodeFrames = @(0..2 | ForEach-Object { Get-DuoForgeProgressSpinnerFrameInternal -ElapsedSeconds $_ })
-                asciiFrames = @(0..2 | ForEach-Object { Get-DuoForgeProgressSpinnerFrameInternal -ElapsedSeconds $_ -Ascii })
+                heartbeatLines = @($heartbeatLines)
+                heartbeatWidths = @($heartbeatLines | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text $_ })
+                unicodeFrames = @(0..2 | ForEach-Object { Get-DuoForgeProgressHeartbeatFrameInternal -FrameIndex $_ })
+                asciiFrames = @(0..2 | ForEach-Object { Get-DuoForgeProgressHeartbeatFrameInternal -FrameIndex $_ -Ascii })
+                activeColor = ConvertTo-DuoForgeProgressColoredLineInternal -Line ([string]$heartbeatLines[0])
                 asciiProgressText = $asciiProgressText
                 detailText = $detailFirst -join "`n"
                 detailRows = $detailFirst.Count
@@ -2767,11 +2768,12 @@ try {
             Assert-Equal $surface.matrix[$key].recordTransitionSpacers 2 "$key 최근 완료 항목 사이의 전환 여백이 없습니다."
             Assert-Equal $surface.matrix[$key].changeTransitionSpacers $surface.matrix[$key].changes "$key 요약과 변경 사항 사이의 전환 여백이 없습니다."
         }
-        Assert-Equal (@($surface.spinnerLines | Select-Object -Unique).Count) 3
-        Assert-Equal (@($surface.spinnerWidths | Select-Object -Unique).Count) 1
+        Assert-Equal (@($surface.heartbeatLines | Select-Object -Unique).Count) 3
+        Assert-Equal (@($surface.heartbeatWidths | Select-Object -Unique).Count) 1
         Assert-Equal (@($surface.unicodeFrames | Select-Object -Unique).Count) 3
         Assert-Equal (@($surface.asciiFrames | Select-Object -Unique).Count) 3
-        foreach ($frame in @($surface.unicodeFrames + $surface.asciiFrames)) { Assert-Equal (& $module { param($text) Get-DuoForgeProgressTextWidthInternal -Text $text } $frame) 1 }
+        foreach ($frame in @($surface.unicodeFrames + $surface.asciiFrames)) { Assert-Equal (& $module { param($text) Get-DuoForgeProgressTextWidthInternal -Text $text } $frame) 5 }
+        Assert-ContainsText $surface.activeColor "`e[1;33m"
         Assert-NotContainsText $surface.asciiProgressText "`e["
         foreach ($glyph in @('✓', '↑', '↓', '●', '◐', '○', '↻', '›', '█', '░', '──', '─')) { Assert-NotContainsText $surface.asciiProgressText $glyph }
         foreach ($token in @('OK', 'Up/Down', '#', '--')) { Assert-ContainsText $surface.asciiProgressText $token }
@@ -3109,17 +3111,17 @@ try {
         }
     }
 
-    Test-Case '공급자 프로세스 대기는 진행판 heartbeat를 초 단위로 전달한다' {
+    Test-Case '공급자 프로세스 대기는 진행판 heartbeat를 500ms 단위로 전달한다' {
         $ticks = [System.Collections.Generic.List[int]]::new()
         $processResult = & $module {
             param($tickList)
-            $onTick = { param($elapsed) $tickList.Add([int][Math]::Floor($elapsed.TotalSeconds)) }.GetNewClosure()
-            Invoke-DuoForgeProcess -CommandName 'pwsh.exe' -Arguments @('-NoLogo', '-NoProfile', '-Command', 'Start-Sleep -Milliseconds 1200') -TimeoutSeconds 5 -OnTick $onTick
+            $onTick = { param($elapsed) $tickList.Add([int][Math]::Floor($elapsed.TotalMilliseconds / 500)) }.GetNewClosure()
+            Invoke-DuoForgeProcess -CommandName 'pwsh.exe' -Arguments @('-NoLogo', '-NoProfile', '-Command', 'Start-Sleep -Milliseconds 1400') -TimeoutSeconds 5 -OnTick $onTick -TickIntervalMilliseconds 500
         } $ticks
         Assert-Equal $processResult.exitCode 0
-        Assert-True ($ticks.Count -ge 2)
+        Assert-True ($ticks.Count -ge 3)
         Assert-Equal $ticks[0] 0
-        Assert-True (1 -in @($ticks))
+        Assert-True (2 -in @($ticks))
     }
 
     Test-Case '실제 process tick은 provider callback과 진행판 writer까지 서로 다른 프레임을 전달한다' {
@@ -3130,23 +3132,23 @@ try {
             param($directory, $frameList)
             $writer = {
                 param($view)
-                $frameList.Add([string]$view.providerElapsedSeconds)
+                $frameList.Add([string]$view.providerHeartbeatFrameIndex)
             }.GetNewClosure()
             $view = New-DuoForgeProgressViewInternal -RunDirectory $directory -Mode log -FrameWriter $writer
             $view.mode = 'fullscreen'
             $tick = New-DuoForgeProviderTickCallbackInternal -Observer $view.observer -RunDirectory $directory -Data ([ordered]@{
                 workflowVersion = 'workflow-v2'; stepKey = 'progress-test'; provider = 'codex'; stage = 'document-review'; round = 1
             })
-            Invoke-DuoForgeProcess -CommandName 'pwsh.exe' -Arguments @('-NoLogo', '-NoProfile', '-Command', 'Start-Sleep -Milliseconds 2300') -TimeoutSeconds 5 -OnTick $tick
+            Invoke-DuoForgeProcess -CommandName 'pwsh.exe' -Arguments @('-NoLogo', '-NoProfile', '-Command', 'Start-Sleep -Milliseconds 2300') -TimeoutSeconds 5 -OnTick $tick -TickIntervalMilliseconds 500
         } $progressDirectory $frames
         Assert-Equal $result.exitCode 0
         Assert-Equal $result.tickCallbackFailures 0
         Assert-True ($frames.Count -ge 3)
-        $elapsedValues = @($frames | ForEach-Object { [int]$_ } | Sort-Object -Unique)
-        Assert-True ($elapsedValues.Count -ge 3)
-        $spinnerFrames = & $module { param($values) @($values | ForEach-Object { Get-DuoForgeProgressSpinnerFrameInternal -ElapsedSeconds $_ }) } $elapsedValues
-        Assert-True (@($spinnerFrames | Sort-Object -Unique).Count -ge 3)
-        foreach ($frame in @($spinnerFrames)) { Assert-Equal $frame.Length 1 }
+        $heartbeatIndexes = @($frames | ForEach-Object { [int]$_ } | Sort-Object -Unique)
+        Assert-True ($heartbeatIndexes.Count -ge 4)
+        $heartbeatFrames = & $module { param($values) @($values | ForEach-Object { Get-DuoForgeProgressHeartbeatFrameInternal -FrameIndex $_ }) } $heartbeatIndexes
+        Assert-True (@($heartbeatFrames | Sort-Object -Unique).Count -ge 3)
+        foreach ($frame in @($heartbeatFrames)) { Assert-Equal $frame.Length 5 }
     }
 
     Test-Case '진행판 frame writer 오류는 고정 코드 한 번만 남기고 로그 모드로 전환한다' {

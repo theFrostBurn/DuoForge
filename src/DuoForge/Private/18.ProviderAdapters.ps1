@@ -325,7 +325,10 @@ function Invoke-DuoForgeLiveProviderStage {
             EnvironmentOverrides = $providerContext.environmentOverrides
             CommandInvocation = $providerContext.invocation
         }
-        if ($null -ne $onTick) { $processArguments['OnTick'] = $onTick }
+        if ($null -ne $onTick) {
+            $processArguments['OnTick'] = $onTick
+            $processArguments['TickIntervalMilliseconds'] = 500
+        }
         $processResult = Invoke-DuoForgeProcess @processArguments
 
         if (-not $processResult.started -or $processResult.timedOut -or [int]$processResult.exitCode -ne 0) {
@@ -385,6 +388,7 @@ function New-DuoForgeProviderTickCallbackInternal {
         $tickData = [ordered]@{}
         foreach ($key in $Data.Keys) { $tickData[$key] = $Data[$key] }
         $tickData.elapsedSeconds = [int][Math]::Floor($elapsed.TotalSeconds)
+        $tickData.heartbeatFrameIndex = [int][Math]::Floor($elapsed.TotalMilliseconds / 500)
         try {
             & $observerCommand -Observer $Observer -Type 'PROVIDER_TICK' -RunDirectory $RunDirectory -Data $tickData -ThrowOnError
         }

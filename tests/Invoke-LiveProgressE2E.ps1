@@ -79,13 +79,13 @@ try {
         $initialViewMode = [string]$view.mode
         $requestPauseCommand = Get-Command -Name 'Request-DuoForgePauseInternal' -CommandType Function -ErrorAction Stop
         $getValueCommand = Get-Command -Name 'Get-DuoForgeObjectValue' -CommandType Function -ErrorAction Stop
-        $spinnerCommand = Get-Command -Name 'Get-DuoForgeProgressSpinnerFrameInternal' -CommandType Function -ErrorAction Stop
+        $heartbeatCommand = Get-Command -Name 'Get-DuoForgeProgressHeartbeatFrameInternal' -CommandType Function -ErrorAction Stop
         $forwardObserver = $view.observer
         $tickElapsed = [ordered]@{
             codex = [System.Collections.Generic.List[int]]::new()
             claude = [System.Collections.Generic.List[int]]::new()
         }
-        $spinnerFrames = [ordered]@{
+        $heartbeatFrames = [ordered]@{
             codex = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
             claude = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
         }
@@ -96,8 +96,9 @@ try {
             $provider = [string](& $getValueCommand -Object $event.data -Name 'provider' -Default '')
             if ($type -ceq 'PROVIDER_TICK' -and $provider -in @('codex', 'claude')) {
                 $elapsed = [int](& $getValueCommand -Object $event.data -Name 'elapsedSeconds' -Default 0)
+                $frameIndex = [int](& $getValueCommand -Object $event.data -Name 'heartbeatFrameIndex' -Default ($elapsed * 2))
                 $tickElapsed[$provider].Add($elapsed)
-                $null = $spinnerFrames[$provider].Add([string](& $spinnerCommand -ElapsedSeconds $elapsed))
+                $null = $heartbeatFrames[$provider].Add([string](& $heartbeatCommand -FrameIndex $frameIndex))
             }
             if ($type -ceq 'STAGE_STARTED' -and $provider -ceq 'claude' -and -not [bool]$pauseState.requested) {
                 $round = [int](& $getValueCommand -Object $event.data -Name 'round' -Default 0)
@@ -136,9 +137,9 @@ try {
                 codex = @($tickElapsed.codex)
                 claude = @($tickElapsed.claude)
             }
-            distinctSpinnerFrames = [ordered]@{
-                codex = [int]$spinnerFrames.codex.Count
-                claude = [int]$spinnerFrames.claude.Count
+            distinctHeartbeatFrames = [ordered]@{
+                codex = [int]$heartbeatFrames.codex.Count
+                claude = [int]$heartbeatFrames.claude.Count
             }
         }
     } $run.runId $ResultsRoot
@@ -186,7 +187,7 @@ try {
     foreach ($provider in @('codex', 'claude')) {
         $elapsed = @($execution.ticks[$provider])
         Assert-LiveProgressInvariant ($elapsed.Count -ge 2 -and [int]$elapsed[0] -eq 0 -and [int]($elapsed | Measure-Object -Maximum).Maximum -ge 1) ("$($provider.ToUpperInvariant())-TICKS")
-        Assert-LiveProgressInvariant ([int]$execution.distinctSpinnerFrames[$provider] -ge 2) ("$($provider.ToUpperInvariant())-SPINNER")
+        Assert-LiveProgressInvariant ([int]$execution.distinctHeartbeatFrames[$provider] -ge 2) ("$($provider.ToUpperInvariant())-HEARTBEAT")
     }
     Assert-LiveProgressInvariant ($providerWorkCount -eq 0) 'PROVIDER-WORK'
     Assert-LiveProgressInvariant ($eventText -notmatch '(?i)"type"\s*:\s*"[^"]*(tool|command|shell|web|mcp)[^"]*"') 'EVENT-TYPE'
@@ -213,8 +214,8 @@ try {
             claudeTicks = @($execution.ticks.claude).Count
             codexMaximumElapsedSeconds = [int](@($execution.ticks.codex) | Measure-Object -Maximum).Maximum
             claudeMaximumElapsedSeconds = [int](@($execution.ticks.claude) | Measure-Object -Maximum).Maximum
-            codexDistinctSpinnerFrames = [int]$execution.distinctSpinnerFrames.codex
-            claudeDistinctSpinnerFrames = [int]$execution.distinctSpinnerFrames.claude
+            codexDistinctHeartbeatFrames = [int]$execution.distinctHeartbeatFrames.codex
+            claudeDistinctHeartbeatFrames = [int]$execution.distinctHeartbeatFrames.claude
             observerFailures = [int]$execution.observerFailureCount
         }
         pauseRequestCount = [int]$execution.pauseRequestCount

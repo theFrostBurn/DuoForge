@@ -488,15 +488,15 @@ function Get-DuoForgeVisibleProgressBarriersInternal {
     return @($Barriers[$start..($start + $Maximum - 1)])
 }
 
-function Get-DuoForgeProgressSpinnerFrameInternal {
+function Get-DuoForgeProgressHeartbeatFrameInternal {
     [CmdletBinding()]
     param(
-        [ValidateRange(0, 2147483647)][int]$ElapsedSeconds,
+        [ValidateRange(0, 2147483647)][int]$FrameIndex,
         [switch]$Ascii
     )
 
-    $frames = if ($Ascii) { @('|', '/', '-', '\') } else { @('⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏') }
-    return [string]$frames[$ElapsedSeconds % $frames.Count]
+    $frames = if ($Ascii) { @('..#..', '.###.', '#####', '.###.') } else { @('░░█░░', '░███░', '█████', '░███░') }
+    return [string]$frames[$FrameIndex % $frames.Count]
 }
 
 function Get-DuoForgeProgressSelectedCommittedIndexInternal {
@@ -532,15 +532,16 @@ function Get-DuoForgeProgressCurrentLineInternal {
         $stageLabel = Get-DuoForgeProgressStageLabelInternal -Stage ([string]$active[0].stage)
         $targetLabel = Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId ([string](Get-DuoForgeObjectValue -Object $active[0] -Name 'targetDocumentId')) -Mode ([string]$Snapshot.mode)
         $elapsed = if ($null -ne $ViewState -and $ViewState.Contains('providerElapsedSeconds')) { [Math]::Max(0, [int]$ViewState.providerElapsedSeconds) } else { 0 }
+        $heartbeatFrameIndex = if ($null -ne $ViewState -and $ViewState.Contains('providerHeartbeatFrameIndex')) { [Math]::Max(0, [int]$ViewState.providerHeartbeatFrameIndex) } else { $elapsed * 2 }
         $asciiSpinner = $null -ne $ViewState -and -not [bool](Get-DuoForgeObjectValue -Object $ViewState -Name 'unicodeSpinner' -Default $true)
-        $spinner = Get-DuoForgeProgressSpinnerFrameInternal -ElapsedSeconds $elapsed -Ascii:$asciiSpinner
+        $heartbeat = Get-DuoForgeProgressHeartbeatFrameInternal -FrameIndex $heartbeatFrameIndex -Ascii:$asciiSpinner
         $activity = if ($lastEventType -eq 'STAGE_RESULT_RECEIVED') { '답변 도착 · 형식 확인 중' } else { "답변을 기다리는 중 $([timespan]::FromSeconds($elapsed).ToString('mm\:ss'))" }
         $parts = @($providerLabel, $stageLabel)
         if (-not [string]::IsNullOrWhiteSpace($targetLabel)) { $parts += $targetLabel }
         $parts += $activity
-        $current = "지금 작업 중  $spinner " + ($parts -join ' · ')
+        $current = "지금 작업 중  $heartbeat " + ($parts -join ' · ')
         if ($Width -gt 0 -and (Get-DuoForgeProgressTextWidthInternal -Text $current) -gt $Width -and -not [string]::IsNullOrWhiteSpace($targetLabel)) {
-            $current = "지금 작업 중  $spinner " + (@($providerLabel, $stageLabel, $activity) -join ' · ')
+            $current = "지금 작업 중  $heartbeat " + (@($providerLabel, $stageLabel, $activity) -join ' · ')
         }
         return $current
     }
@@ -924,7 +925,8 @@ function ConvertTo-DuoForgeProgressColoredLineInternal {
     if ($Line.StartsWith('DUOFORGE')) { return "$escape[1;36m$Line$reset" }
     if ($Line -match '(^|\s)!\s' -or $Line -match '작업 오류|실패') { return "$escape[31m$Line$reset" }
     if (($Line -match '✓|\bOK\b') -and ($Line -match '최근 완료' -or $Line -match '^\s*\d+/\d+')) { return "$escape[32m$Line$reset" }
-    if ($Line.StartsWith('●') -or $Line.StartsWith('지금 작업 중')) { return "$escape[33m$Line$reset" }
+    if ($Line.StartsWith('지금 작업 중')) { return "$escape[1;33m$Line$reset" }
+    if ($Line.StartsWith('●')) { return "$escape[33m$Line$reset" }
     if ($Line.StartsWith('↻')) { return "$escape[31m$Line$reset" }
     if ($Line.StartsWith('─') -or $Line.StartsWith('단계별 진행') -or $Line.StartsWith('Enter 키') -or $Line.StartsWith('↑↓') -or $Line.StartsWith('PgUp')) { return "$escape[90m$Line$reset" }
     return $Line
@@ -1214,6 +1216,7 @@ function New-DuoForgeProgressViewInternal {
         enteredAlternateScreen = $false
         lastEvent = $null
         providerElapsedSeconds = 0
+        providerHeartbeatFrameIndex = 0
         unicodeSpinner = [bool](Get-DuoForgeObjectValue -Object $capability -Name 'unicodeSpinner' -Default $false)
         screenMode = 'overview'
         selectedCommittedIndex = -1
@@ -1242,8 +1245,14 @@ function New-DuoForgeProgressViewInternal {
     $observer = {
         param($event)
         $view.lastEvent = & $convertToHashtableCommand -InputObject $event
-        if ([string]$event.type -eq 'STAGE_STARTED') { $view.providerElapsedSeconds = 0 }
-        if ([string]$event.type -eq 'PROVIDER_TICK') { $view.providerElapsedSeconds = [int](& $getObjectValueCommand -Object $event.data -Name 'elapsedSeconds' -Default 0) }
+        if ([string]$event.type -eq 'STAGE_STARTED') {
+            $view.providerElapsedSeconds = 0
+            $view.providerHeartbeatFrameIndex = 0
+        }
+        if ([string]$event.type -eq 'PROVIDER_TICK') {
+            $view.providerElapsedSeconds = [int](& $getObjectValueCommand -Object $event.data -Name 'elapsedSeconds' -Default 0)
+            $view.providerHeartbeatFrameIndex = [int](& $getObjectValueCommand -Object $event.data -Name 'heartbeatFrameIndex' -Default ($view.providerElapsedSeconds * 2))
+        }
         & $controlInputCommand -View $view -KeyReader $KeyReader -PauseRequester $PauseRequester
         if ([string]$view.mode -eq 'fullscreen') {
             try { & $writeFrameCommand $view }

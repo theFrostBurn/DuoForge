@@ -176,7 +176,10 @@ function Invoke-DuoForgeProcess {
 
         [switch]$Interactive,
 
-        [scriptblock]$OnTick
+        [scriptblock]$OnTick,
+
+        [ValidateRange(250, 10000)]
+        [int]$TickIntervalMilliseconds = 1000
     )
 
     $process = $null
@@ -225,14 +228,14 @@ function Invoke-DuoForgeProcess {
 
         $waitStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
         $completed = $false
-        $lastTickSecond = -1
+        $lastTickIndex = -1
         while (-not $completed -and $waitStopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
             $remainingMilliseconds = [Math]::Max(1, [int](($TimeoutSeconds - $waitStopwatch.Elapsed.TotalSeconds) * 1000))
             $completed = $process.WaitForExit([Math]::Min(250, $remainingMilliseconds))
             if (-not $completed -and $null -ne $OnTick) {
-                $tickSecond = [int][Math]::Floor($waitStopwatch.Elapsed.TotalSeconds)
-                if ($tickSecond -ne $lastTickSecond) {
-                    $lastTickSecond = $tickSecond
+                $tickIndex = [int][Math]::Floor($waitStopwatch.Elapsed.TotalMilliseconds / $TickIntervalMilliseconds)
+                if ($tickIndex -ne $lastTickIndex) {
+                    $lastTickIndex = $tickIndex
                     try { $null = & $OnTick $waitStopwatch.Elapsed }
                     catch {
                         $tickCallbackFailures++
