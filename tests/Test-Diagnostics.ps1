@@ -250,7 +250,7 @@ Test-Case '형식 복구 재시도와 최종 실패는 서로 다른 진단 ID�
         $observer = { param($event) $events.Add($event) }.GetNewClosure()
         Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback -ProgressObserver $observer
     } $run.runDirectory $observerEvents
-    Assert-Equal $result.status 'RESUMABLE_ERROR'
+    Assert-Equal $result.status 'FAILED_STAGE'
     Assert-Equal $result.code 'DF-STAGE-SCHEMA'
     $records = @(Get-DuoForgeDiagnosticTestRecords -Path $result.diagnosticsPath | Where-Object code -eq 'DF-STAGE-SCHEMA')
     Assert-Equal $records.Count 3 ($records | ConvertTo-Json -Depth 100 -Compress)

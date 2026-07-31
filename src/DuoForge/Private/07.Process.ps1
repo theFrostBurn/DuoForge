@@ -17,7 +17,8 @@ function Resolve-DuoForgeProviderExecutionContextInternal {
         [Parameter(Mandatory)][ValidateSet('codex', 'claude')][string]$Provider,
         [AllowNull()][AllowEmptyString()][string]$ProcessUserProfile,
         [AllowNull()][AllowEmptyString()][string]$DotNetUserProfile,
-        [AllowNull()][AllowEmptyString()][string]$ExplicitAuthHome
+        [AllowNull()][AllowEmptyString()][string]$ExplicitAuthHome,
+        [AllowNull()]$IsElevated
     )
 
     if (-not $PSBoundParameters.ContainsKey('ProcessUserProfile')) {
@@ -52,9 +53,18 @@ function Resolve-DuoForgeProviderExecutionContextInternal {
     }
     else { '' }
     $overrides = [ordered]@{}
-    if (-not [string]::IsNullOrWhiteSpace($ExplicitAuthHome)) {
+    if (-not [string]::IsNullOrWhiteSpace($authHomePath)) {
         $overrides[$authHomeVariable] = $authHomePath
     }
+    if (-not $PSBoundParameters.ContainsKey('IsElevated')) {
+        try {
+            $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+            $principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
+            $IsElevated = $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+        }
+        catch { $IsElevated = $null }
+    }
+    $elevation = if ($null -eq $IsElevated) { 'UNKNOWN' } elseif ([bool]$IsElevated) { 'ADMIN' } else { 'STANDARD' }
 
     return [ordered]@{
         provider = $Provider
@@ -64,6 +74,7 @@ function Resolve-DuoForgeProviderExecutionContextInternal {
         authHomeSource = if (-not [string]::IsNullOrWhiteSpace($ExplicitAuthHome)) { 'explicit' } elseif ($profileMismatch) { 'mismatch' } else { 'profile-default' }
         authContextStatus = if ($profileMismatch) { 'PROFILE_MISMATCH' } else { 'AVAILABLE' }
         profileMismatch = $profileMismatch
+        hostElevation = $elevation
         liveRuntimeEligible = -not $profileMismatch
         environmentAllowList = @(Get-DuoForgeProviderEnvironmentAllowList)
         environmentOverrides = $overrides
@@ -113,6 +124,15 @@ function Resolve-DuoForgeCommandInvocation {
     $source = $command.Source
     $prefixArguments = [System.Collections.Generic.List[string]]::new()
     $extension = [System.IO.Path]::GetExtension($source)
+    if ($CommandName -eq 'codex' -and $extension -in @('.cmd', '.bat')) {
+        $npmRoot = [System.IO.Path]::GetDirectoryName($source)
+        $codexJavaScript = Join-Path $npmRoot 'node_modules\@openai\codex\bin\codex.js'
+        $node = @(Get-Command node.exe -All -ErrorAction SilentlyContinue | Where-Object { $_.CommandType -eq [System.Management.Automation.CommandTypes]::Application } | Select-Object -First 1)
+        if ($node.Count -eq 1 -and (Test-Path -LiteralPath $codexJavaScript -PathType Leaf)) {
+            $prefixArguments.Add($codexJavaScript)
+            return [ordered]@{ fileName = [string]$node[0].Source; prefixArguments = @($prefixArguments); source = $source }
+        }
+    }
     if ($extension -ieq '.ps1') {
         $pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
         $prefixArguments.Add('-NoLogo')
@@ -161,6 +181,7 @@ function Invoke-DuoForgeProcess {
 
     $process = $null
     $started = $false
+    $tickCallbackFailures = 0
     try {
         $invocation = if ($null -ne $CommandInvocation) { $CommandInvocation } else { Resolve-DuoForgeCommandInvocation -CommandName $CommandName }
         if ($null -eq $invocation) {
@@ -213,7 +234,10 @@ function Invoke-DuoForgeProcess {
                 if ($tickSecond -ne $lastTickSecond) {
                     $lastTickSecond = $tickSecond
                     try { $null = & $OnTick $waitStopwatch.Elapsed }
-                    catch { Write-Verbose 'DuoForge 프로세스 진행 콜백 오류를 무시했습니다.' }
+                    catch {
+                        $tickCallbackFailures++
+                        Write-Verbose 'DuoForge 프로세스 진행 콜백 오류를 안전하게 격리했습니다.'
+                    }
                 }
             }
         }
@@ -238,6 +262,7 @@ function Invoke-DuoForgeProcess {
             hresult = $null
             stdoutBytes = [int64][System.Text.UTF8Encoding]::new($false).GetByteCount($stdout)
             stderrBytes = [int64][System.Text.UTF8Encoding]::new($false).GetByteCount($stderr)
+            tickCallbackFailures = $tickCallbackFailures
         }
     }
     catch {
@@ -252,6 +277,7 @@ function Invoke-DuoForgeProcess {
             hresult = [int64]$_.Exception.HResult
             stdoutBytes = 0L
             stderrBytes = 0L
+            tickCallbackFailures = $tickCallbackFailures
         }
     }
     finally {
@@ -272,6 +298,7 @@ function Get-DuoForgeSafeProcessMetadataInternal {
         hresult = Get-DuoForgeObjectValue -Object $ProcessResult -Name 'hresult'
         stdoutBytes = Get-DuoForgeObjectValue -Object $ProcessResult -Name 'stdoutBytes'
         stderrBytes = Get-DuoForgeObjectValue -Object $ProcessResult -Name 'stderrBytes'
+        tickCallbackFailures = [int](Get-DuoForgeObjectValue -Object $ProcessResult -Name 'tickCallbackFailures' -Default 0)
     }
 }
 

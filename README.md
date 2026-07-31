@@ -128,7 +128,7 @@ Claude CLI는 계정별 `/model` 전체 행을 기계 판독 목록으로 내보
 
 호출당 크기를 넘는 Markdown의 신규 실행은 `context-plan` schema 2의 결정론적 의미 배치를 사용한다. ATX/Setext 제목과 제목 경로, 서문, 완결된 문단·목록·표·fenced code를 먼저 보존하고, 하나의 의미 단위가 상한을 넘을 때만 문단·줄·UTF-8 안전 바이트 순서로 폴백한다. XML escape 뒤 실제 전송 바이트도 분할 시점에 계산하므로 특수문자가 많은 CORE는 의미 경계를 가능한 한 보존하면서 호출 상한 안으로 더 나뉜다. 각 팩의 `DOCUMENT_MAP`, `BEFORE`, `AFTER`는 위치와 연결을 위한 `context-only` 영역이고 `CORE`만 사실 분석과 근거에 사용할 수 있다. 완성 프롬프트 크기는 실행 생성 시점과 각 단계 소비 시점에 모두 검증한다.
 
-커버리지는 중복 브리지가 아닌 `CORE` 원본 범위만으로 계산한다. 완전 커버리지가 불가능하면 시작 시 `--allow-partial`이 있어야 하며, A/B 각각에 최소 한 배치를 확보한 뒤 각 문서의 앞·뒤가 한쪽에 치우치지 않도록 결정론적으로 선택한다. 두 문서를 모두 분석할 호출 여유가 없으면 시작 전에 거부한다. 누락 섹션 ID·바이트·문서별 커버리지는 `context-plan.json`과 `COVERAGE.md`에 기록하고 `COMPLETED_PARTIAL`로 표시한다. 기존 context-plan schema 1과 workflow-v1·초기 workflow-v2 저장 실행은 기존 팩·그래프·프롬프트를 재분할하거나 재작성하지 않고 해당 세대 그대로 재개한다. 누적 모델 실행 시간이 90분에 도달하면 다음 공급자 호출 전에 실패 폐쇄한다. 구조 오류는 같은 프롬프트를 반복하지 않고 전용 `FORMAT_REPAIR` 요청으로 한 번만 복구하며, 완료 산출물이 손상되면 해당 단계와 의존 단계만 감사 이력으로 보존한 뒤 재실행한다.
+커버리지는 중복 브리지가 아닌 `CORE` 원본 범위만으로 계산한다. 완전 커버리지가 불가능하면 시작 시 `--allow-partial`이 있어야 하며, A/B 각각에 최소 한 배치를 확보한 뒤 각 문서의 앞·뒤가 한쪽에 치우치지 않도록 결정론적으로 선택한다. 두 문서를 모두 분석할 호출 여유가 없으면 시작 전에 거부한다. 누락 섹션 ID·바이트·문서별 커버리지는 `context-plan.json`과 `COVERAGE.md`에 기록하고 `COMPLETED_PARTIAL`로 표시한다. 기존 context-plan schema 1과 workflow-v1·초기 workflow-v2 저장 실행은 기존 팩·그래프·프롬프트를 재분할하거나 재작성하지 않고 해당 세대 그대로 재개한다. 누적 모델 실행 시간이 90분에 도달하면 다음 공급자 호출 전에 실패 폐쇄한다. 구조 오류는 같은 프롬프트를 반복하지 않고 전용 `FORMAT_REPAIR` 요청으로 한 번만 복구하며, 허용 시도를 모두 사용하면 terminal `FAILED_STAGE`로 전이해 일반 이어하기를 숨긴다. `attemptCount`는 현재 입력 세대의 형식 복구 예산, `totalAttemptCount`는 누적 실제 공급자 호출 감사·총예산에 사용하므로 사용자 답변 등으로 입력 세대가 바뀌어도 누적 호출은 사라지지 않는다. 완료 산출물이 없거나 해시·스키마가 손상되면 원인을 분리하고 해당 단계와 의존 단계만 감사 이력으로 보존한 뒤 재실행한다. 쟁점 정의 대상과 참조 대상은 별도로 검증해 원장 자기 참조를 중복 정의로 오판하지 않는다.
 
 같은 장벽의 Codex·Claude 단계는 현재 순차 호출되지만, 각 프롬프트에는 단계 그래프상 전이적 선행 단계의 산출물만 들어간다. 따라서 먼저 호출된 공급자의 같은 단계 결과는 뒤 공급자에게 공개되지 않으며, 실패 재시도·사용자 일시정지·프로세스 재개 후에도 양쪽이 동일한 선행 산출물 집합에서 판단한다. 양쪽 단계가 모두 커밋된 뒤에만 다음 장벽이 그 결과를 함께 볼 수 있다. 이 정책 이전에 생성된 미완료 실행은 혼합 규칙으로 조용히 재개하지 않고 새 실행 생성을 요구한다.
 
@@ -160,7 +160,7 @@ Claude CLI는 계정별 `/model` 전체 행을 기계 판독 목록으로 내보
 
 ### 고정형 토론 진행판
 
-대화형 메뉴의 `R → LIVE`와 명시적 `resume --live`는 PowerShell 7 터미널에서 고정형 진행판을 연다. 진행판은 선택한 모드의 실제 단계 장벽을 표시하고, 현재 공급자·작업 단계·대상 문서·경과 시간과 검증·커밋된 최근 결과 최대 3건을 보여준다. 현재 작업의 한 셀 스피너는 기존 초 단위 heartbeat로만 움직이며 별도 타이머나 모델 호출을 만들지 않고 진행률을 뜻하지도 않는다. 최근 결과는 파일 시각이 아니라 단계 그래프에서 유효한 마지막 3건을 선택한 뒤 오래된 것부터 표시한다. 단계에 문서 계보가 기록되어 있으면 문서 A·문서 B·문서 A/B·공동 문서·합의 문서 C로 구분하고, workflow-v1에 없는 계보는 추정하지 않는다.
+대화형 메뉴의 `R → LIVE`와 명시적 `resume --live`는 PowerShell 7 터미널에서 고정형 진행판을 연다. 진행판은 선택한 모드의 실제 단계 장벽을 표시하고, 현재 공급자·작업 단계·대상 문서·경과 시간과 검증·커밋된 최근 결과 최대 3건을 보여준다. 현재 작업의 한 셀 스피너는 기존 초 단위 heartbeat로만 움직이며 별도 타이머나 모델 호출을 만들지 않고 진행률을 뜻하지도 않는다. 공급자 프로세스 callback은 모듈 private 함수 이름을 closure 밖에서 다시 찾지 않고 캡처한 진입점을 사용한다. observer 또는 프레임 렌더 오류는 원문 예외 없이 고정 코드와 횟수를 한 번만 기록하고 공급자 호출을 계속하며, 전체화면을 유지할 수 없으면 heartbeat 중복이 없는 누적 로그로 폴백한다. 최근 결과는 파일 시각이 아니라 단계 그래프에서 유효한 마지막 3건을 선택한 뒤 오래된 것부터 표시한다. 단계에 문서 계보가 기록되어 있으면 문서 A·문서 B·문서 A/B·공동 문서·합의 문서 C로 구분하고, workflow-v1에 없는 계보는 추정하지 않는다.
 
 ```text
 DUOFORGE  LIVE 진행 화면
@@ -191,9 +191,13 @@ DUOFORGE  LIVE 진행 화면
 
 ## 테스트
 
-2026-07-30 기준 오프라인 회귀는 130개다. 기존 회귀에 더해 공통 메뉴의 커서 이동·순환·단축키·비활성 이유·줄 입력 폴백, 정보 블록과 다음 메뉴 사이의 단일 전환 여백, 안전 확인 토큰 분리, heartbeat 스피너, 높이별 개요와 단일 상세 스크롤, 네 지원 프레임의 폭·높이, 공통 page/section/field/list/notice renderer의 hanging indent·문단·ASCII 무색 폴백, 넓은 질문 화면의 적응형 본문 행 배분, 답변 변경 뒤 예정 요청·실패 시 추가 요청의 분리, 실패 한도 차단과 내부 단계 ID 비노출을 포함한다. 실제 AI 작업과 `resume --live`는 수행하지 않았다.
+2026-07-31 기준 PowerShell 7 오프라인 회귀는 162개다. 기존 회귀에 더해 실제 프로세스 heartbeat callback의 `0,1,2`초 전달과 스피너 프레임 변화, observer·프레임 오류의 고정 코드 단일 폴백, 쟁점 정의/참조 대상 분리, 현재 입력 세대 시도와 누적 호출 분리, 재시도 소진의 `FAILED_STAGE`, 복합 실행의 0-call 복구, 공급자 프로세스 오류의 안전 분류와 doctor·카탈로그·단계 호출 컨텍스트 동일성을 포함하며 모두 통과한다.
 
-실제 공급자 E2E의 테스트 전용 Claude 선택은 `tests\workflow-v2-live-settings.json`에서 관리하며 현재 `sonnet/low`로 고정한다. 현재 workflow-v2 라이브 E2E 실행기는 이 설정과 정확한 `LIVE` 동의를 요구한다. 일반 실행의 모델 선택 화면과 사용자 실행에 저장된 선택값은 바꾸지 않으며, 과거 `opus/high` E2E는 문서화된 시점 증거로만 취급하고 재호출하지 않는다.
+실제 공급자 E2E의 테스트 전용 Claude 선택은 `tests\workflow-v2-live-settings.json`에서 관리하며 현재 `sonnet/low`로 고정한다. 전체 workflow-v2 라이브 E2E 실행기는 이 설정과 정확한 `LIVE` 동의를 요구한다. 진행판 전용 `tests\Invoke-LiveProgressE2E.ps1`은 실제 카탈로그가 노출한 Codex `gpt-5.6-luna/low`와 Claude `sonnet/low`만 허용하고 다른 모델로 대체하지 않으며, 첫 Codex·Claude 장벽 뒤 자동 `PAUSED_USER`를 요구한다. 2026-07-31 최초 실행, 별도 승인한 재시험, 비관리자 호스트 재검증 `run-20260731-142621-3d2365`, 재부팅 후 재검증 `run-20260731-163804-17c44b` 모두 Codex 첫 호출이 동일한 `DF-PROVIDER-PROCESS`(종료 코드 1, stdout 0바이트, stderr 163바이트)로 끝나 Claude를 호출하지 않았다. 네 실행 모두 모델 대체나 실행 내 자동 재시도 없이 실패 폐쇄했다. 세 번째와 네 번째 실행은 `STANDARD`, 프로필 일치, PowerShell 7.6.3 `ConsoleHost`, 비리디렉션 `120×30` 환경에서 수행했으며, 네 번째 실행 직전과 직후 8501 리스너 및 Python 프로세스는 0이었다. 따라서 관리자 권한·프로필 불일치와 Streamlit/Uvicorn 서버는 각각 단독 원인이 아니다. 실제 화면의 장시간 프레임 변화와 2-call `PAUSED_USER` 성공은 아직 입증되지 않았으며, 오프라인 callback·프레임 회귀와 구분해 기록한다. 일반 실행의 모델 선택 화면과 사용자 실행에 저장된 선택값은 바꾸지 않으며, 과거 `opus/high` E2E는 문서화된 시점 증거로만 취급하고 재호출하지 않는다.
+
+현재 Codex 경로는 doctor·모델 카탈로그·단계 호출 모두 같은 `node.exe`와 `codex.js`, 인증 home과 정제된 자식 환경을 사용한다. 카탈로그 가시성은 실제 모델 호출 가능성을 증명하지 않으므로 doctor에는 `UNVERIFIED`로 표시한다. 종료 코드가 0이 아닌 공급자 프로세스의 stderr는 메모리에서만 고정 안전 사유로 분류하고 즉시 버리며 stdout은 분류 입력으로 쓰지 않는다. `MODEL_UNAVAILABLE`, `AUTH`, `INVALID_OPTION`, `SCHEMA_REJECTED`, `NETWORK`, `REASONING_UNAVAILABLE`, `MODEL_CONFIGURATION_UNAVAILABLE`을 포함한 합성 fixture가 원시 stdout·stderr 제거를 검증한다. 전용 LIVE 실행기는 관리자 PowerShell을 거부한다. 일반 비관리자 PowerShell 7에서도 동일 실패를 재현했으므로 권한은 단독 원인이 아니다.
+
+현재 사용자 Codex 기본 설정은 `gpt-5.6-sol/high`지만 DuoForge 단계 실행은 저장된 선택값을 `--model`과 `model_reasoning_effort`로 명시하고 `--ignore-user-config`를 사용하므로 같은 호출 프로필이 아니다. `codex-cli 0.146.0`의 실제 카탈로그는 Sol의 `high`, Luna의 `low`·`medium`을 모두 노출했고, 세 조합과 Luna/low 단계 스키마 조합의 전체 인자 배열은 parse-only 검사에서 모두 종료 코드 0이었다. 원본 성공 실행은 `codex-cli 0.145.0`의 Sol/high였으므로 현재 결함은 모델 이름 오타보다 비대화형 `exec`의 실제 요청·스키마·버전 경계를 분리해 확인해야 한다. `tests\Invoke-CodexInvocationMatrix.ps1`은 정확한 새 `LIVE` 한 번에 Sol/high 기본 호출, Luna/low 기본 호출, Luna/medium 기본 호출, 조건부 Luna/low 단계 스키마 호출만 순서대로 수행하며 예상 3회·절대 상한 4회와 `PAUSED_USER` 안전 요약을 강제한다.
 
 ```powershell
 & 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -File '.\tests\Run-Tests.ps1'

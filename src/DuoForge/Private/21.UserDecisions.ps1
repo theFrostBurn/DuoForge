@@ -114,6 +114,9 @@ function Reset-DuoForgeDecisionAffectedSteps {
         throw (New-DuoForgeException -Code 'DF-DECISION-NO-AFFECTED-STEPS' -Message '사용자 결정의 영향을 받을 마지막 문서 단계를 찾지 못했습니다.')
     }
     foreach ($step in $affected) {
+        if (-not $step.Contains('totalAttemptCount')) { $step.totalAttemptCount = [int](Get-DuoForgeObjectValue -Object $step -Name 'attemptCount' -Default 0) }
+        $step.attemptCount = 0
+        $step.inputGeneration = [int](Get-DuoForgeObjectValue -Object $step -Name 'inputGeneration' -Default 1) + 1
         if ([string]$step.status -eq 'COMMITTED' -and -not [string]::IsNullOrWhiteSpace([string]$step.artifactPath) -and (Test-Path -LiteralPath ([string]$step.artifactPath) -PathType Leaf)) {
             $historyDirectory = Join-Path $RunDirectory 'history\decisions'
             [System.IO.Directory]::CreateDirectory($historyDirectory) | Out-Null
@@ -137,9 +140,10 @@ function Reset-DuoForgeDecisionAffectedSteps {
         $step.lastPromptKind = $null
     }
     Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph
+    $lastCommitted = @($graph.steps | Where-Object { $_.status -eq 'COMMITTED' } | Select-Object -Last 1)
     return [ordered]@{
         resetSteps = @($affected | ForEach-Object { $_.stepKey })
-        lastCommittedStep = @($graph.steps | Where-Object { $_.status -eq 'COMMITTED' } | Select-Object -Last 1 | ForEach-Object { $_.stepKey })[0]
+        lastCommittedStep = if ($lastCommitted.Count -eq 1) { [string]$lastCommitted[0].stepKey } else { $null }
     }
 }
 

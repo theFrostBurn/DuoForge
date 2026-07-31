@@ -138,8 +138,8 @@ foreach ($step in @($steps.steps)) {
 }
 
 $callCounts = [ordered]@{
-    codex = @($steps.steps | Where-Object { [string]$_.provider -eq 'codex' } | Measure-Object -Property attemptCount -Sum).Sum
-    claude = @($steps.steps | Where-Object { [string]$_.provider -eq 'claude' } | Measure-Object -Property attemptCount -Sum).Sum
+    codex = @($steps.steps | Where-Object { [string]$_.provider -eq 'codex' } | ForEach-Object { [int]$(if ($null -ne $_.totalAttemptCount) { $_.totalAttemptCount } else { $_.attemptCount }) } | Measure-Object -Sum).Sum
+    claude = @($steps.steps | Where-Object { [string]$_.provider -eq 'claude' } | ForEach-Object { [int]$(if ($null -ne $_.totalAttemptCount) { $_.totalAttemptCount } else { $_.attemptCount }) } | Measure-Object -Sum).Sum
 }
 foreach ($provider in @('codex', 'claude')) {
     $providerPlan = $manifest.executionPlan.providers.$provider

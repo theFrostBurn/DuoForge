@@ -990,6 +990,7 @@ function Write-DuoForgeProgressLogEventInternal {
         'STAGE_FAILED' { & $append @(New-DuoForgeNoticeRowsInternal -Kind error -Title ("{0} 실패 · {1}" -f $label, $snapshot.statusLabel) -Layout $layout) }
         'STAGE_INTERRUPTED_RECOVERED' { & $append @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '이전에 중단된 단계를 다시 진행할 대상으로 복구했습니다.' -Message $label -Layout $layout) }
         'FINAL_ARTIFACTS_FAILED' { & $append @(New-DuoForgeNoticeRowsInternal -Kind error -Title '최종 결과 만들기에 실패했습니다.' -NextAction '오류를 고친 뒤 이어서 진행할 수 있습니다.' -Layout $layout) }
+        'PROGRESS_OBSERVER_FAILED' { & $append @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '진행 화면 갱신이 중단되어 누적 로그로 전환했습니다.' -Message 'AI 작업은 계속되며 화면에는 안전한 상태 정보만 표시됩니다.' -Layout $layout) }
     }
     if ($eventRows.Count -gt 0) { Write-DuoForgeDisplayRowsInternal -Rows @($eventRows) -Layout $layout }
     if ($type -in @('STAGE_RETRY_SCHEDULED', 'STAGE_FAILED', 'STAGE_INTERRUPTED_RECOVERED', 'FINAL_ARTIFACTS_FAILED')) {
@@ -1003,7 +1004,8 @@ function Invoke-DuoForgeProgressObserverInternal {
         [scriptblock]$Observer,
         [Parameter(Mandatory)][string]$Type,
         [Parameter(Mandatory)][string]$RunDirectory,
-        [System.Collections.IDictionary]$Data = ([ordered]@{})
+        [System.Collections.IDictionary]$Data = ([ordered]@{}),
+        [switch]$ThrowOnError
     )
 
     if ($null -eq $Observer) { return }
@@ -1014,7 +1016,10 @@ function Invoke-DuoForgeProgressObserverInternal {
         data = ConvertTo-DuoForgeHashtable -InputObject $Data
     }
     try { $null = & $Observer $event }
-    catch { Write-Verbose 'DuoForge 진행 관찰자 오류를 무시했습니다.' }
+    catch {
+        if ($ThrowOnError) { throw }
+        Write-Verbose 'DuoForge 진행 관찰자 오류를 안전하게 격리했습니다.'
+    }
 }
 
 function Read-DuoForgeProgressActionsInternal {
@@ -1171,7 +1176,8 @@ function New-DuoForgeProgressViewInternal {
         [Parameter(Mandatory)][string]$RunDirectory,
         [ValidateSet('auto', 'fullscreen', 'log')][string]$Mode = 'auto',
         [scriptblock]$KeyReader,
-        [scriptblock]$PauseRequester
+        [scriptblock]$PauseRequester,
+        [scriptblock]$FrameWriter
     )
 
     $capability = Get-DuoForgeProgressTerminalCapabilityInternal
@@ -1199,12 +1205,15 @@ function New-DuoForgeProgressViewInternal {
         pauseRequestId = ''
         keyReader = $KeyReader
         pauseRequester = $PauseRequester
+        observerFailureCount = 0
+        observerFailureCode = ''
+        observerFailureReported = $false
         closed = $false
     }
     $convertToHashtableCommand = Get-Command -Name 'ConvertTo-DuoForgeHashtable' -CommandType Function -ErrorAction Stop
     $getObjectValueCommand = Get-Command -Name 'Get-DuoForgeObjectValue' -CommandType Function -ErrorAction Stop
     $controlInputCommand = Get-Command -Name 'Invoke-DuoForgeProgressControlInputInternal' -CommandType Function -ErrorAction Stop
-    $writeFrameCommand = Get-Command -Name 'Write-DuoForgeProgressFrameInternal' -CommandType Function -ErrorAction Stop
+    $writeFrameCommand = if ($null -ne $FrameWriter) { $FrameWriter } else { Get-Command -Name 'Write-DuoForgeProgressFrameInternal' -CommandType Function -ErrorAction Stop }
     $writeLogCommand = Get-Command -Name 'Write-DuoForgeProgressLogEventInternal' -CommandType Function -ErrorAction Stop
     $observer = {
         param($event)
@@ -1212,7 +1221,18 @@ function New-DuoForgeProgressViewInternal {
         if ([string]$event.type -eq 'STAGE_STARTED') { $view.providerElapsedSeconds = 0 }
         if ([string]$event.type -eq 'PROVIDER_TICK') { $view.providerElapsedSeconds = [int](& $getObjectValueCommand -Object $event.data -Name 'elapsedSeconds' -Default 0) }
         & $controlInputCommand -View $view -KeyReader $KeyReader -PauseRequester $PauseRequester
-        if ([string]$view.mode -eq 'fullscreen') { & $writeFrameCommand -View $view }
+        if ([string]$view.mode -eq 'fullscreen') {
+            try { & $writeFrameCommand $view }
+            catch {
+                $view.observerFailureCount = [int]$view.observerFailureCount + 1
+                $view.observerFailureCode = 'DF-PROGRESS-FRAME'
+                $view.mode = 'log'
+                if (-not [bool]$view.observerFailureReported) {
+                    $view.observerFailureReported = $true
+                    & $writeLogCommand -View $view -Event ([ordered]@{ type = 'PROGRESS_OBSERVER_FAILED'; data = [ordered]@{ code = 'DF-PROGRESS-FRAME'; count = 1 } })
+                }
+            }
+        }
         else { & $writeLogCommand -View $view -Event $view.lastEvent }
     }.GetNewClosure()
     $view.observer = $observer

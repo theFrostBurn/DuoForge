@@ -337,6 +337,41 @@ source: key | line | dialog
 - 직접 `Read-Host`·원시 `ReadKey`는 공통 저수준 입력 경계 밖에 남지 않는다.
 - PowerShell 파서, 전체 오프라인 회귀, `git diff --check`, 네 화면 크기와 두 지원 터미널의 수동 QA를 통과한다. 실제 AI 요청과 `resume --live`는 별도 승인 없이 검증하지 않는다.
 
+## 슬라이스 15: 진행 heartbeat와 복합 재개 복구
+
+1. 공급자 프로세스의 `OnTick` closure가 module-private observer 이름을 외부 scope에서 다시 해석하지 않도록 `FunctionInfo` 진입점을 캡처한다.
+2. observer·프레임 오류는 공급자 호출과 단계 상태를 깨뜨리지 않고 `PROGRESS_OBSERVER_FAILED` 고정 코드와 안전한 횟수를 한 번만 남긴 뒤 누적 로그로 폴백한다. stdout·stderr, 프롬프트, 문서와 모델 응답은 화면·이벤트·진단에 넣지 않는다.
+3. 쟁점 대상은 다른 단계의 정의 중복 검사 집합과 원장까지 포함한 참조 무결성 집합으로 분리한다. 참조 충돌은 산출물 손상으로 오인해 무효화하지 않고 실패 폐쇄한다.
+4. 산출물 복구는 없음·해시 불일치·스키마 불일치를 구분하고 해당 단계와 의존 단계만 감사 보존 후 재실행 대상으로 만든다.
+5. `attemptCount`는 현재 입력 세대, `totalAttemptCount`는 누적 실제 호출로 분리한다. 사용자 결정으로 세대가 바뀌면 전자만 초기화하며 형식 복구 소진은 terminal `FAILED_STAGE`로 전이한다.
+6. `run-20260730-021613-3e022b` 복구는 동일 볼륨 forensic 사본과 작업 복제본을 먼저 만들고, 정규 파일·NTFS ADS·해시·JSON 계약을 검증한 뒤 작업 복제본에 10개 복원·4개 재실행 예정·공급자 0-call을 적용한다. 오프라인 회귀와 복제 검증 통과 후에만 원본에 같은 0-call 복구를 적용하고 `PAUSED_USER`에서 멈춘다.
+7. 전용 `tests\Invoke-LiveProgressE2E.ps1`은 실제 카탈로그의 `gpt-5.6-luna/low`와 `sonnet/low`만 허용하고 첫 양쪽 장벽 뒤 한 번만 정지를 요청한다. 정상 성공은 정확히 2회, 형식 복구를 포함한 절대 상한은 4회다.
+
+검증 결과:
+
+- PowerShell 파서 오류 0건, 전체 오프라인 회귀 `162개 통과, 0개 실패`.
+- 실제 프로세스 seam에서 heartbeat `0,1,2`초와 서로 다른 스피너 프레임을 확인하고, 프레임 writer 실패의 단일 안전 폴백을 확인했다.
+- 작업 복제본과 원본 0-call 복구 모두 10개 `COMMITTED`, 4개 `PENDING`, 누적 호출 15, 현재 세대 호출 10, 미답변 질문 0, 공급자 추가 호출 0으로 `PAUSED_USER`를 확인했다. 원본은 자동 재개하지 않았다.
+- 2026-07-31 새 진행판 LIVE 실행 `run-20260731-061220-d351c6`, 별도 승인한 재시험 `run-20260731-115418-ffd19c`, 비관리자 호스트 재검증 `run-20260731-142621-3d2365`, 재부팅 후 재검증 `run-20260731-163804-17c44b`은 모두 실제 `gpt-5.6-luna/low` Codex 첫 호출 1회가 동일한 `DF-PROVIDER-PROCESS`·종료 코드 1·stdout 0바이트·stderr 163바이트로 실패했다. 각 실행의 Claude 호출 0회, 모델 대체 0회, 공급자 작업 잔여 0건이며 실행 내 자동 재시도는 하지 않았다. 세 번째와 네 번째 실행은 `STANDARD`, 프로필 일치, PowerShell 7.6.3 `ConsoleHost`, 비리디렉션 `120×30` 환경에서 실패했고, 네 번째 실행 전후 8501 리스너와 Python 프로세스도 0이었다. 따라서 관리자 권한·프로필 불일치와 Streamlit/Uvicorn 서버는 각각 단독 원인이 아니다. 장시간 실제 화면의 frame 변화와 2-call `PAUSED_USER`는 미통과 상태로 남긴다.
+
+## 슬라이스 16: 공급자 프로세스 컨텍스트와 안전 실패 분류
+
+1. Codex doctor·모델 카탈로그·단계 실행은 동일한 `node.exe`와 `codex.js`, 인증 home과 정제된 자식 환경을 사용한다. 표시용 명령 이름이 같아도 실제 실행 파일이 다른 경로는 허용하지 않는다.
+2. 모델 카탈로그 가시성은 실제 호출 가능성의 증거가 아니며 doctor의 라이브 호출 가능성은 새 승인 실행이 성공하기 전까지 `UNVERIFIED`로 표시한다.
+3. 종료 코드가 0이 아닌 공급자 프로세스는 stderr만 메모리에서 고정 안전 사유로 분류하고 원문을 즉시 버린다. stdout은 오류 분류에 사용하지 않으며 두 원시 버퍼 모두 예외·로그·진단·상태에 전달하지 않는다.
+4. `MODEL_UNAVAILABLE`, `AUTH`, `INVALID_OPTION`, `SCHEMA_REJECTED`, `NETWORK`, `REASONING_UNAVAILABLE`, `MODEL_CONFIGURATION_UNAVAILABLE`과 기존 quota·rate limit·timeout·unknown을 합성 fixture로 검증한다.
+5. 저비용 LIVE 실행기는 관리자 호스트를 실패 폐쇄하고 일반 비관리자 PowerShell 7만 허용한다. 관리자 CUA 환경과 일반 호스트 검증을 같은 근거로 합치지 않는다.
+
+검증 결과:
+
+- 현재 설치된 `codex-cli 0.146.0`에서 실제 카탈로그는 Sol/high와 Luna/low·medium을 모두 허용한다. 세 모델·추론 조합 및 Luna/low 단계 스키마의 전체 인자 배열에 `--help`를 붙인 네 parse-only 검사가 모두 종료 코드 0으로 통과했다. 모델 호출은 없었다.
+- 현재 사용자 Codex 기본 설정은 `gpt-5.6-sol/high`다. DuoForge는 `--ignore-user-config`와 명시적 모델·추론 설정을 사용하므로 대화형 세션의 성공 가능성과 같은 호출로 간주하지 않는다. 원본 성공 실행의 `codex-cli 0.145.0`과 현재 실패한 `0.146.0` 사이 버전 경계도 실제 호출 매트릭스의 관찰 항목으로 유지한다.
+- 관리자 CUA PowerShell 7은 `ADMIN`, 프로필 일치는 참으로 확인했다. 일반 비관리자 창의 백그라운드 생성은 CUA 정책으로 차단되어 실제 일반 호스트 호출 성공으로 간주하지 않았다.
+- 제한 토큰으로 분리한 비관리자 PowerShell 7은 `STANDARD`, 프로필 일치, `ConsoleHost`, 입출력 비리디렉션, `120×30`으로 확인했다. 정확한 새 `LIVE` 승인으로 실행한 `run-20260731-142621-3d2365`도 Codex 첫 호출 1회에서 기존과 같은 안전 메타데이터로 실패했으며 Claude 호출은 0회였다.
+- 재부팅 뒤 8501 리스너와 Python 프로세스가 모두 0인 상태에서 같은 제한 토큰 호스트를 다시 증명하고 `run-20260731-163804-17c44b`을 실행했다. Codex 첫 호출은 다시 `DF-PROVIDER-PROCESS`, 종료 코드 1, stdout 0바이트, stderr 163바이트로 실패했고 안전 분류는 `UNKNOWN`, Claude 호출·재시도·모델 대체는 모두 0회였다. 따라서 Streamlit/Uvicorn 서버는 이 결함의 단독 원인이 아니다.
+- 다음 승인 진단은 `tests\Invoke-CodexInvocationMatrix.ps1` 하나로 고정한다. 순서는 Sol/high 기본, Luna/low 기본, Luna/medium 기본, 조건부 Luna/low 단계 스키마이며 예상 3회·절대 상한 4회다. Sol/high 양성 대조군 실패 시 1회에서 즉시 멈추고, Claude·다른 모델·자동 대체·원본 실행 재개는 금지한다.
+- PowerShell 파서 오류 0건, 전체 오프라인 회귀 `162개 통과, 0개 실패`, `git diff --check` 통과. 원본 `run-20260730-021613-3e022b`는 `PAUSED_USER` 그대로이며 자동 재개하지 않았다.
+
 ## 모드 4 격리 게이트
 
 - 2026-07-28 3A 격리 스파이크는 파일 쓰기 차단과 원본 SHA-256 동일은 통과했지만 범위 밖 읽기와 중첩 자식 프로세스 차단에 실패했다.
@@ -348,7 +383,7 @@ source: key | line | dialog
 
 ## 최종 완료 게이트 — 완료
 
-- [x] PowerShell 7 전체 오프라인 회귀 126개 통과
+- [x] PowerShell 7 전체 오프라인 회귀 162개 통과
 - [x] 모드 1·2·3 2라운드 가짜 공급자 E2E 통과
 - [x] 모드 1·2·3 실제 공급자 E2E 강화 검증 통과
 - [x] 정규 입력과 레거시 CLI 별칭 테스트 통과
@@ -362,3 +397,4 @@ source: key | line | dialog
 - [x] 모드 4의 `DF-PREFLIGHT-3A-ISOLATION` 모델 호출 전 차단
 - [x] README, PRD, 구현 계획, 도움말, 메뉴, 오류와 진행판 용어 일치
 - [x] 모든 사람용 출력의 공통 화면 문법, 폭 인식 줄바꿈, hanging indent와 ASCII·무색 폴백
+- [ ] 저비용 실제 진행판 E2E의 2-call `PAUSED_USER`와 시간별 프레임 변화 확인 (`gpt-5.6-luna/low` 첫 호출 프로세스 실패로 미통과)

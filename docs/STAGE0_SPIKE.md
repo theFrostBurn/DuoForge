@@ -71,9 +71,39 @@
 
 현재 재검증 경로는 `tests\Invoke-WorkflowV2LiveE2E.ps1`, 저장 결과 강화 검증기는 `tests\Test-WorkflowV2LiveRun.ps1`이다. 둘 다 실제 공급자 호출과 테스트 전용 설정을 사용하므로 새로운 정확한 `LIVE` 동의가 있을 때만 실행한다. 대체된 workflow-v1 라이브 실행기와 과거 테스트 결과 디렉터리는 유지하지 않으며, workflow-v1 호환성은 오프라인 직렬화 fixture 회귀로 보호한다.
 
+## 진행 heartbeat 및 복합 재개 복구 스파이크
+
+검증일: 2026-07-31
+
+- 실제 프로세스 callback seam에서 `PROVIDER_TICK` 경과 시간 `0,1,2`와 서로 다른 스피너 프레임을 확인했다. module-private observer 진입점은 이름 재해석 대신 캡처하고, observer·프레임 오류는 고정 코드와 안전한 횟수만 한 번 기록한다.
+- `run-20260730-021613-3e022b`는 동일 볼륨 forensic 사본과 작업 복제본에서 정규 파일 46개, 주요 저장 항목 52개, NTFS ADS 4개와 해시를 먼저 검증했다. 작업 복제본의 10개 복원·4개 재실행 예정·공급자 0-call·`PAUSED_USER`가 통과한 뒤에만 원본에 같은 0-call 복구를 적용했다.
+- 복구 후 원본은 10개 `COMMITTED`, 4개 `PENDING`, 누적 실제 호출 15, 현재 입력 세대 호출 10, 미답변 질문 0, Codex·Claude 잔여 단계 각 2개이며 `PAUSED_USER`에 있다. 원본 LIVE 재개는 수행하지 않았다.
+- PowerShell 7 전체 오프라인 회귀는 `162개 통과, 0개 실패`다. 정의/참조 쟁점 대상 분리, 산출물 복구 원인 분리, 입력 세대 시도와 누적 호출 분리, 재시도 소진 `FAILED_STAGE`, observer 안전 폴백, 공급자 프로세스 안전 분류와 실행 컨텍스트 동일성을 포함한다.
+
+### 저비용 실제 진행판 E2E
+
+- 최초 승인으로 새 `shared-document` 실행 `run-20260731-061220-d351c6`을 만들었고, 별도 승인한 재시험은 `run-20260731-115418-ffd19c`, 비관리자 호스트 재검증은 `run-20260731-142621-3d2365`, 재부팅 후 재검증은 `run-20260731-163804-17c44b`이다. 네 실행 모두 Codex `gpt-5.6-luna/low`, Claude `sonnet/low`로 고정했다. 실제 카탈로그 출처는 각각 `codex-app-server`, `claude-cli-help`였으며 다른 모델로 대체하지 않았다.
+- 네 실행 모두 Codex 첫 호출 1회가 동일한 `DF-PROVIDER-PROCESS`, 종료 코드 1, timeout 없음, stdout 0바이트, stderr 163바이트로 실패해 상태는 `RESUMABLE_ERROR`가 되었다. 각 실행의 Claude 호출은 0회이고 공급자 작업 잔여와 금지 이벤트·진단 키는 0건이다. 세 번째와 네 번째 실행의 stderr는 메모리 안전 분류에서 알려진 계열에 일치하지 않아 `UNKNOWN`으로 처리하고 원문을 즉시 버렸다.
+- 호출 전에 실제 PowerShell 7 전체화면 진행판 진입은 확인했지만 호출이 즉시 실패해 같은 공급자 호출 중 경과 시간과 스피너가 여러 프레임으로 변하는 장시간 시각 증거, 첫 Codex·Claude 장벽 뒤 `PAUSED_USER`, 정상 2회 호출 기준은 확인하지 못했다.
+- 허용 범위를 다른 모델, 상위 모델 또는 `fable`로 자동 대체하지 않았고 실패 후 새 실행이나 원본 실행을 자동 재개하지 않았다. 원시 stdout·stderr, 프롬프트, 문서 및 모델 응답은 화면·이벤트·진단·이 문서에 남기지 않았다.
+
+### Codex 공급자 프로세스 결함 후속 진단
+
+- 현재 설치 버전은 `codex-cli 0.146.0`이고 원본 성공 실행 매니페스트는 `codex-cli 0.145.0`을 기록한다. 현재 사용자 기본 설정은 `gpt-5.6-sol/high`지만 DuoForge는 저장된 모델·추론 정도를 명시하고 `--ignore-user-config`를 사용하므로 대화형 세션과 동일 호출 프로필이 아니다.
+- 실제 `codex debug models` 카탈로그는 `gpt-5.6-sol`의 `high`, `gpt-5.6-luna`의 `low`·`medium`을 모두 허용한다. Sol/high, Luna/low, Luna/medium과 Luna/low 단계 스키마의 전체 전역·`exec` 인자 배열에 `--help`만 추가한 네 parse-only 검사는 모두 종료 코드 0이었고 모델 호출은 없었다. 모델 이름·추론 문자열·인자 순서는 유효하며, 이것만으로 실제 서비스 요청 성공을 증명하지는 않는다.
+- doctor·모델 카탈로그·단계 호출이 모두 같은 `node.exe`와 `codex.js`, 계산된 인증 home과 정제된 자식 환경을 사용하도록 통합했다. 기존처럼 doctor·단계는 `codex.cmd`, 카탈로그는 직접 `node.exe codex.js`를 사용하는 구조적 차이를 제거했다.
+- 카탈로그의 모델 노출은 실제 호출 가능성을 증명하지 않는다. doctor는 실제 호출 가능성을 `UNVERIFIED`로 표시하며 새 승인 LIVE 성공 전에는 `gpt-5.6-luna/low` 사용 가능성을 확정하지 않는다.
+- 종료 코드가 0이 아닌 경우 stderr만 메모리에서 `MODEL_UNAVAILABLE`, `AUTH`, `INVALID_OPTION`, `SCHEMA_REJECTED`, `NETWORK`, `REASONING_UNAVAILABLE`, `MODEL_CONFIGURATION_UNAVAILABLE` 등 고정 안전 사유로 분류하고 즉시 버린다. stdout은 분류 입력으로 쓰지 않으며 두 원시 버퍼 모두 반환 전에 비운다. 합성 canary fixture로 화면·로그·진단·예외 비노출을 검증했다.
+- CUA에서 재현한 PowerShell 7은 `ADMIN`이었고 프로필은 일치했다. 일반 비관리자 PowerShell의 CUA 백그라운드 생성은 정책으로 차단되어 별도 실제 증거를 얻지 못했다. 전용 LIVE 실행기는 `STANDARD`만 허용하고 `ADMIN`·`UNKNOWN`을 공급자 호출 전에 차단한다.
+- 제한 토큰으로 분리한 PowerShell 7은 `STANDARD`, 프로필 일치, `ConsoleHost`, 입출력 비리디렉션, `120×30`으로 확인했다. 이 환경에서 승인된 `run-20260731-142621-3d2365`도 동일한 163바이트 실패를 재현했으므로 관리자 권한이나 프로필 불일치는 단독 원인이 아니다. 실행은 Codex 1회에서 실패 폐쇄했고 Claude 0회, 모델 대체 0회, 자동 재시도 0회, 공급자 작업 잔여 0건이었다.
+- 재부팅 후 8501 리스너와 Python 프로세스가 모두 0인 상태에서 같은 제한 토큰 PowerShell 7을 다시 증명했다. `run-20260731-163804-17c44b`도 Codex 1회에서 같은 안전 메타데이터로 실패했으므로 Streamlit/Uvicorn 서버 역시 단독 원인이 아니다. Claude 호출, 모델 대체, 자동 재시도와 공급자 작업 잔여는 모두 0건이었다.
+- 원본 `run-20260730-021613-3e022b`는 `PAUSED_USER`를 유지하며 이 진단에서 재개하거나 공급자를 호출하지 않았다.
+- 전용 `tests\Invoke-CodexInvocationMatrix.ps1`은 새 정확한 `LIVE`가 있을 때만 Sol/high 기본 호출을 양성 대조군으로 먼저 실행하고, 성공할 때 Luna/low 기본 호출과 Luna/medium 기본 호출로 모델·추론 경계를 이동한다. Luna/low 기본 호출까지 성공한 경우에만 같은 조합에 정확한 단계 스키마를 적용한다. 예상 3회, 조건 충족 시 4회, 절대 상한 4회이며 Claude·다른 모델·자동 대체·원본 실행 재개는 없다.
+
 ## 공식 기준
 
-- [OpenAI Codex CLI 명령 참조](https://developers.openai.com/codex/cli/reference)
+- [OpenAI Codex 비대화형 실행 참조](https://learn.chatgpt.com/docs/developer-commands#codex-exec)
+- [OpenAI Codex 구성 및 상태 위치](https://learn.chatgpt.com/docs/config-file/config-advanced#config-and-state-locations)
 - [Claude Code 인증](https://code.claude.com/docs/en/authentication)
 - [Claude Code CLI 참조](https://code.claude.com/docs/en/cli-usage)
 - [Claude Code API 키 환경 변수 우선순위](https://support.claude.com/en/articles/12304248-manage-api-key-environment-variables-in-claude-code)

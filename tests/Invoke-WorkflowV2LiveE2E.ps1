@@ -68,8 +68,8 @@ try {
     $steps = Get-Content -LiteralPath (Join-Path $run.runDirectory 'steps.json') -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 100
     $state = Get-Content -LiteralPath (Join-Path $run.runDirectory 'state.json') -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 50
     $calls = [ordered]@{
-        codex = @($steps.steps | Where-Object { [string]$_.provider -eq 'codex' } | Measure-Object -Property attemptCount -Sum).Sum
-        claude = @($steps.steps | Where-Object { [string]$_.provider -eq 'claude' } | Measure-Object -Property attemptCount -Sum).Sum
+        codex = @($steps.steps | Where-Object { [string]$_.provider -eq 'codex' } | ForEach-Object { [int]$(if ($null -ne $_.totalAttemptCount) { $_.totalAttemptCount } else { $_.attemptCount }) } | Measure-Object -Sum).Sum
+        claude = @($steps.steps | Where-Object { [string]$_.provider -eq 'claude' } | ForEach-Object { [int]$(if ($null -ne $_.totalAttemptCount) { $_.totalAttemptCount } else { $_.attemptCount }) } | Measure-Object -Sum).Sum
     }
     [ordered]@{
         schemaVersion = 1

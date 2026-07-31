@@ -250,10 +250,14 @@ function Invoke-DuoForgeLiveProviderExplanationInternal {
     $operationKey = ('explain-{0}-{1}-{2}' -f $IssueId.ToLowerInvariant(), $Provider, [Guid]::NewGuid().ToString('N').Substring(0, 8))
     $schema = Read-DuoForgeJson -Path (Get-DuoForgeExplanationSchemaPathInternal)
     $spec = Get-DuoForgeStructuredProviderCommandSpecInternal -Provider $Provider -RunDirectory $RunDirectory -OperationKey $operationKey -Prompt $Prompt -Schema $schema -SchemaFileName 'explanation-result.schema.json'
+    $providerContext = Resolve-DuoForgeProviderExecutionContextInternal -Provider $Provider
+    if (-not [bool]$providerContext.liveRuntimeEligible) {
+        throw (New-DuoForgeException -Code 'DF-AUTH-CONTEXT' -Message '현재 PowerShell 환경에서는 AI 로그인 정보를 확인할 수 없습니다. 일반 PowerShell 7 창에서 다시 실행해 주세요.')
+    }
     $state = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'state.json')
     Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'EXPLANATION_CALL_STARTED' -Status ([string]$state.status) -Data ([ordered]@{ issueId = $IssueId; provider = $Provider; level = $Level; promptHash = $Prompt.sha256; contextHash = $Prompt.contextHash })
     try {
-        $processResult = Invoke-DuoForgeProcess -CommandName ([string]$spec.commandName) -Arguments @($spec.arguments) -WorkingDirectory ([string]$spec.workingDirectory) -TimeoutSeconds $TimeoutSeconds -StandardInput ([string]$spec.prompt) -EnvironmentAllowList (Get-DuoForgeProviderEnvironmentAllowList)
+        $processResult = Invoke-DuoForgeProcess -CommandName ([string]$spec.commandName) -Arguments @($spec.arguments) -WorkingDirectory ([string]$spec.workingDirectory) -TimeoutSeconds $TimeoutSeconds -StandardInput ([string]$spec.prompt) -CommandInvocation $providerContext.invocation -EnvironmentAllowList @($providerContext.environmentAllowList) -EnvironmentOverrides $providerContext.environmentOverrides
         if (-not $processResult.started -or $processResult.timedOut -or [int]$processResult.exitCode -ne 0) {
             $classification = Get-DuoForgeProviderFailureClassificationInternal -Provider $Provider -ProcessResult $processResult
             throw (New-DuoForgeProviderFailureExceptionInternal -Classification $classification)

@@ -186,21 +186,7 @@ function Resolve-DuoForgeCodexAppServerInvocationInternal {
     param([System.Collections.IDictionary]$ProviderContext)
 
     if ($null -eq $ProviderContext) { $ProviderContext = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex }
-    $invocation = $ProviderContext.invocation
-    if ($null -eq $invocation) { return $null }
-    if ([System.IO.Path]::GetExtension([string]$invocation.source) -in @('.cmd', '.bat')) {
-        $npmRoot = [System.IO.Path]::GetDirectoryName([string]$invocation.source)
-        $codexJavaScript = Join-Path $npmRoot 'node_modules\@openai\codex\bin\codex.js'
-        $node = @(Get-Command node.exe -All -ErrorAction SilentlyContinue | Where-Object { $_.CommandType -eq [System.Management.Automation.CommandTypes]::Application } | Select-Object -First 1)
-        if ($node.Count -eq 1 -and (Test-Path -LiteralPath $codexJavaScript -PathType Leaf)) {
-            return [ordered]@{
-                fileName = [string]$node[0].Source
-                prefixArguments = @($codexJavaScript)
-                source = [string]$invocation.source
-            }
-        }
-    }
-    return $invocation
+    return $ProviderContext.invocation
 }
 
 function Invoke-DuoForgeCodexModelListInternal {
@@ -237,7 +223,7 @@ function Invoke-DuoForgeCodexModelListInternal {
         if (-not $process.Start()) { return $null }
         $stderrTask = $process.StandardError.ReadToEndAsync()
         $requests = @(
-            ([ordered]@{ method = 'initialize'; id = 1; params = [ordered]@{ clientInfo = [ordered]@{ name = 'duoforge'; title = 'DuoForge'; version = $script:ModuleVersion } } } | ConvertTo-Json -Depth 10 -Compress),
+            ([ordered]@{ method = 'initialize'; id = 1; params = [ordered]@{ clientInfo = [ordered]@{ name = 'duoforge'; title = 'DuoForge'; version = $script:ModuleVersion }; capabilities = [ordered]@{ experimentalApi = $true } } } | ConvertTo-Json -Depth 10 -Compress),
             ([ordered]@{ method = 'initialized'; params = [ordered]@{} } | ConvertTo-Json -Depth 10 -Compress),
             ([ordered]@{ method = 'model/list'; id = 2; params = [ordered]@{ includeHidden = $false; limit = 100 } } | ConvertTo-Json -Depth 10 -Compress)
         )
@@ -280,7 +266,11 @@ function Get-DuoForgeCodexModelsFromCliInternal {
     param([System.Collections.IDictionary]$ProviderContext)
 
     if ($null -eq $ProviderContext) { $ProviderContext = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex }
-    $cacheKey = 'codex|{0}|{1}|{2}' -f [string](Get-DuoForgeObjectValue -Object $ProviderContext.invocation -Name 'source' -Default ''), [string]$ProviderContext.authHomePath, [bool]$ProviderContext.liveRuntimeEligible
+    $invocation = Resolve-DuoForgeCodexAppServerInvocationInternal -ProviderContext $ProviderContext
+    $invocationKey = if ($null -eq $invocation) { '' } else {
+        '{0}|{1}|{2}' -f [string]$invocation.fileName, (@($invocation.prefixArguments) -join ','), [string]$invocation.source
+    }
+    $cacheKey = 'codex|{0}|{1}|{2}' -f $invocationKey, [string]$ProviderContext.authHomePath, [bool]$ProviderContext.liveRuntimeEligible
     if (-not (Get-Variable -Name DuoForgeCliCatalogCache -Scope Script -ErrorAction SilentlyContinue)) {
         $script:DuoForgeCliCatalogCache = @{}
     }

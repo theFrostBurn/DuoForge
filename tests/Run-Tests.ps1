@@ -220,6 +220,31 @@ try {
         Assert-True ($liveRunnerText -match 'ClaudeReasoningEffort\s+\$testClaudeEffort|ClaudeReasoningEffort\s*=\s*\$testClaudeEffort')
         Assert-False ($liveRunnerText -match '\[Parameter\(Mandatory\)\]\[string\]\$ClaudeModel')
         Assert-True ($liveRunnerText -match "Consent\s+-cne\s+'LIVE'")
+
+        $progressRunnerText = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-LiveProgressE2E.ps1') -Raw
+        Assert-True ($progressRunnerText -match "ValidateSet\('gpt-5\.6-luna'\)")
+        Assert-True ($progressRunnerText -match "ValidateSet\('sonnet'\)")
+        Assert-True ($progressRunnerText -match "Consent\s+-cne\s+'LIVE'")
+        Assert-True ($progressRunnerText -match "codexSource\s+-ceq\s+'codex-app-server'")
+        Assert-True ($progressRunnerText -match "claudeSource\s+-ceq\s+'claude-cli-help'")
+        Assert-True ($progressRunnerText -match 'totalCalls\s+-ge\s+2\s+-and\s+\$totalCalls\s+-le\s+4')
+        Assert-True ($progressRunnerText -match 'totalCalls\s+-eq\s+2')
+        Assert-True ($progressRunnerText -match "status\s+-cne\s+'PAUSED_USER'")
+        Assert-True ($progressRunnerText -match "hostElevation\s+-ceq\s+'STANDARD'")
+        Assert-False ($progressRunnerText -match '(?i)fable|opus|gpt-5\.6-(?:sol|terra)')
+
+        $matrixRunnerText = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Invoke-CodexInvocationMatrix.ps1') -Raw
+        Assert-True ($matrixRunnerText -match "Consent\s+-cne\s+'LIVE'")
+        Assert-True ($matrixRunnerText -match "'SOL_HIGH_BASE'.*'gpt-5\.6-sol'.*'high'")
+        Assert-True ($matrixRunnerText -match "'LUNA_LOW_BASE'.*'gpt-5\.6-luna'.*'low'")
+        Assert-True ($matrixRunnerText -match "'LUNA_MEDIUM_BASE'.*'gpt-5\.6-luna'.*'medium'")
+        Assert-True ($matrixRunnerText -match '''LUNA_LOW_STAGE_SCHEMA''.*schema\s*=\s*\$true')
+        Assert-True ($matrixRunnerText -match "maximumCalls\s*=\s*4")
+        Assert-True ($matrixRunnerText -match "status\s*=\s*'PAUSED_USER'")
+        Assert-True ($matrixRunnerText -match "codex-app-server")
+        Assert-True ($matrixRunnerText -match "hostContext\.elevation\s+-cne\s+'STANDARD'")
+        Assert-False ($matrixRunnerText -match '(?i)claude|sonnet|fable|opus')
+        Assert-False ($matrixRunnerText -match '(?i)output-last-message|WriteAllText|Add-Content|Out-File|Tee-Object')
     }
 
     Test-Case '모델 메뉴 폴백은 CLI 계열과 현재 존재하는 권장 모델 및 추론 정도만 표시한다' {
@@ -1856,13 +1881,17 @@ try {
 
     Test-Case '공급자 실행 컨텍스트는 프로필 불일치를 미로그인과 분리하고 명시적 인증 홈을 보존한다' {
         $contexts = & $module {
-            $host = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex -ProcessUserProfile 'C:\Users\cookie' -DotNetUserProfile 'C:\Users\cookie' -ExplicitAuthHome ''
-            $sandbox = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex -ProcessUserProfile 'C:\Users\cookie' -DotNetUserProfile 'C:\Users\CodexSandboxOffline' -ExplicitAuthHome ''
-            $explicit = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex -ProcessUserProfile 'C:\Users\cookie' -DotNetUserProfile 'C:\Users\cookie' -ExplicitAuthHome 'D:\Auth\codex-home'
-            return [ordered]@{ host = $host; sandbox = $sandbox; explicit = $explicit }
+            $host = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex -ProcessUserProfile 'C:\Users\cookie' -DotNetUserProfile 'C:\Users\cookie' -ExplicitAuthHome '' -IsElevated:$false
+            $admin = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex -ProcessUserProfile 'C:\Users\cookie' -DotNetUserProfile 'C:\Users\cookie' -ExplicitAuthHome '' -IsElevated:$true
+            $sandbox = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex -ProcessUserProfile 'C:\Users\cookie' -DotNetUserProfile 'C:\Users\CodexSandboxOffline' -ExplicitAuthHome '' -IsElevated:$false
+            $explicit = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex -ProcessUserProfile 'C:\Users\cookie' -DotNetUserProfile 'C:\Users\cookie' -ExplicitAuthHome 'D:\Auth\codex-home' -IsElevated:$false
+            return [ordered]@{ host = $host; admin = $admin; sandbox = $sandbox; explicit = $explicit }
         }
         Assert-Equal $contexts.host.authContextStatus 'AVAILABLE'
         Assert-True ([bool]$contexts.host.liveRuntimeEligible)
+        Assert-Equal $contexts.host.hostElevation 'STANDARD'
+        Assert-Equal $contexts.admin.hostElevation 'ADMIN'
+        Assert-Equal $contexts.host.environmentOverrides.CODEX_HOME 'C:\Users\cookie\.codex'
         Assert-Equal $contexts.sandbox.authContextStatus 'PROFILE_MISMATCH'
         Assert-False ([bool]$contexts.sandbox.liveRuntimeEligible)
         Assert-Equal $contexts.explicit.authHomeSource 'explicit'
@@ -2057,6 +2086,26 @@ try {
         }
         Assert-Equal $child.exitCode 0
         Assert-ContainsText ([string]$child.stdout) 'PATH_OK'
+    }
+
+    Test-Case 'doctor 카탈로그 stage는 같은 Codex 실행 파일과 인증 환경을 사용한다' {
+        $plans = & $module {
+            $context = Resolve-DuoForgeProviderExecutionContextInternal -Provider codex -ProcessUserProfile 'C:\Users\cookie' -DotNetUserProfile 'C:\Users\cookie' -ExplicitAuthHome 'D:\Auth\codex-home' -IsElevated:$false
+            $catalogInvocation = Resolve-DuoForgeCodexAppServerInvocationInternal -ProviderContext $context
+            return [ordered]@{
+                doctor = [ordered]@{ invocation = $context.invocation; authHome = $context.authHomePath; allowList = @($context.environmentAllowList); overrides = $context.environmentOverrides }
+                catalog = [ordered]@{ invocation = $catalogInvocation; authHome = $context.authHomePath; allowList = @($context.environmentAllowList); overrides = $context.environmentOverrides }
+                stage = [ordered]@{ invocation = $context.invocation; authHome = $context.authHomePath; allowList = @($context.environmentAllowList); overrides = $context.environmentOverrides }
+            }
+        }
+        foreach ($surface in @('catalog', 'stage')) {
+            Assert-Equal $plans[$surface].invocation.fileName $plans.doctor.invocation.fileName
+            Assert-Equal $plans[$surface].invocation.source $plans.doctor.invocation.source
+            Assert-Equal (@($plans[$surface].invocation.prefixArguments) -join '|') (@($plans.doctor.invocation.prefixArguments) -join '|')
+            Assert-Equal $plans[$surface].authHome $plans.doctor.authHome
+            Assert-Equal (@($plans[$surface].allowList) -join '|') (@($plans.doctor.allowList) -join '|')
+            Assert-Equal ($plans[$surface].overrides | ConvertTo-Json -Compress) ($plans.doctor.overrides | ConvertTo-Json -Compress)
+        }
     }
 
     Test-Case '유효 요청은 원본을 바꾸지 않고 불변 스냅샷 실행을 만든다' {
@@ -2763,13 +2812,49 @@ try {
             $callback = { param($step) $control.count++; New-DuoForgeFakeStageResult -Step $step }.GetNewClosure()
             Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
         } $run.runDirectory $calls
-        Assert-Equal $result.status 'RESUMABLE_ERROR'
+        Assert-Equal $result.status 'FAILED_STAGE'
         Assert-Equal $result.code 'DF-STAGE-RETRY-EXHAUSTED'
         Assert-Equal $result.invoked 0
         Assert-Equal $calls.count 0
         $graph = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'steps.json') | ConvertFrom-Json -Depth 100
         Assert-Equal $graph.steps[0].attemptCount 2
         Assert-Equal $graph.steps[0].retryMode 'RETRY_EXHAUSTED'
+    }
+
+    Test-Case '사용자 결정으로 바뀐 입력 세대는 현재 시도만 초기화하고 누적 호출은 보존한다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'attempt-generation\input\brief.md')
+        $workspace = Join-Path $tempRoot 'attempt-generation\results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $generationRun = New-DuoForgeRun -ValidationResult $validation
+        $resetGraph = & $module {
+            param($directory)
+            $graph = Initialize-DuoForgeStageGraph -RunDirectory $directory
+            $affected = @($graph.steps | Where-Object { [int]$_.round -eq [int]$graph.maxRounds -and [string]$_.stage -in @('synthesis', 'final-validation') })
+            foreach ($step in $affected) {
+                $artifactDirectory = Join-Path $directory ("rounds\round-{0:D2}\raw-redacted" -f [int]$step.round)
+                [IO.Directory]::CreateDirectory($artifactDirectory) | Out-Null
+                $artifactPath = Join-Path $artifactDirectory ($step.stepKey + '.json')
+                Write-DuoForgeJsonAtomic -Path $artifactPath -Value ([ordered]@{ stepKey = $step.stepKey })
+                $step.status = 'COMMITTED'
+                $step.attemptCount = 2
+                $step.totalAttemptCount = 5
+                $step.inputGeneration = 3
+                $step.artifactPath = $artifactPath
+                $step.artifactHash = Get-DuoForgeSha256 -Path $artifactPath
+            }
+            Write-DuoForgeJsonAtomic -Path (Join-Path $directory 'steps.json') -Value $graph
+            $null = Reset-DuoForgeDecisionAffectedSteps -RunDirectory $directory -Mode shared-document
+            return (Read-DuoForgeJson -Path (Join-Path $directory 'steps.json'))
+        } $generationRun.runDirectory
+        $affectedAfter = @($resetGraph.steps | Where-Object { [int]$_.round -eq [int]$resetGraph.maxRounds -and [string]$_.stage -in @('synthesis', 'final-validation') })
+        Assert-Equal $affectedAfter.Count 2
+        foreach ($step in $affectedAfter) {
+            Assert-Equal $step.attemptCount 0
+            Assert-Equal $step.totalAttemptCount 5
+            Assert-Equal $step.inputGeneration 4
+            Assert-True ([string]$step.status -in @('STALE', 'PENDING'))
+        }
     }
 
     Test-Case '공급자 프로세스 대기는 진행판 heartbeat를 초 단위로 전달한다' {
@@ -2783,6 +2868,53 @@ try {
         Assert-True ($ticks.Count -ge 2)
         Assert-Equal $ticks[0] 0
         Assert-True (1 -in @($ticks))
+    }
+
+    Test-Case '실제 process tick은 provider callback과 진행판 writer까지 서로 다른 프레임을 전달한다' {
+        $progressDirectory = Join-Path $tempRoot 'progress-callback-run'
+        [IO.Directory]::CreateDirectory($progressDirectory) | Out-Null
+        $frames = [System.Collections.Generic.List[string]]::new()
+        $result = & $module {
+            param($directory, $frameList)
+            $writer = {
+                param($view)
+                $frameList.Add([string]$view.providerElapsedSeconds)
+            }.GetNewClosure()
+            $view = New-DuoForgeProgressViewInternal -RunDirectory $directory -Mode log -FrameWriter $writer
+            $view.mode = 'fullscreen'
+            $tick = New-DuoForgeProviderTickCallbackInternal -Observer $view.observer -RunDirectory $directory -Data ([ordered]@{
+                workflowVersion = 'workflow-v2'; stepKey = 'progress-test'; provider = 'codex'; stage = 'document-review'; round = 1
+            })
+            Invoke-DuoForgeProcess -CommandName 'pwsh.exe' -Arguments @('-NoLogo', '-NoProfile', '-Command', 'Start-Sleep -Milliseconds 2300') -TimeoutSeconds 5 -OnTick $tick
+        } $progressDirectory $frames
+        Assert-Equal $result.exitCode 0
+        Assert-Equal $result.tickCallbackFailures 0
+        Assert-True ($frames.Count -ge 3)
+        $elapsedValues = @($frames | ForEach-Object { [int]$_ } | Sort-Object -Unique)
+        Assert-True ($elapsedValues.Count -ge 3)
+        $spinnerFrames = & $module { param($values) @($values | ForEach-Object { Get-DuoForgeProgressSpinnerFrameInternal -ElapsedSeconds $_ }) } $elapsedValues
+        Assert-True (@($spinnerFrames | Sort-Object -Unique).Count -ge 3)
+        foreach ($frame in @($spinnerFrames)) { Assert-Equal $frame.Length 1 }
+    }
+
+    Test-Case '진행판 frame writer 오류는 고정 코드 한 번만 남기고 로그 모드로 전환한다' {
+        $progressDirectory = Join-Path $tempRoot 'progress-writer-failure-run'
+        [IO.Directory]::CreateDirectory($progressDirectory) | Out-Null
+        $view = & $module {
+            param($directory)
+            $writer = { param($ignored) throw 'RAW_PROGRESS_CANARY' }
+            $current = New-DuoForgeProgressViewInternal -RunDirectory $directory -Mode log -FrameWriter $writer
+            $current.mode = 'fullscreen'
+            Invoke-DuoForgeProgressObserverInternal -Observer $current.observer -Type 'PROVIDER_TICK' -RunDirectory $directory -Data ([ordered]@{ elapsedSeconds = 1 })
+            Invoke-DuoForgeProgressObserverInternal -Observer $current.observer -Type 'PROVIDER_TICK' -RunDirectory $directory -Data ([ordered]@{ elapsedSeconds = 2 })
+            return $current
+        } $progressDirectory
+        Assert-Equal $view.mode 'log'
+        Assert-Equal $view.observerFailureCode 'DF-PROGRESS-FRAME'
+        Assert-Equal $view.observerFailureCount 1
+        Assert-True ([bool]$view.observerFailureReported)
+        $safeState = '{0}|{1}|{2}' -f $view.mode, $view.observerFailureCode, $view.observerFailureCount
+        Assert-NotContainsText $safeState 'RAW_PROGRESS_CANARY'
     }
 
     Test-Case '같은 장벽의 양쪽 단계는 동일한 선행 산출물만 보고 순차 실행된다' {
@@ -3077,6 +3209,22 @@ try {
             targetDocumentId = 'A'; sourceDocumentIds = @('A', 'B'); stage = 'document-revision'; round = 1
         }
         $knownTargets = [ordered]@{ 'KNOWN-A' = 'A' }
+
+        $ledgerSelfResult = & $module {
+            param($step)
+            $result = New-DuoForgeFakeStageResult -Step $step
+            $result.issues = @([ordered]@{ issueKey = 'SELF-A'; targetDocumentId = 'A'; category = 'correctness'; severity = 'major'; claim = '현재 단계가 정의한 쟁점입니다.'; evidence = @(); proposal = '수정합니다.'; requiresUser = $false; blockingProposal = $false })
+            Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -DefinitionIssueTargets ([ordered]@{}) -ReferenceIssueTargets ([ordered]@{ 'SELF-A' = 'A' })
+        } $revisionStep
+        Assert-True ([bool]$ledgerSelfResult.valid) ($ledgerSelfResult.errors -join ' | ')
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+            & $module {
+                param($step)
+                $result = New-DuoForgeFakeStageResult -Step $step
+                $result.issues = @([ordered]@{ issueKey = 'OTHER-A'; targetDocumentId = 'A'; category = 'correctness'; severity = 'major'; claim = '다른 단계와 중복된 쟁점입니다.'; evidence = @(); proposal = '수정합니다.'; requiresUser = $false; blockingProposal = $false })
+                Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -DefinitionIssueTargets ([ordered]@{ 'OTHER-A' = 'A' }) -ReferenceIssueTargets ([ordered]@{ 'OTHER-A' = 'A' }) -ThrowOnError
+            } $revisionStep
+        }
 
         Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
             & $module {
@@ -3432,28 +3580,56 @@ try {
         Assert-Equal $explanationSchema.properties.schemaVersion.const 1
     }
 
-    Test-Case '공급자 오류 분류는 원문을 저장하지 않고 한도·인증·시간초과를 구분한다' {
+    Test-Case '공급자 오류 분류는 stderr를 안전 코드로 바꾸고 원문을 즉시 버린다' {
         $classifications = & $module {
-            [ordered]@{
-                quota = Get-DuoForgeProviderFailureClassificationInternal -Provider claude -ProcessResult ([ordered]@{ started = $true; timedOut = $false; exitCode = 1; stdout = ''; stderr = 'usage limit reached secret-value'; errorCategory = $null })
-                rate = Get-DuoForgeProviderFailureClassificationInternal -Provider codex -ProcessResult ([ordered]@{ started = $true; timedOut = $false; exitCode = 1; stdout = ''; stderr = 'too many requests'; errorCategory = $null })
-                auth = Get-DuoForgeProviderFailureClassificationInternal -Provider codex -ProcessResult ([ordered]@{ started = $true; timedOut = $false; exitCode = 1; stdout = ''; stderr = 'login required'; errorCategory = $null })
-                timeout = Get-DuoForgeProviderFailureClassificationInternal -Provider claude -ProcessResult ([ordered]@{ started = $true; timedOut = $true; exitCode = $null; stdout = ''; stderr = ''; errorCategory = 'timeout' })
-                schema = Get-DuoForgeProviderFailureClassificationInternal -Provider codex -ProcessResult ([ordered]@{ started = $true; timedOut = $false; exitCode = 1; stdout = '{"type":"error","error":{"code":"invalid_json_schema"}}'; stderr = ''; errorCategory = $null })
+            $fixtures = [ordered]@{
+                model = 'model gpt-test is not available RAW-MODEL-CANARY'
+                auth = 'login required RAW-AUTH-CANARY'
+                option = "unexpected argument '--bad' found RAW-OPTION-CANARY"
+                schema = 'invalid_json_schema RAW-SCHEMA-CANARY'
+                reasoning = 'reasoning effort low is not supported RAW-REASONING-CANARY'
+                modelConfiguration = "unsupported value 'low' is not supported with the selected model RAW-MODEL-CONFIG-CANARY"
+                network = 'connection refused RAW-NETWORK-CANARY'
+                quota = 'usage limit reached RAW-QUOTA-CANARY'
+                rate = 'too many requests RAW-RATE-CANARY'
+                unknown = 'opaque failure RAW-UNKNOWN-CANARY'
             }
+            $result = [ordered]@{}
+            $cleared = [ordered]@{}
+            foreach ($entry in $fixtures.GetEnumerator()) {
+                $process = [ordered]@{ started = $true; timedOut = $false; exitCode = 1; stdout = 'login required RAW-STDOUT-CANARY'; stderr = [string]$entry.Value; errorCategory = $null }
+                $result[$entry.Key] = Get-DuoForgeProviderFailureClassificationInternal -Provider codex -ProcessResult $process
+                $cleared[$entry.Key] = [ordered]@{ stdout = [string]$process.stdout; stderr = [string]$process.stderr }
+            }
+            $timeoutProcess = [ordered]@{ started = $true; timedOut = $true; exitCode = $null; stdout = 'RAW-TIMEOUT-OUT'; stderr = 'RAW-TIMEOUT-ERR'; errorCategory = 'timeout' }
+            $result.timeout = Get-DuoForgeProviderFailureClassificationInternal -Provider claude -ProcessResult $timeoutProcess
+            $cleared.timeout = [ordered]@{ stdout = [string]$timeoutProcess.stdout; stderr = [string]$timeoutProcess.stderr }
+            return [ordered]@{ result = $result; cleared = $cleared }
         }
-        Assert-Equal $classifications.quota.code 'DF-PROVIDER-QUOTA'
-        Assert-Equal $classifications.quota.targetStatus 'PAUSED_QUOTA'
-        Assert-False ([bool]$classifications.quota.retryable)
-        Assert-Equal $classifications.rate.code 'DF-PROVIDER-RATE-LIMIT'
-        Assert-True ([bool]$classifications.rate.retryable)
-        Assert-Equal $classifications.auth.targetStatus 'BLOCKED_PREFLIGHT'
-        Assert-Equal $classifications.timeout.code 'DF-PROVIDER-TIMEOUT'
-        Assert-True ([bool]$classifications.timeout.retryable)
-        Assert-Equal $classifications.schema.code 'DF-PROVIDER-SCHEMA-COMPAT'
-        Assert-Equal $classifications.schema.targetStatus 'BLOCKED_PREFLIGHT'
-        Assert-False ([bool]$classifications.schema.retryable)
-        Assert-NotContainsText ($classifications | ConvertTo-Json -Depth 20) 'secret-value'
+        $expected = [ordered]@{
+            model = @('MODEL_UNAVAILABLE', 'DF-PROVIDER-MODEL-UNAVAILABLE', 'BLOCKED_PREFLIGHT', $false)
+            auth = @('AUTH', 'DF-PROVIDER-AUTH', 'BLOCKED_PREFLIGHT', $false)
+            option = @('INVALID_OPTION', 'DF-PROVIDER-INVALID-OPTION', 'BLOCKED_PREFLIGHT', $false)
+            schema = @('SCHEMA_REJECTED', 'DF-PROVIDER-SCHEMA-REJECTED', 'BLOCKED_PREFLIGHT', $false)
+            reasoning = @('REASONING_UNAVAILABLE', 'DF-PROVIDER-REASONING-UNAVAILABLE', 'BLOCKED_PREFLIGHT', $false)
+            modelConfiguration = @('MODEL_CONFIGURATION_UNAVAILABLE', 'DF-PROVIDER-MODEL-CONFIGURATION', 'BLOCKED_PREFLIGHT', $false)
+            network = @('NETWORK', 'DF-PROVIDER-NETWORK', 'RESUMABLE_ERROR', $true)
+            quota = @('QUOTA', 'DF-PROVIDER-QUOTA', 'PAUSED_QUOTA', $false)
+            rate = @('RATE_LIMIT', 'DF-PROVIDER-RATE-LIMIT', 'RESUMABLE_ERROR', $true)
+            unknown = @('UNKNOWN', 'DF-PROVIDER-PROCESS', 'RESUMABLE_ERROR', $false)
+            timeout = @('TIMEOUT', 'DF-PROVIDER-TIMEOUT', 'RESUMABLE_ERROR', $true)
+        }
+        foreach ($name in $expected.Keys) {
+            Assert-Equal $classifications.result[$name].safeReason $expected[$name][0]
+            Assert-Equal $classifications.result[$name].code $expected[$name][1]
+            Assert-Equal $classifications.result[$name].targetStatus $expected[$name][2]
+            Assert-Equal ([bool]$classifications.result[$name].retryable) ([bool]$expected[$name][3])
+            Assert-True ([string]::IsNullOrEmpty([string]$classifications.cleared[$name].stdout))
+            Assert-True ([string]::IsNullOrEmpty([string]$classifications.cleared[$name].stderr))
+        }
+        $safeJson = $classifications | ConvertTo-Json -Depth 20
+        Assert-NotContainsText $safeJson 'RAW-'
+        Assert-Equal $classifications.result.model.safeReason 'MODEL_UNAVAILABLE' 'stdout의 AUTH 문구가 stderr 분류보다 우선하면 안 됩니다.'
     }
 
     Test-Case '구조 오류는 한 번만 자동 재시도하고 구독 한도는 안전하게 일시정지 후 재개한다' {
@@ -4723,7 +4899,7 @@ try {
                     $sharedControl.calls++
                     $result = New-DuoForgeFakeStageResult -Step $step
                     if ([string]$step.stage -eq 'final-validation') {
-                        $sequence = [int]$step.attemptCount
+                        $sequence = [int]$step.inputGeneration
                         $externalKey = 'REASK-R02-{0:D3}' -f $sequence
                         $result.finalApproved = $false
                         $result.issues = @([ordered]@{ issueKey = $externalKey; targetDocumentId = 'merged'; category = 'preference'; severity = 'major'; claim = "결정 검토 $sequence 뒤 새 선택이 필요합니다."; evidence = @(); proposal = "새 방향 $sequence 을 선택하세요."; requiresUser = $true; blockingProposal = $true })
@@ -5327,7 +5503,7 @@ Setext 결론
             }
             Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
         } $repeatRun.runDirectory
-        Assert-Equal $badEngineResult.status 'RESUMABLE_ERROR'
+        Assert-Equal $badEngineResult.status 'FAILED_STAGE'
         Assert-Equal $badEngineResult.invoked 0
 
         $issueRun = New-DuoForgeRun -ValidationResult $validation

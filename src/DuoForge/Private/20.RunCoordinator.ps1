@@ -42,7 +42,7 @@ function Get-DuoForgeRemainingCallBudget {
         $planned = $providerSteps.Count
         $completed = $planned - $remainingSteps.Count
         $attempted = 0
-        foreach ($step in $providerSteps) { $attempted += [int]$step.attemptCount }
+        foreach ($step in $providerSteps) { $attempted += [int](Get-DuoForgeObjectValue -Object $step -Name 'totalAttemptCount' -Default ([int]$step.attemptCount)) }
         $baseCallsRemaining = @($remainingSteps | Where-Object { [int]$_.attemptCount -eq 0 }).Count
         $retryBudgetRemaining = @($remainingSteps | Where-Object { [int]$_.attemptCount -lt 2 }).Count
         $blockedSteps = @($remainingSteps | Where-Object { [string]$_.status -eq 'FAILED' -and [string]$_.retryMode -eq 'RETRY_EXHAUSTED' })
@@ -90,7 +90,7 @@ function Invoke-DuoForgeResumeLiveInternal {
     }
     $null = Assert-DuoForgeRunStorageContractInternal -RunDirectory $directory
     $null = Assert-DuoForgeProviderSelectionsInternal -Selections (Get-DuoForgeObjectValue -Object $run.manifest -Name 'providerSelections')
-    if ([string]$run.state.status -in @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED')) {
+    if ([string]$run.state.status -in @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED')) {
         return [ordered]@{ status = [string]$run.state.status; invoked = 0 }
     }
     $pendingPath = Join-Path $directory 'decisions\pending.json'

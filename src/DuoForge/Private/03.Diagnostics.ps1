@@ -26,6 +26,10 @@ function Get-DuoForgeDiagnosticPublicSummaryInternal {
         '^DF-PROVIDER-QUOTA$' { return 'AI 서비스의 사용 한도에 도달했습니다.' }
         '^DF-PROVIDER-RATE-LIMIT$' { return 'AI 서비스에 너무 많은 요청을 보내 잠시 기다려야 합니다.' }
         '^DF-PROVIDER-AUTH$' { return 'AI 로그인 상태를 확인할 수 없습니다.' }
+        '^DF-PROVIDER-MODEL-UNAVAILABLE$' { return '선택한 AI 모델을 현재 계정으로 사용할 수 없습니다.' }
+        '^DF-PROVIDER-INVALID-OPTION$' { return '현재 AI 명령줄 도구가 필요한 실행 옵션을 지원하지 않습니다.' }
+        '^DF-PROVIDER-SCHEMA-REJECTED$' { return 'AI 구조화 출력 조건을 현재 도구가 받아들이지 못했습니다.' }
+        '^DF-PROVIDER-NETWORK$' { return 'AI 서비스에 연결하지 못했습니다.' }
         '^DF-PROVIDER-PROCESS$' { return 'AI 작업을 시작하지 못했습니다.' }
         '^DF-PROVIDER-' { return 'AI 작업 중 오류가 발생했습니다.' }
         '^DF-CLI-' { return '명령을 처리할 수 없습니다.' }

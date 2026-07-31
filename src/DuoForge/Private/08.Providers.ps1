@@ -169,7 +169,7 @@ function Get-DuoForgeProviderDiagnostic {
             documentProfileSupported = $false
             projectAuditProfileSupported = $false
             authStatus = 'STATUS_UNAVAILABLE'
-            authContext = [ordered]@{ status = [string]$ProviderContext.authContextStatus; authHomeSource = [string]$ProviderContext.authHomeSource; profileMismatch = [bool]$ProviderContext.profileMismatch; liveRuntimeEligible = $false }
+            authContext = [ordered]@{ status = [string]$ProviderContext.authContextStatus; authHomeSource = [string]$ProviderContext.authHomeSource; profileMismatch = [bool]$ProviderContext.profileMismatch; hostElevation = [string]$ProviderContext.hostElevation; liveRuntimeEligible = $false }
             status = 'MISSING'
         }
     }
@@ -195,7 +195,8 @@ function Get-DuoForgeProviderDiagnostic {
             authType = $auth.authType
             authStatus = $auth.status
             authStatusExitCode = $auth.exitCode
-            authContext = [ordered]@{ status = [string]$ProviderContext.authContextStatus; authHomeSource = [string]$ProviderContext.authHomeSource; profileMismatch = [bool]$ProviderContext.profileMismatch; liveRuntimeEligible = [bool]$ProviderContext.liveRuntimeEligible; commandSource = [string]$ProviderContext.invocation.source }
+            authContext = [ordered]@{ status = [string]$ProviderContext.authContextStatus; authHomeSource = [string]$ProviderContext.authHomeSource; profileMismatch = [bool]$ProviderContext.profileMismatch; hostElevation = [string]$ProviderContext.hostElevation; liveRuntimeEligible = [bool]$ProviderContext.liveRuntimeEligible; commandSource = [string]$ProviderContext.invocation.source }
+            liveCallability = 'UNVERIFIED'
             requiredFlags = $flagStatus
             ignoreRulesAvailable = [bool]$flagStatus['--ignore-rules']
             zeroToolSurfaceVerified = $false
@@ -222,7 +223,8 @@ function Get-DuoForgeProviderDiagnostic {
         subscriptionType = $auth.subscriptionType
         authStatus = $auth.status
         authStatusExitCode = $auth.exitCode
-        authContext = [ordered]@{ status = [string]$ProviderContext.authContextStatus; authHomeSource = [string]$ProviderContext.authHomeSource; profileMismatch = [bool]$ProviderContext.profileMismatch; liveRuntimeEligible = [bool]$ProviderContext.liveRuntimeEligible; commandSource = [string]$ProviderContext.invocation.source }
+        authContext = [ordered]@{ status = [string]$ProviderContext.authContextStatus; authHomeSource = [string]$ProviderContext.authHomeSource; profileMismatch = [bool]$ProviderContext.profileMismatch; hostElevation = [string]$ProviderContext.hostElevation; liveRuntimeEligible = [bool]$ProviderContext.liveRuntimeEligible; commandSource = [string]$ProviderContext.invocation.source }
+        liveCallability = 'UNVERIFIED'
         requiredFlags = $flagStatus
         zeroToolSurfaceVerified = $false
         documentProfileSupported = $documentSupported
@@ -296,6 +298,10 @@ function Invoke-DuoForgeDoctorInternal {
             version = $pwshVersion
             executable = (Get-Process -Id $PID).Path
             ready = $pwshReady
+        }
+        hostContext = [ordered]@{
+            elevation = [string]$codex.authContext.hostElevation
+            profileMatch = -not [bool]$codex.authContext.profileMismatch
         }
         subscriptionOnly = $true
         apiCredentialConflicts = @($apiConflicts)
