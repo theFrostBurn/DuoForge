@@ -271,9 +271,9 @@ function Read-DuoForgeMenuInteractionInternal {
             $frameWidth = 0
             $frameHeight = 0
             try { $frameWidth = [int][Console]::WindowWidth; $frameHeight = [int][Console]::WindowHeight } catch { }
-            $frame = @(New-DuoForgeMenuFrameInternal -Items $menuItems -Title $Title -SelectedIndex $selectedIndex -Message $message -Footer $Footer -Width $frameWidth -Height $frameHeight -ContextTransition:$ContextTransition)
-            if ($null -ne $FrameWriter) { & $FrameWriter ([string[]]$frame) }
-            else { Write-DuoForgeCursorMenuFrameInternal -Lines $frame -RenderState $renderState }
+            $frameRows = @(New-DuoForgeMenuFrameRowsInternal -Items $menuItems -Title $Title -SelectedIndex $selectedIndex -Message $message -Footer $Footer -Width $frameWidth -Height $frameHeight -ContextTransition:$ContextTransition)
+            if ($null -ne $FrameWriter) { & $FrameWriter ([string[]]@($frameRows | ForEach-Object { [string]$_.text })) }
+            else { Write-DuoForgeCursorMenuFrameInternal -Lines $frameRows -RenderState $renderState }
             $message = ''
             $rawKey = Read-DuoForgeConsoleKeyInternal -KeyReader $KeyReader
             $key = ConvertTo-DuoForgeInteractionKeyInternal -Key $rawKey
@@ -433,9 +433,9 @@ function Read-DuoForgeYesNoConfirmationInternal {
             catch { }
         }
         while ($true) {
-            $frame = @(New-DuoForgeMenuFrameInternal -Items $items -Title $Prompt -SelectedIndex $selectedIndex -Message $message -Footer 'Y/N 선택 · Enter 확정 · Esc/B 이전 · Q 취소')
-            if ($null -ne $FrameWriter) { & $FrameWriter ([string[]]$frame) }
-            else { Write-DuoForgeCursorMenuFrameInternal -Lines $frame -RenderState $renderState }
+            $frameRows = @(New-DuoForgeMenuFrameRowsInternal -Items $items -Title $Prompt -SelectedIndex $selectedIndex -Message $message -Footer 'Y/N 선택 · Enter 확정 · Esc/B 이전 · Q 취소')
+            if ($null -ne $FrameWriter) { & $FrameWriter ([string[]]@($frameRows | ForEach-Object { [string]$_.text })) }
+            else { Write-DuoForgeCursorMenuFrameInternal -Lines $frameRows -RenderState $renderState }
             $message = ''
 
             $rawKey = Read-DuoForgeConsoleKeyInternal -KeyReader $KeyReader

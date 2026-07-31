@@ -42,7 +42,7 @@ function New-DuoForgeDisplayRowInternal {
     [CmdletBinding()]
     param(
         [AllowEmptyString()][Parameter(Mandatory)][string]$Text,
-        [ValidateSet('text', 'page', 'tag', 'divider', 'section', 'field', 'list', 'info', 'success', 'warning', 'error', 'meta', 'spacer')][string]$Role = 'text',
+        [ValidateSet('text', 'page', 'tag', 'divider', 'section', 'field', 'list', 'selection', 'info', 'success', 'warning', 'error', 'meta', 'spacer')][string]$Role = 'text',
         [AllowEmptyString()][string]$Color = ''
     )
 
@@ -57,6 +57,7 @@ function Get-DuoForgeDisplayRoleColorInternal {
         'page' { 'Cyan' }
         'tag' { 'Yellow' }
         'section' { 'Cyan' }
+        'selection' { 'Cyan' }
         'meta' { 'DarkGray' }
         'success' { 'Green' }
         'warning' { 'Yellow' }
@@ -399,7 +400,7 @@ function Write-DuoForgeTextInternal {
     [CmdletBinding()]
     param(
         [Alias('Object')][AllowNull()][AllowEmptyString()][string]$Text,
-        [ValidateSet('text', 'page', 'tag', 'section', 'field', 'list', 'info', 'success', 'warning', 'error', 'meta')][string]$Role = 'text',
+        [ValidateSet('text', 'page', 'tag', 'section', 'field', 'list', 'selection', 'info', 'success', 'warning', 'error', 'meta')][string]$Role = 'text',
         [Alias('ForegroundColor')][AllowEmptyString()][string]$Color = '',
         [ValidateRange(0, 100)][int]$Indent = 0,
         [System.Collections.IDictionary]$Layout,

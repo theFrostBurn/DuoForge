@@ -301,7 +301,7 @@ function New-DuoForgeMenuFrameRowsInternal {
             $itemLines = @(Split-DuoForgeDisplayTextInternal -Text (([string]$item.label) + $suffix) -Width $itemWidth -MaximumLines $itemMaximumLines)
             for ($lineIndex = 0; $lineIndex -lt $itemLines.Count; $lineIndex++) {
                 $linePrefix = if ($lineIndex -eq 0) { $itemPrefix } else { ' ' * $prefixWidth }
-                $rows.Add((New-DuoForgeDisplayRowInternal -Text ($linePrefix + [string]$itemLines[$lineIndex]) -Role $(if ($index -eq $selected) { 'warning' } else { 'list' })))
+                $rows.Add((New-DuoForgeDisplayRowInternal -Text ($linePrefix + [string]$itemLines[$lineIndex]) -Role $(if ($index -eq $selected) { 'selection' } else { 'list' })))
             }
             $showDetail = ($index -eq $selected -or $ExpandAllDetails) -and -not [string]::IsNullOrWhiteSpace([string]$item.detail)
             if ($showDetail) {
@@ -312,7 +312,7 @@ function New-DuoForgeMenuFrameRowsInternal {
                 $reason = if ([string]::IsNullOrWhiteSpace([string]$item.disabledReason)) { '현재 사용할 수 없는 항목입니다.' } else { [string]$item.disabledReason }
                 foreach ($row in @(New-DuoForgeTextRowsInternal -Text '! 사용할 수 없는 이유' -Layout $layout -Indent 4 -MaximumLines 1 -Role 'warning')) { $rows.Add($row) }
                 $reasonMaximumLines = if ($ExpandAllDetails) { 1000 } else { 3 }
-                foreach ($row in @(New-DuoForgeTextRowsInternal -Text $reason -Layout $layout -Indent 6 -MaximumLines $reasonMaximumLines -Role 'text')) { $rows.Add($row) }
+                foreach ($row in @(New-DuoForgeTextRowsInternal -Text $reason -Layout $layout -Indent 6 -MaximumLines $reasonMaximumLines -Role 'meta')) { $rows.Add($row) }
             }
         }
     }
@@ -347,10 +347,75 @@ function New-DuoForgeMenuFrameInternal {
     )
 }
 
+function ConvertTo-DuoForgeMenuRenderRowInternal {
+    [CmdletBinding()]
+    param([AllowNull()]$Row)
+
+    if ($null -eq $Row -or $Row -is [string]) {
+        return [ordered]@{ text = [string]$Row; color = '' }
+    }
+    $role = [string](Get-DuoForgeObjectValue -Object $Row -Name 'role' -Default 'text')
+    $color = [string](Get-DuoForgeObjectValue -Object $Row -Name 'color' -Default '')
+    if ([string]::IsNullOrWhiteSpace($color)) { $color = Get-DuoForgeDisplayRoleColorInternal -Role $role }
+    return [ordered]@{
+        text = [string](Get-DuoForgeObjectValue -Object $Row -Name 'text' -Default '')
+        color = $color
+    }
+}
+
+function Get-DuoForgeAnsiForegroundCodeInternal {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Color)
+
+    switch ($Color) {
+        'Black' { '30' }
+        'DarkBlue' { '34' }
+        'DarkGreen' { '32' }
+        'DarkCyan' { '36' }
+        'DarkRed' { '31' }
+        'DarkMagenta' { '35' }
+        'DarkYellow' { '33' }
+        'Gray' { '37' }
+        'DarkGray' { '90' }
+        'Blue' { '94' }
+        'Green' { '92' }
+        'Cyan' { '96' }
+        'Red' { '91' }
+        'Magenta' { '95' }
+        'Yellow' { '93' }
+        'White' { '97' }
+        default { '' }
+    }
+}
+
+function Format-DuoForgeAnsiMenuRowInternal {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]$Row,
+        [ValidateRange(1, 1000)][int]$Width,
+        [switch]$UseColor
+    )
+
+    $renderRow = ConvertTo-DuoForgeMenuRenderRowInternal -Row $Row
+    $text = Limit-DuoForgeProgressTextInternal -Text ([string]$renderRow.text) -Width $Width
+    if (-not $UseColor -or [string]::IsNullOrWhiteSpace([string]$renderRow.color)) { return $text }
+    $code = Get-DuoForgeAnsiForegroundCodeInternal -Color ([string]$renderRow.color)
+    if ([string]::IsNullOrWhiteSpace($code)) { return $text }
+    $escape = [char]27
+    return "$escape[$($code)m$text$escape[0m"
+}
+
+function Test-DuoForgeMenuColorEnabledInternal {
+    [CmdletBinding()]
+    param()
+
+    return [string]::IsNullOrWhiteSpace([string]$env:NO_COLOR)
+}
+
 function Write-DuoForgeAnsiMenuFrameInternal {
     [CmdletBinding()]
     param(
-        [AllowEmptyCollection()][AllowEmptyString()][Parameter(Mandatory)][string[]]$Lines,
+        [AllowEmptyCollection()][AllowEmptyString()][Parameter(Mandatory)][object[]]$Lines,
         [Parameter(Mandatory)][System.Collections.IDictionary]$RenderState
     )
 
@@ -365,11 +430,12 @@ function Write-DuoForgeAnsiMenuFrameInternal {
         [Console]::Write("$escape[u")
     }
     $builder = [System.Text.StringBuilder]::new()
+    $useColor = Test-DuoForgeMenuColorEnabledInternal
     $lineCount = [Math]::Max([int](Get-DuoForgeObjectValue -Object $RenderState -Name 'lineCount' -Default 0), $Lines.Count)
     for ($index = 0; $index -lt $lineCount; $index++) {
-        $null = $builder.Append("`r$escape[2K")
+        $null = $builder.Append("`r$escape[0m$escape[2K")
         if ($index -lt $Lines.Count) {
-            $line = Limit-DuoForgeProgressTextInternal -Text ([string]$Lines[$index]) -Width $lineWidth
+            $line = Format-DuoForgeAnsiMenuRowInternal -Row $Lines[$index] -Width $lineWidth -UseColor:$useColor
             $null = $builder.Append($line)
         }
         if ($index -lt $lineCount - 1) { $null = $builder.Append([Environment]::NewLine) }
@@ -381,7 +447,7 @@ function Write-DuoForgeAnsiMenuFrameInternal {
 function Write-DuoForgeNativeMenuFrameInternal {
     [CmdletBinding()]
     param(
-        [AllowEmptyCollection()][AllowEmptyString()][Parameter(Mandatory)][string[]]$Lines,
+        [AllowEmptyCollection()][AllowEmptyString()][Parameter(Mandatory)][object[]]$Lines,
         [Parameter(Mandatory)][System.Collections.IDictionary]$RenderState
     )
 
@@ -390,7 +456,9 @@ function Write-DuoForgeNativeMenuFrameInternal {
     if (-not [bool](Get-DuoForgeObjectValue -Object $RenderState -Name 'started' -Default $false)) {
         $RenderState.top = [Console]::CursorTop
         $RenderState.cursorVisible = $true
+        $RenderState.foregroundColor = $null
         try { $RenderState.cursorVisible = [Console]::CursorVisible } catch { }
+        try { $RenderState.foregroundColor = [Console]::ForegroundColor } catch { }
         try { [Console]::CursorVisible = $false } catch { }
         $RenderState.started = $true
     }
@@ -402,15 +470,27 @@ function Write-DuoForgeNativeMenuFrameInternal {
     }
 
     $blank = ' ' * $lineWidth
-    for ($index = 0; $index -lt $lineCount; $index++) {
-        $row = $top + $index
-        [Console]::SetCursorPosition(0, $row)
-        [Console]::Write($blank)
-        [Console]::SetCursorPosition(0, $row)
-        if ($index -lt $Lines.Count) {
-            $line = Limit-DuoForgeProgressTextInternal -Text ([string]$Lines[$index]) -Width $lineWidth
-            [Console]::Write($line)
+    $originalForegroundColor = Get-DuoForgeObjectValue -Object $RenderState -Name 'foregroundColor'
+    $useColor = Test-DuoForgeMenuColorEnabledInternal
+    try {
+        for ($index = 0; $index -lt $lineCount; $index++) {
+            $row = $top + $index
+            [Console]::SetCursorPosition(0, $row)
+            if ($null -ne $originalForegroundColor) { try { [Console]::ForegroundColor = $originalForegroundColor } catch { } }
+            [Console]::Write($blank)
+            [Console]::SetCursorPosition(0, $row)
+            if ($index -lt $Lines.Count) {
+                $renderRow = ConvertTo-DuoForgeMenuRenderRowInternal -Row $Lines[$index]
+                $line = Limit-DuoForgeProgressTextInternal -Text ([string]$renderRow.text) -Width $lineWidth
+                if ($useColor -and -not [string]::IsNullOrWhiteSpace([string]$renderRow.color)) {
+                    try { [Console]::ForegroundColor = [System.Enum]::Parse([ConsoleColor], [string]$renderRow.color, $true) } catch { }
+                }
+                [Console]::Write($line)
+            }
         }
+    }
+    finally {
+        if ($null -ne $originalForegroundColor) { try { [Console]::ForegroundColor = $originalForegroundColor } catch { } }
     }
     $RenderState.lineCount = $lineCount
     [Console]::SetCursorPosition(0, $top + $lineCount)
@@ -419,7 +499,7 @@ function Write-DuoForgeNativeMenuFrameInternal {
 function Write-DuoForgeCursorMenuFrameInternal {
     [CmdletBinding()]
     param(
-        [AllowEmptyCollection()][AllowEmptyString()][Parameter(Mandatory)][string[]]$Lines,
+        [AllowEmptyCollection()][AllowEmptyString()][Parameter(Mandatory)][object[]]$Lines,
         [Parameter(Mandatory)][System.Collections.IDictionary]$RenderState
     )
 
@@ -442,6 +522,8 @@ function Complete-DuoForgeMenuRenderInternal {
             $lineCount = [int](Get-DuoForgeObjectValue -Object $RenderState -Name 'lineCount' -Default 0)
             [Console]::SetCursorPosition(0, [Math]::Min([Console]::BufferHeight - 1, $top + $lineCount))
             try { [Console]::CursorVisible = [bool](Get-DuoForgeObjectValue -Object $RenderState -Name 'cursorVisible' -Default $true) } catch { }
+            $foregroundColor = Get-DuoForgeObjectValue -Object $RenderState -Name 'foregroundColor'
+            if ($null -ne $foregroundColor) { try { [Console]::ForegroundColor = $foregroundColor } catch { } }
             [Console]::WriteLine()
         }
         else {

@@ -693,6 +693,64 @@ try {
         Assert-True ('AllowEmptyStringAttribute' -in @($surface.cursorRendererLineAttributes)) '제목과 안내 사이의 빈 줄이 커서 렌더러 바인딩에서 거부되었습니다.'
     }
 
+    Test-Case '커서 메뉴는 선택 항목과 하위 설명의 색을 분리하고 무색 구분을 보존한다' {
+        $surface = & $module {
+            $items = @(ConvertTo-DuoForgeMenuItemsInternal -Items @(
+                [ordered]@{ value = 'A'; label = '남은 질문에 답하기 (2)'; shortcuts = @('A'); enabled = $true; detail = '선택한 항목의 추가 설명입니다.' }
+                [ordered]@{ value = 'R'; label = '작업 계속하기'; shortcuts = @('R'); enabled = $false; detail = '남은 질문 답변 후 가능합니다.'; disabledReason = '아직 답하지 않은 질문이 2개 있습니다.' }
+            ))
+            $activeRows = @(New-DuoForgeMenuFrameRowsInternal -Items $items -Title '합성 메뉴' -SelectedIndex 0 -Width 72 -Height 24)
+            $disabledRows = @(New-DuoForgeMenuFrameRowsInternal -Items $items -Title '합성 메뉴' -SelectedIndex 1 -Width 72 -Height 24)
+            $activeSelection = @($activeRows | Where-Object { [string]$_.text -match '^> \[A\]' })[0]
+            $activeDetail = @($activeRows | Where-Object { [string]$_.text -match '추가 설명입니다' })[0]
+            $disabledSelection = @($disabledRows | Where-Object { [string]$_.text -match '^> \[R\]' })[0]
+            $disabledDetail = @($disabledRows | Where-Object { [string]$_.text -match '남은 질문 답변 후' })[0]
+            $disabledHeading = @($disabledRows | Where-Object { [string]$_.text -match '사용할 수 없는 이유' })[0]
+            $disabledReason = @($disabledRows | Where-Object { [string]$_.text -match '아직 답하지 않은 질문' })[0]
+            $plainItem = @($disabledRows | Where-Object { [string]$_.text -match '^  \[A\]' })[0]
+            $escape = [char]27
+            $previousNoColor = [string]$env:NO_COLOR
+            try {
+                Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue
+                $colorEnabled = Test-DuoForgeMenuColorEnabledInternal
+                $env:NO_COLOR = '1'
+                $colorDisabled = Test-DuoForgeMenuColorEnabledInternal
+            }
+            finally {
+                if ([string]::IsNullOrEmpty($previousNoColor)) { Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue }
+                else { $env:NO_COLOR = $previousNoColor }
+            }
+            [ordered]@{
+                activeSelection = ConvertTo-DuoForgeMenuRenderRowInternal -Row $activeSelection
+                activeDetail = ConvertTo-DuoForgeMenuRenderRowInternal -Row $activeDetail
+                disabledSelection = ConvertTo-DuoForgeMenuRenderRowInternal -Row $disabledSelection
+                disabledDetail = ConvertTo-DuoForgeMenuRenderRowInternal -Row $disabledDetail
+                disabledHeading = ConvertTo-DuoForgeMenuRenderRowInternal -Row $disabledHeading
+                disabledReason = ConvertTo-DuoForgeMenuRenderRowInternal -Row $disabledReason
+                plainItem = ConvertTo-DuoForgeMenuRenderRowInternal -Row $plainItem
+                ansiSelection = Format-DuoForgeAnsiMenuRowInternal -Row $activeSelection -Width 71 -UseColor
+                ansiDetail = Format-DuoForgeAnsiMenuRowInternal -Row $activeDetail -Width 71 -UseColor
+                noColorSelection = Format-DuoForgeAnsiMenuRowInternal -Row $activeSelection -Width 71
+                escape = [string]$escape
+                colorEnabled = $colorEnabled
+                colorDisabled = $colorDisabled
+            }
+        }
+        Assert-Equal $surface.activeSelection.color 'Cyan'
+        Assert-Equal $surface.disabledSelection.color 'Cyan'
+        Assert-Equal $surface.activeDetail.color 'DarkGray'
+        Assert-Equal $surface.disabledDetail.color 'DarkGray'
+        Assert-Equal $surface.disabledReason.color 'DarkGray'
+        Assert-Equal $surface.disabledHeading.color 'Yellow'
+        Assert-Equal $surface.plainItem.color ''
+        Assert-ContainsText $surface.ansiSelection ($surface.escape + '[96m') '선택 항목에 청록색 ANSI 코드가 적용되지 않았습니다.'
+        Assert-ContainsText $surface.ansiDetail ($surface.escape + '[90m') '하위 설명에 어두운 회색 ANSI 코드가 적용되지 않았습니다.'
+        Assert-NotContainsText $surface.noColorSelection $surface.escape '무색 메뉴 행에 ANSI 코드가 남았습니다.'
+        Assert-ContainsText $surface.noColorSelection '> [A]' '무색 메뉴에서 선택 커서 표식이 사라졌습니다.'
+        Assert-True ([bool]$surface.colorEnabled) 'NO_COLOR가 없는데 커서 메뉴 색상이 비활성화되었습니다.'
+        Assert-False ([bool]$surface.colorDisabled) 'NO_COLOR 환경에서 커서 메뉴 색상이 활성화되었습니다.'
+    }
+
     Test-Case '공통 표시 renderer는 폭 인식 줄바꿈과 hanging indent, 문단, ASCII 무색 폴백을 보존한다' {
         $surface = & $module {
             $matrix = [ordered]@{}
