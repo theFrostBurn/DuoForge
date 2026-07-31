@@ -1829,6 +1829,43 @@ try {
         Assert-ContainsText $rendered.emptyText '확인할 내용이 없습니다.'
     }
 
+    Test-Case '다건 설명의 기록과 선택지 및 다중 검증 오류는 한 행씩 분리한다' {
+        $rendered = & $module {
+            $makeResult = {
+                param([string]$Summary)
+                [ordered]@{
+                    summary = $Summary
+                    explanation = "$Summary 상세 설명"
+                    existingEvidence = @()
+                    newClaims = @()
+                    tradeoffs = @(
+                        [ordered]@{ option = '선택 A'; benefits = @('장점 A'); costs = @('비용 A'); risks = @('위험 A'); reversibility = '쉬움' }
+                        [ordered]@{ option = '선택 B'; benefits = @('장점 B'); costs = @('비용 B'); risks = @('위험 B'); reversibility = '보통' }
+                    )
+                    suggestedExperiment = ''
+                }
+            }
+            $records = @(
+                [ordered]@{ issueId = 'D-001'; provider = 'codex'; level = 'general'; focus = 'tradeoffs'; result = (& $makeResult '첫 설명') }
+                [ordered]@{ issueId = 'D-002'; provider = 'claude'; level = 'general'; focus = 'tradeoffs'; result = (& $makeResult '둘째 설명') }
+            )
+            $explanationText = (& { Write-DuoForgeExplanationRecords -Records $records } 6>&1 | Out-String -Width 240)
+            $validation = [ordered]@{ errors = @(
+                [ordered]@{ message = '첫 번째 검증 오류'; code = 'DF-FIRST' }
+                [ordered]@{ message = '두 번째 검증 오류'; code = 'DF-SECOND' }
+            ) }
+            $validationText = (& { Write-DuoForgeValidationErrors -Validation $validation } 6>&1 | Out-String -Width 240)
+            [ordered]@{ explanation = @($explanationText -split "`r?`n"); validation = @($validationText -split "`r?`n") }
+        }
+
+        $secondOption = [Array]::FindIndex([string[]]$rendered.explanation, [Predicate[string]]{ param($line) $line.Trim() -eq '선택 B' })
+        $secondRecord = [Array]::FindIndex([string[]]$rendered.explanation, [Predicate[string]]{ param($line) $line -eq 'D-002 · 검토 설명' })
+        $secondError = [Array]::FindIndex([string[]]$rendered.validation, [Predicate[string]]{ param($line) $line.Trim() -eq '두 번째 검증 오류' })
+        Assert-True ($secondOption -gt 0 -and [string]::IsNullOrWhiteSpace([string]$rendered.explanation[$secondOption - 1])) '선택지 비교 항목 사이 여백이 없습니다.'
+        Assert-True ($secondRecord -gt 0 -and [string]::IsNullOrWhiteSpace([string]$rendered.explanation[$secondRecord - 1])) '설명 기록 사이 여백이 없습니다.'
+        Assert-True ($secondError -gt 0 -and [string]::IsNullOrWhiteSpace([string]$rendered.validation[$secondError - 1])) '검증 오류 사이 여백이 없습니다.'
+    }
+
     Test-Case '인증 파서는 개인정보와 원문 비밀값을 결과에서 제거한다' {
         $claudeRaw = '{"loggedIn":true,"authMethod":"claude.ai","apiProvider":"firstParty","email":"person@example.com","orgId":"secret-org","subscriptionType":"pro"}'
         $claude = ConvertFrom-DuoForgeClaudeAuthStatus -Text $claudeRaw -ExitCode 0
@@ -2259,6 +2296,11 @@ try {
                 $event = [ordered]@{ type = 'STAGE_STARTED'; data = [ordered]@{ stepKey = $snapshot.steps[0].stepKey } }
                 Write-DuoForgeProgressLogEventInternal -View $view -Event $event
             } 6>&1 | Out-String)
+            $spacedLogText = (& {
+                $view = [ordered]@{ runDirectory = $directory }
+                Write-DuoForgeProgressLogEventInternal -View $view -Event ([ordered]@{ type = 'STAGE_STARTED'; data = [ordered]@{ stepKey = $snapshot.steps[0].stepKey } })
+                Write-DuoForgeProgressLogEventInternal -View $view -Event ([ordered]@{ type = 'STAGE_RESULT_RECEIVED'; data = [ordered]@{ stepKey = $snapshot.steps[0].stepKey } })
+            } 6>&1 | Out-String)
             $committedLogText = (& {
                 $view = [ordered]@{ runDirectory = $directory }
                 $event = [ordered]@{ type = 'STAGE_COMMITTED'; data = [ordered]@{ stepKey = $snapshot.latest.stepKey } }
@@ -2283,6 +2325,7 @@ try {
                 quota = $quotaFrame
                 blocked = $blockedFrame
                 logText = $logText
+                spacedLogLines = @($spacedLogText -split "`r?`n")
                 committedLogText = $committedLogText
                 committedSummary = [string]$snapshot.latest.summary
                 previousCommittedSummaries = @($snapshot.recentCommitted | Select-Object -First 2 | ForEach-Object { [string]$_.summary })
@@ -2291,7 +2334,7 @@ try {
                 narrowWidths = @($narrow | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) })
                 wideWidths = @($wide | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) })
                 unsafeWidths = @($unsafeFrame | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) })
-                narrowFeedHeaders = @($narrow | Where-Object { [string]$_ -like '*최근 완료*✓*' }).Count
+                narrowFeedHeaders = @($narrow | Where-Object { [string]$_ -match '^\s*\d+/\d+\s+.*✓' }).Count
                 narrowBarriers = @($narrow | Where-Object { [string]$_ -match '^[✓●↻◐○] (준비|[0-9]+차)' }).Count
                 koreanWidth = Get-DuoForgeProgressTextWidthInternal -Text '한글A'
                 safe = ConvertTo-DuoForgeProgressTextInternal -Text ("`e[31m위험`e[0m`n다음")
@@ -2342,6 +2385,8 @@ try {
         Assert-ContainsText ($rendered.blocked -join "`n") '지금 작업 중  ! Claude · 수정 문서 최종 확인 · 문서 B · 실행 환경 문제로 멈춤'
         Assert-ContainsText $rendered.logText ' 시작'
         Assert-False ([string]$rendered.logText -like "*`e*")
+        $receivedLogLine = [Array]::FindIndex([string[]]$rendered.spacedLogLines, [Predicate[string]]{ param($line) $line -like '*답변 도착*' })
+        Assert-True ($receivedLogLine -gt 0 -and [string]::IsNullOrWhiteSpace([string]$rendered.spacedLogLines[$receivedLogLine - 1])) '누적 진행 이벤트 사이 여백이 없습니다.'
         Assert-Equal ([regex]::Matches($rendered.committedLogText, [regex]::Escape($rendered.committedSummary)).Count) 1
         Assert-Equal @($rendered.committedLogText -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count 2
         Assert-Equal ([regex]::Matches($rendered.committedLogText, '결과 저장 완료').Count) 1
@@ -2411,7 +2456,7 @@ try {
                 lastEvent = [ordered]@{ type = 'STAGE_STARTED'; data = [ordered]@{} }
             }
             $matrix = [ordered]@{}
-            foreach ($size in @(@(72, 20), @(80, 24), @(100, 30), @(120, 32))) {
+            foreach ($size in @(@(72, 20), @(80, 24), @(100, 30), @(120, 32), @(160, 40))) {
                 $key = '{0}x{1}' -f $size[0], $size[1]
                 $view = [ordered]@{ mode = 'fullscreen'; screenMode = 'overview'; selectedCommittedIndex = -1; providerElapsedSeconds = 2; unicodeSpinner = $true; pauseRequestStatus = '' }
                 $frame = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width $size[0] -Height $size[1] -ViewState $view)
@@ -2419,9 +2464,20 @@ try {
                     text = $frame -join "`n"
                     rows = $frame.Count
                     maximumWidth = (@($frame | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) }) | Measure-Object -Maximum).Maximum
-                    headers = @($frame | Where-Object { [string]$_ -like '*최근 완료*✓*' }).Count
+                    headers = @($frame | Where-Object { [string]$_ -match '^\s*\d+/\d+\s+.*✓' }).Count
                     changes = @($frame | Where-Object { [string]$_ -like '*변경 사항*' }).Count
                     barriers = @($frame | Where-Object { [string]$_ -match '^[✓●↻◐○] (준비|[0-9]+차)' }).Count
+                    sectionLines = @($frame | Where-Object { [string]$_ -match '^── (단계별 진행|지금 작업|최근 완료|확인할 내용) .*─$' }).Count
+                    recordTransitionSpacers = @(
+                        for ($lineIndex = 1; $lineIndex -lt $frame.Count; $lineIndex++) {
+                            if ([string]$frame[$lineIndex] -match '^\s*\d+/\d+\s+.*✓' -and [string]::IsNullOrWhiteSpace([string]$frame[$lineIndex - 1])) { $lineIndex }
+                        }
+                    ).Count
+                    changeTransitionSpacers = @(
+                        for ($lineIndex = 1; $lineIndex -lt $frame.Count; $lineIndex++) {
+                            if ([string]$frame[$lineIndex] -like '*변경 사항*' -and [string]::IsNullOrWhiteSpace([string]$frame[$lineIndex - 1])) { $lineIndex }
+                        }
+                    ).Count
                     selected = $view.selectedCommittedIndex
                     truncated = [bool]$view.layoutTruncated
                 }
@@ -2502,12 +2558,13 @@ try {
             }
         }
 
-        foreach ($key in @('72x20', '80x24', '100x30', '120x32')) {
+        foreach ($key in @('72x20', '80x24', '100x30', '120x32', '160x40')) {
             $parts = $key -split 'x'
             Assert-True ($surface.matrix[$key].rows -le ([int]$parts[1] - 1)) "$key 행 높이를 넘었습니다."
             Assert-True ([int]$surface.matrix[$key].maximumWidth -le ([int]$parts[0] - 1)) "$key 표시 폭을 넘었습니다."
             Assert-Equal $surface.matrix[$key].headers 3
             Assert-True ($surface.matrix[$key].barriers -ge 3)
+            Assert-True ($surface.matrix[$key].sectionLines -ge $(if ([int]$parts[1] -ge 24) { 4 } else { 3 })) "$key 상위 영역 구분선이 부족합니다."
             Assert-False ([bool]$surface.matrix[$key].truncated)
             Assert-Equal $surface.matrix[$key].selected 2
         }
@@ -2515,6 +2572,11 @@ try {
         Assert-Equal $surface.matrix['80x24'].changes 2
         Assert-Equal $surface.matrix['100x30'].changes 2
         Assert-Equal $surface.matrix['120x32'].changes 3
+        Assert-Equal $surface.matrix['160x40'].changes 3
+        foreach ($key in @('100x30', '120x32', '160x40')) {
+            Assert-Equal $surface.matrix[$key].recordTransitionSpacers 2 "$key 최근 완료 항목 사이의 전환 여백이 없습니다."
+            Assert-Equal $surface.matrix[$key].changeTransitionSpacers $surface.matrix[$key].changes "$key 요약과 변경 사항 사이의 전환 여백이 없습니다."
+        }
         Assert-Equal (@($surface.spinnerLines | Select-Object -Unique).Count) 3
         Assert-Equal (@($surface.spinnerWidths | Select-Object -Unique).Count) 1
         Assert-Equal (@($surface.unicodeFrames | Select-Object -Unique).Count) 3
@@ -2612,7 +2674,7 @@ try {
                 $copy.latest = if ($count -eq 0) { $null } else { $copy.recentCommitted[-1] }
                 $frame = @(New-DuoForgeProgressFrameInternal -Snapshot $copy -Width 72 -Height 20)
                 $frameCounts[[string]$count] = [ordered]@{
-                    feedHeaders = @($frame | Where-Object { [string]$_ -like '*최근 완료*✓*' }).Count
+                    feedHeaders = @($frame | Where-Object { [string]$_ -match '^\s*\d+/\d+\s+.*✓' }).Count
                     lines = $frame.Count
                     widths = @($frame | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) })
                     barriers = @($frame | Where-Object { [string]$_ -match '^[✓●↻◐○] (준비|[0-9]+차)' }).Count
@@ -2657,7 +2719,7 @@ try {
         Assert-True ($feed.frameCounts['3'].lines -le 19)
         Assert-True (@($feed.frameCounts['3'].widths | Where-Object { [int]$_ -gt 71 }).Count -eq 0)
         Assert-True ($feed.frameCounts['3'].barriers -ge 3)
-        $feed3Headers = @($feed.frameCounts['3'].text -split "`n" | Where-Object { $_ -like '*최근 완료*✓*' })
+        $feed3Headers = @($feed.frameCounts['3'].text -split "`n" | Where-Object { $_ -match '^\s*\d+/\d+\s+.*✓' })
         Assert-ContainsText ([string]$feed3Headers[0]) '검토 의견 판단'
         Assert-ContainsText ([string]$feed3Headers[1]) '공동 문서 작성'
         Assert-ContainsText ([string]$feed3Headers[2]) '최종 확인'

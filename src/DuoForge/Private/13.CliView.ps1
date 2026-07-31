@@ -215,7 +215,10 @@ function Write-DuoForgeExplanationRecords {
         }
         if (@($result.tradeoffs).Count -gt 0) {
             & $append @(New-DuoForgeSectionRowsInternal -Title '선택지 비교' -Body '' -Layout $layout)
-            foreach ($item in @($result.tradeoffs)) {
+            $tradeoffs = @($result.tradeoffs)
+            for ($tradeoffIndex = 0; $tradeoffIndex -lt $tradeoffs.Count; $tradeoffIndex++) {
+                $item = $tradeoffs[$tradeoffIndex]
+                if ($tradeoffIndex -gt 0) { $rows.Add((New-DuoForgeDisplayRowInternal -Text '' -Role 'spacer')) }
                 & $append @(New-DuoForgeTextRowsInternal -Text ([string]$item.option) -Layout $layout -Indent 2 -Role 'warning' -PreserveParagraphs)
                 & $append @(New-DuoForgeFieldRowsInternal -Label '장점' -Value (@($item.benefits) -join ', ') -Layout $layout -Indent 4 -KeyWidth 10 -PreserveParagraphs)
                 & $append @(New-DuoForgeFieldRowsInternal -Label '비용' -Value (@($item.costs) -join ', ') -Layout $layout -Indent 4 -KeyWidth 10 -PreserveParagraphs)
@@ -226,7 +229,7 @@ function Write-DuoForgeExplanationRecords {
         if (-not [string]::IsNullOrWhiteSpace([string]$result.suggestedExperiment)) {
             & $append @(New-DuoForgeSectionRowsInternal -Title '검증 실험 제안' -Body ([string]$result.suggestedExperiment) -Layout $layout -PreserveParagraphs)
         }
-        Write-DuoForgeDisplayRowsInternal -Rows @($rows) -Layout $layout
+        Write-DuoForgeDisplayRowsInternal -Rows @(Add-DuoForgeTrailingSpacerRowInternal -Rows @($rows)) -Layout $layout
     }
 }
 
@@ -240,7 +243,10 @@ function Write-DuoForgeValidationErrors {
     if (@($Validation.errors).Count -gt 0) {
         foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '확인할 내용' -Body '' -Layout $layout)) { $rows.Add($row) }
     }
-    foreach ($errorItem in $Validation.errors) {
+    $errors = @($Validation.errors)
+    for ($errorIndex = 0; $errorIndex -lt $errors.Count; $errorIndex++) {
+        $errorItem = $errors[$errorIndex]
+        if ($errorIndex -gt 0) { $rows.Add((New-DuoForgeDisplayRowInternal -Text '' -Role 'spacer')) }
         foreach ($row in @(New-DuoForgeTextRowsInternal -Text ([string]$errorItem.message) -Layout $layout -Indent 2 -Role 'error' -PreserveParagraphs)) { $rows.Add($row) }
         foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '오류 코드' -Value ([string]$errorItem.code) -Layout $layout -Indent 4 -KeyWidth 12 -Role 'meta')) { $rows.Add($row) }
     }
