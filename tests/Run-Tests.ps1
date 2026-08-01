@@ -1614,7 +1614,10 @@ try {
         $request = New-TestStartRequest -Mode dual-document -CodexDocument $codex -ClaudeDocument $claude -Workspace $workspace -DocumentType prd
         $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         Assert-False ([bool]$validation.valid)
-        Assert-True (@($validation.errors | Where-Object { $_.code -eq 'DF-PATH-DUAL-DOCUMENT-OVERLAP' }).Count -eq 1)
+        Assert-Equal @($validation.errors).Count 1
+        Assert-Equal $validation.errors[0].code 'DF-PATH-DUAL-DOCUMENT-OVERLAP'
+        Assert-Equal $validation.errors[0].message '문서 A와 문서 B에 사용한 폴더가 겹칩니다. 서로 다른 폴더로 나눈 뒤 다시 선택해 주세요.'
+        Assert-Equal @($validation.errors | Where-Object { $_.code -eq 'DF-PLAN' }).Count 0
     }
 
     Test-Case '독립 문서 인벤토리는 각 폴더의 Markdown을 자동 포함한다' {
@@ -1639,6 +1642,7 @@ try {
             $sameValidation = Test-DuoForgeStartRequest -Request $sameRequest -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $sameWorkspace)
             Assert-False ([bool]$sameValidation.valid)
             Assert-Equal @($sameValidation.errors | Where-Object code -eq 'DF-PATH-DUAL-DOCUMENT-OVERLAP').Count 1
+            Assert-Equal @($sameValidation.errors | Where-Object code -eq 'DF-PLAN').Count 0
 
             $a = New-MarkdownFile -Path (Join-Path $tempRoot "$mode-ok\A\main.md")
             $null = New-MarkdownFile -Path (Join-Path $tempRoot "$mode-ok\A\context.md")

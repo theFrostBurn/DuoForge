@@ -366,7 +366,14 @@ function Test-DuoForgeStartRequestInternal {
             }
         }
         catch {
-            $errors.Add([ordered]@{ code = Get-DuoForgeExceptionCode -Exception $_.Exception; message = $_.Exception.Message })
+            $errorCode = Get-DuoForgeExceptionCode -Exception $_.Exception
+            $errorMessage = if ($errorCode -eq 'DF-PATH-DUAL-DOCUMENT-OVERLAP') {
+                '문서 A와 문서 B에 사용한 폴더가 겹칩니다. 서로 다른 폴더로 나눈 뒤 다시 선택해 주세요.'
+            }
+            else {
+                $_.Exception.Message
+            }
+            $errors.Add([ordered]@{ code = $errorCode; message = $errorMessage })
         }
     }
     elseif ($mode -eq 'dual-project-audit') {
@@ -389,30 +396,34 @@ function Test-DuoForgeStartRequestInternal {
 
     $plan = $null
     $contextPlan = $null
-    try {
-        $basePlan = Get-DuoForgeExecutionPlanInternal -Mode $mode -MaxRounds ([int]$Request.maxRounds) -FirstSynthesizer ([string]$Request.firstSynthesizer) -MaxCallsPerProvider ([int]$Config.limits.maxCallsPerProviderPerRun) -WorkflowVersion 'workflow-v2'
-        $partialValidation = [ordered]@{ request = $Request; inputs = $inputs }
-        $contextPlan = New-DuoForgeContextBatchPlanInternal -ValidationResult $partialValidation -Config $Config -BaseExecutionPlan $basePlan
-        if ([bool]$contextPlan.enabled -and $mode -in @('document-merge', 'dual-document')) {
-            $candidateById = @{}
-            foreach ($candidate in @($contextPlan.candidateBlueprints)) { $candidateById[[string]$candidate.candidateId] = $candidate }
-            $selectedDocumentIds = @($contextPlan.selectedCandidateIds | ForEach-Object { [string]$candidateById[[string]$_].documentId } | Sort-Object -Unique)
-            $requiredDocumentIds = @($contextPlan.sourceBlueprints | ForEach-Object { [string]$_.documentId } | Sort-Object -Unique)
-            $missingDocumentIds = @($requiredDocumentIds | Where-Object { $_ -notin $selectedDocumentIds })
-            if ($missingDocumentIds.Count -gt 0) {
-                $errors.Add([ordered]@{ code = 'DF-CONTEXT-DOCUMENT-CAPACITY'; message = "문서 A와 B를 모두 읽을 만큼 AI 요청 횟수가 남아 있지 않습니다. 읽지 못하는 문서: $($missingDocumentIds -join ', ')" })
+    $canBuildPlan = ($mode -eq 'shared-document' -and $inputs.Contains('primary')) -or `
+        ($mode -in @('document-merge', 'dual-document') -and $inputs.Contains('documents'))
+    if ($canBuildPlan) {
+        try {
+            $basePlan = Get-DuoForgeExecutionPlanInternal -Mode $mode -MaxRounds ([int]$Request.maxRounds) -FirstSynthesizer ([string]$Request.firstSynthesizer) -MaxCallsPerProvider ([int]$Config.limits.maxCallsPerProviderPerRun) -WorkflowVersion 'workflow-v2'
+            $partialValidation = [ordered]@{ request = $Request; inputs = $inputs }
+            $contextPlan = New-DuoForgeContextBatchPlanInternal -ValidationResult $partialValidation -Config $Config -BaseExecutionPlan $basePlan
+            if ([bool]$contextPlan.enabled -and $mode -in @('document-merge', 'dual-document')) {
+                $candidateById = @{}
+                foreach ($candidate in @($contextPlan.candidateBlueprints)) { $candidateById[[string]$candidate.candidateId] = $candidate }
+                $selectedDocumentIds = @($contextPlan.selectedCandidateIds | ForEach-Object { [string]$candidateById[[string]$_].documentId } | Sort-Object -Unique)
+                $requiredDocumentIds = @($contextPlan.sourceBlueprints | ForEach-Object { [string]$_.documentId } | Sort-Object -Unique)
+                $missingDocumentIds = @($requiredDocumentIds | Where-Object { $_ -notin $selectedDocumentIds })
+                if ($missingDocumentIds.Count -gt 0) {
+                    $errors.Add([ordered]@{ code = 'DF-CONTEXT-DOCUMENT-CAPACITY'; message = "문서 A와 B를 모두 읽을 만큼 AI 요청 횟수가 남아 있지 않습니다. 읽지 못하는 문서: $($missingDocumentIds -join ', ')" })
+                }
+            }
+            $plan = Get-DuoForgeExecutionPlanInternal -Mode $mode -MaxRounds ([int]$Request.maxRounds) -FirstSynthesizer ([string]$Request.firstSynthesizer) -MaxCallsPerProvider ([int]$Config.limits.maxCallsPerProviderPerRun) -ContextBatchCount ([int]$contextPlan.selectedBatchCount) -WorkflowVersion 'workflow-v2'
+            if (-not $plan.withinLimits) {
+                $errors.Add([ordered]@{ code = 'DF-PLAN-CALL-LIMIT'; message = '예상 AI 요청 횟수가 작업별 허용 상한을 초과합니다. 작업 범위를 줄여 주세요.' })
+            }
+            if ([bool]$contextPlan.requiresPartialConsent -and -not [bool](Get-DuoForgeObjectValue -Object $Request -Name 'allowPartial' -Default $false)) {
+                $errors.Add([ordered]@{ code = 'DF-PARTIAL-CONSENT-REQUIRED'; message = "문서 전체 중 파일 기준 $($contextPlan.predictedFileCoveragePercent)%, 분량 기준 $($contextPlan.predictedByteCoveragePercent)%만 읽을 수 있습니다. 작업 범위를 줄이거나 일부만 읽은 결과로 진행하는 데 동의해 주세요. 명령줄에서는 --allow-partial 옵션을 사용합니다." })
             }
         }
-        $plan = Get-DuoForgeExecutionPlanInternal -Mode $mode -MaxRounds ([int]$Request.maxRounds) -FirstSynthesizer ([string]$Request.firstSynthesizer) -MaxCallsPerProvider ([int]$Config.limits.maxCallsPerProviderPerRun) -ContextBatchCount ([int]$contextPlan.selectedBatchCount) -WorkflowVersion 'workflow-v2'
-        if (-not $plan.withinLimits) {
-            $errors.Add([ordered]@{ code = 'DF-PLAN-CALL-LIMIT'; message = '예상 AI 요청 횟수가 작업별 허용 상한을 초과합니다. 작업 범위를 줄여 주세요.' })
+        catch {
+            $errors.Add([ordered]@{ code = 'DF-PLAN'; message = $_.Exception.Message })
         }
-        if ([bool]$contextPlan.requiresPartialConsent -and -not [bool](Get-DuoForgeObjectValue -Object $Request -Name 'allowPartial' -Default $false)) {
-            $errors.Add([ordered]@{ code = 'DF-PARTIAL-CONSENT-REQUIRED'; message = "문서 전체 중 파일 기준 $($contextPlan.predictedFileCoveragePercent)%, 분량 기준 $($contextPlan.predictedByteCoveragePercent)%만 읽을 수 있습니다. 작업 범위를 줄이거나 일부만 읽은 결과로 진행하는 데 동의해 주세요. 명령줄에서는 --allow-partial 옵션을 사용합니다." })
-        }
-    }
-    catch {
-        $errors.Add([ordered]@{ code = 'DF-PLAN'; message = $_.Exception.Message })
     }
 
     return [ordered]@{
