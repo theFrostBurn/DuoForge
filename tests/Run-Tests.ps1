@@ -2408,7 +2408,7 @@ try {
             param($directory)
             $snapshot = Get-DuoForgeProgressSnapshotInternal -RunDirectory $directory
             $wide = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 100 -Height 30 -Now ([datetimeoffset]'2026-07-28T12:00:00+09:00'))
-            $finalView = [ordered]@{ finalMessage = '작업 종료 · 완료'; waitForInput = $true }
+            $finalView = [ordered]@{ finalMessage = 'AI 작업 실행을 마쳤습니다.'; waitForInput = $true }
             $narrow = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 72 -Height 20 -Now ([datetimeoffset]'2026-07-28T12:00:00+09:00') -ViewState $finalView)
             $partial = ConvertTo-DuoForgeHashtable -InputObject $snapshot
             $partial.status = 'RUNNING'
@@ -2543,9 +2543,9 @@ try {
         Assert-True (@($rendered.unsafeWidths | Where-Object { [int]$_ -gt 71 }).Count -eq 0)
         Assert-Equal $rendered.narrowFeedHeaders 3
         Assert-True ($rendered.narrowBarriers -ge 3)
-        Assert-ContainsText ($rendered.narrow -join "`n") '지금 상태  완료'
-        Assert-ContainsText ($rendered.narrow -join "`n") '작업 종료 · 완료'
-        Assert-ContainsText ($rendered.narrow -join "`n") '확인할 내용'
+        Assert-ContainsText ($rendered.narrow -join "`n") 'AI 작업 13/13 완료'
+        Assert-ContainsText ($rendered.narrow -join "`n") 'AI 작업 실행을 마쳤습니다.'
+        Assert-ContainsText ($rendered.narrow -join "`n") '다음 할 일'
         Assert-ContainsText ($rendered.narrow -join "`n") 'Enter 키 또는 Esc를 누르면'
         Assert-ContainsText ($rendered.active -join "`n") '답변 도착 · 형식 확인 중'
         Assert-ContainsText ($rendered.active -join "`n") 'P 현재 작업 후 멈추기'
@@ -2567,7 +2567,7 @@ try {
         Assert-Equal $rendered.sparseActionSummary '새 검토 항목: 중요 2 | 검토 의견 처리: 자료 필요 1 | 문서 반영: 미반영 1'
         Assert-ContainsText ($rendered.waiting -join "`n") '지금 작업 중  ░░█░░ Claude · 각자 초안 작성 · 문서 A · 답변을 기다리는 중 00:04'
         Assert-ContainsText ($rendered.waiting -join "`n") 'Codex ✓  Claude ●'
-        Assert-ContainsText ($rendered.active -join "`n") '확인할 내용  전체 단계 완료 후 집계'
+        Assert-ContainsText ($rendered.active -join "`n") '다음 할 일  전체 단계 완료 후 집계'
         Assert-ContainsText ($rendered.retry -join "`n") '지금 작업 중  ↻ Codex · 문서 수정 · 문서 A · 답변 형식 다시 확인 대기'
         Assert-ContainsText ($rendered.standardRetry -join "`n") '지금 작업 중  ↻ Codex · 문서 수정 · 문서 A · AI 답변 재시도 대기'
         Assert-ContainsText ($rendered.failed -join "`n") '지금 작업 중  ! Claude · 수정 문서 최종 확인 · 문서 B · 오류 발생 · 이어서 가능'
@@ -2602,7 +2602,120 @@ try {
         Assert-True ($tampered.latestStepKey -ne $tampered.finalStepKey)
     }
 
-    Test-Case 'LIVE 개요와 상세 화면은 네 지원 크기에서 높이별 확장, heartbeat와 단일 스크롤을 지킨다' {
+    Test-Case '풀스크린 진행판은 실제 높이만큼 14단계 흐름과 안전한 최근 본문을 확장한다' {
+        $surface = & $module {
+            $graph = New-DuoForgeStageGraph -Mode dual-document -MaxRounds 2 -FirstSynthesizer alternate -ContextBatchCount 0 -ContextBatchDocumentIds @() -WorkflowVersion workflow-v2
+            foreach ($step in @($graph.steps)) { $step.status = 'COMMITTED' }
+            $records = [System.Collections.Generic.List[object]]::new()
+            foreach ($stepNumber in 12..14) {
+                $step = $graph.steps[$stepNumber - 1]
+                $records.Add([ordered]@{
+                    stepKey = [string]$step.stepKey
+                    stepNumber = $stepNumber
+                    totalSteps = 14
+                    provider = [string]$step.provider
+                    round = [int]$step.round
+                    stage = [string]$step.stage
+                    label = Get-DuoForgeProgressStageLabelInternal -Stage ([string]$step.stage)
+                    targetDocumentId = [string]$step.targetDocumentId
+                    sourceDocumentIds = @($step.sourceDocumentIds)
+                    summary = (("안전본문-$stepNumber 실패 계측에서 제외된 정상 설명과 충분한 높이에서 더 보여야 하는 검증 문장입니다. " * 24) + "끝표식-$stepNumber").Trim()
+                    issueCounts = [ordered]@{ critical = 0; major = $stepNumber - 11; minor = 1 }
+                    responseCounts = [ordered]@{ ACCEPTED = 1; PARTIALLY_ACCEPTED = 1; REJECTED = 0; DEFERRED = 0; NEEDS_EVIDENCE = 1; ASK_USER = 0 }
+                    adoptionCounts = [ordered]@{ ACCEPTED = 1; PARTIALLY_ACCEPTED = 1; REJECTED = 0; DEFERRED = 0 }
+                })
+            }
+            $snapshot = [ordered]@{
+                runDirectory = 'D:\offline-fixture'
+                name = '완료 뒤 답변을 기다리는 합성 실행'
+                mode = 'dual-document'
+                modeLabel = '두 문서를 각각 개선하기'
+                runId = 'run-height-aware-frame'
+                status = 'AWAITING_USER'
+                statusLabel = Get-DuoForgeProgressStateLabelInternal -Status 'AWAITING_USER'
+                steps = @($graph.steps)
+                barriers = @(Get-DuoForgeProgressBarriersInternal -Steps @($graph.steps))
+                activeSteps = @()
+                committedSteps = 14
+                totalSteps = 14
+                recentCommitted = @($records)
+                latest = $records[-1]
+                issueCount = 6
+                openIssueCount = 3
+                blockingIssueCount = 2
+                lastEvent = [ordered]@{ type = 'RUN_FINISHED'; data = [ordered]@{} }
+            }
+
+            $matrix = [ordered]@{}
+            foreach ($size in @(@(72, 20), @(80, 24), @(100, 30), @(120, 32), @(120, 40), @(160, 50), @(160, 60))) {
+                $key = '{0}x{1}' -f $size[0], $size[1]
+                $view = [ordered]@{ mode = 'fullscreen'; screenMode = 'overview'; selectedCommittedIndex = -1; unicodeSpinner = $true; pauseRequestStatus = ''; waitForInput = $true; returnTarget = 'work-menu' }
+                $frame = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width $size[0] -Height $size[1] -ViewState $view)
+                $text = $frame -join "`n"
+                $nextActionIndex = [Array]::FindIndex([string[]]$frame, [Predicate[string]]{ param($line) $line -like '── 다음 할 일 *' })
+                $matrix[$key] = [ordered]@{
+                    text = $text
+                    rows = $frame.Count
+                    maximumWidth = (@($frame | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) }) | Measure-Object -Maximum).Maximum
+                    headers = @($frame | Where-Object { [string]$_ -match '^\s*(12|13|14)/14\s+.*✓' }).Count
+                    barriers = @($frame | Where-Object { [string]$_ -match '^[✓●↻◐○] (준비|[0-9]+차)' }).Count
+                    bodyTokens = [regex]::Matches($text, '안전본문-(12|13|14)').Count
+                    endMarkers = [regex]::Matches($text, '끝표식-(12|13|14)').Count
+                    waitingLabels = [regex]::Matches($text, '답변 대기').Count
+                    nextActionSpacer = $nextActionIndex -gt 0 -and [string]::IsNullOrWhiteSpace([string]$frame[$nextActionIndex - 1])
+                    truncated = [bool]$view.layoutTruncated
+                }
+            }
+
+            $manyBarriers = [System.Collections.Generic.List[object]]::new()
+            foreach ($index in 1..12) {
+                $barrierStep = [ordered]@{ provider = if ($index % 2 -eq 0) { 'claude' } else { 'codex' }; status = if ($index -eq 7) { 'STARTED' } else { 'PENDING' } }
+                $manyBarriers.Add([ordered]@{ key = "barrier-$index"; round = $index; stage = "fixture-stage-$index"; label = "합성 흐름 $index"; steps = @($barrierStep); status = [string]$barrierStep.status })
+            }
+            $compactSnapshot = ConvertTo-DuoForgeHashtable -InputObject $snapshot
+            $compactSnapshot.status = 'RUNNING'
+            $compactSnapshot.statusLabel = '실행 중'
+            $compactSnapshot.barriers = @($manyBarriers)
+            $compactSnapshot.activeSteps = @([ordered]@{ provider = 'codex'; stage = 'fixture-stage-7'; targetDocumentId = 'A' })
+            $compactSnapshot.lastEvent = [ordered]@{ type = 'STAGE_STARTED'; data = [ordered]@{} }
+            $compactFrame = @(New-DuoForgeProgressFrameInternal -Snapshot $compactSnapshot -Width 72 -Height 20 -ViewState ([ordered]@{ screenMode = 'overview'; selectedCommittedIndex = -1; providerElapsedSeconds = 1; unicodeSpinner = $true }))
+
+            [ordered]@{
+                matrix = $matrix
+                compactText = $compactFrame -join "`n"
+                normalColor = ConvertTo-DuoForgeProgressColoredLineInternal -Line '  안전한 정상 설명 · 실패 계측에서 제외했습니다.'
+                errorColor = ConvertTo-DuoForgeProgressColoredLineInternal -Line '지금 작업 중  ! 실제 오류 발생 · 이어서 가능'
+                viewport = Get-DuoForgeProgressViewportInternal -Width 600 -Height 140
+            }
+        }
+
+        foreach ($key in @('72x20', '80x24', '100x30', '120x32', '120x40', '160x50', '160x60')) {
+            $parts = $key -split 'x'
+            Assert-True ($surface.matrix[$key].rows -le ([int]$parts[1] - 1)) "$key 행 높이를 넘었습니다."
+            Assert-True ([int]$surface.matrix[$key].maximumWidth -le ([int]$parts[0] - 1)) "$key 표시 폭을 넘었습니다."
+            Assert-False ([bool]$surface.matrix[$key].truncated) "$key 레이아웃이 방어 절단되었습니다."
+            Assert-Equal $surface.matrix[$key].headers 3 "$key 최근 완료 전역 번호가 모두 보이지 않습니다."
+        }
+        Assert-Equal $surface.matrix['120x32'].barriers 7 '120x32에서 7개 실행 흐름이 모두 보여야 합니다.'
+        Assert-ContainsText $surface.matrix['120x32'].text '현재 위치'
+        Assert-ContainsText $surface.matrix['120x32'].text '다음 할 일'
+        Assert-Equal $surface.matrix['120x32'].waitingLabels 1 '완료·대기 상태가 중복 표시되었습니다.'
+        Assert-True ([bool]$surface.matrix['120x32'].nextActionSpacer) '다음 할 일 앞의 전환 여백이 없습니다.'
+        $largeBodyCounts = @('120x40', '160x50', '160x60' | ForEach-Object { [int]$surface.matrix[$_].bodyTokens })
+        Assert-True ($largeBodyCounts[1] -ge $largeBodyCounts[0]) '높이가 40행에서 50행으로 늘었는데 최근 완료 본문이 줄었습니다.'
+        Assert-True ($largeBodyCounts[2] -ge $largeBodyCounts[1]) '높이가 50행에서 60행으로 늘었는데 최근 완료 본문이 줄었습니다.'
+        Assert-True ($surface.matrix['160x60'].rows -ge 57) '안전한 본문이 남았는데 큰 화면에 지나치게 많은 빈 행이 남았습니다.'
+        Assert-True ($surface.matrix['160x60'].endMarkers -ge 1) '큰 화면에서도 선택한 최근 완료의 끝표식이 보이지 않습니다.'
+        Assert-ContainsText $surface.compactText '앞 5단계 생략'
+        Assert-ContainsText $surface.compactText '뒤 4단계 생략'
+        Assert-ContainsText $surface.compactText '합성 흐름 7'
+        Assert-NotContainsText $surface.normalColor "`e[31m"
+        Assert-ContainsText $surface.errorColor "`e[31m"
+        Assert-Equal $surface.viewport.width 400
+        Assert-Equal $surface.viewport.height 100
+    }
+
+    Test-Case 'LIVE 개요와 상세 화면은 지원 크기에서 높이별 확장, heartbeat와 단일 스크롤을 지킨다' {
         $surface = & $module {
             $stages = @('independent-draft', 'cross-review', 'author-response', 'synthesis', 'final-validation', 'document-validation')
             $steps = [System.Collections.Generic.List[object]]::new()
@@ -2657,7 +2770,7 @@ try {
                     headers = @($frame | Where-Object { [string]$_ -match '^\s*\d+/\d+\s+.*✓' }).Count
                     changes = @($frame | Where-Object { [string]$_ -like '*변경 사항*' }).Count
                     barriers = @($frame | Where-Object { [string]$_ -match '^[✓●↻◐○] (준비|[0-9]+차)' }).Count
-                    sectionLines = @($frame | Where-Object { [string]$_ -match '^── (단계별 진행|지금 작업|최근 완료|확인할 내용) .*─$' }).Count
+                    sectionLines = @($frame | Where-Object { [string]$_ -match '^── (단계별 진행|지금 작업|현재 위치|최근 완료|다음 할 일) .*─$' }).Count
                     recordTransitionSpacers = @(
                         for ($lineIndex = 1; $lineIndex -lt $frame.Count; $lineIndex++) {
                             if ([string]$frame[$lineIndex] -match '^\s*\d+/\d+\s+.*✓' -and [string]::IsNullOrWhiteSpace([string]$frame[$lineIndex - 1])) { $lineIndex }
@@ -2759,8 +2872,8 @@ try {
             Assert-False ([bool]$surface.matrix[$key].truncated)
             Assert-Equal $surface.matrix[$key].selected 2
         }
-        Assert-Equal $surface.matrix['72x20'].changes 1
-        Assert-Equal $surface.matrix['80x24'].changes 2
+        Assert-Equal $surface.matrix['72x20'].changes 0
+        Assert-Equal $surface.matrix['80x24'].changes 1
         Assert-Equal $surface.matrix['100x30'].changes 2
         Assert-Equal $surface.matrix['120x32'].changes 3
         Assert-Equal $surface.matrix['160x40'].changes 3
@@ -2915,8 +3028,8 @@ try {
         Assert-ContainsText ([string]$feed3Headers[0]) '검토 의견 판단'
         Assert-ContainsText ([string]$feed3Headers[1]) '공동 문서 작성'
         Assert-ContainsText ([string]$feed3Headers[2]) '최종 확인'
-        Assert-ContainsText $feed.frameCounts['3'].text '지금 상태  완료'
-        Assert-ContainsText $feed.frameCounts['3'].text '확인할 내용'
+        Assert-ContainsText $feed.frameCounts['3'].text 'AI 작업 13/13 완료'
+        Assert-ContainsText $feed.frameCounts['3'].text '다음 할 일'
         Assert-ContainsText $feed.frameCounts['3'].text 'P 현재 작업 후 멈추기'
     }
 

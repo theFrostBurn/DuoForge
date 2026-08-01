@@ -101,10 +101,11 @@ function Split-DuoForgeProgressTextInternal {
     param(
         [AllowEmptyString()][Parameter(Mandatory)][string]$Text,
         [ValidateRange(4, 1000)][int]$Width,
-        [ValidateRange(1, 100)][int]$MaximumLines = 3
+        [ValidateRange(1, 100)][int]$MaximumLines = 3,
+        [ValidateRange(1, 4000)][int]$MaximumCharacters = 1200
     )
 
-    $safe = ConvertTo-DuoForgeProgressTextInternal -Text $Text
+    $safe = ConvertTo-DuoForgeProgressTextInternal -Text $Text -MaximumCharacters $MaximumCharacters
     if ([string]::IsNullOrWhiteSpace($safe)) { return @() }
     $lines = [System.Collections.Generic.List[string]]::new()
     $remaining = $safe
@@ -356,7 +357,7 @@ function Get-DuoForgeProgressArtifactRecordInternal {
         targetDocumentId = [string](Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId')
         sourceDocumentIds = @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @())
         label = Get-DuoForgeProgressStageLabelInternal -Stage ([string]$Step.stage)
-        summary = if ([string]$Step.stage -eq 'context-batch-analysis') { '나눈 문서의 분석 결과를 안전하게 확인하고 저장했습니다.' } else { ConvertTo-DuoForgeProgressTextInternal -Text ([string](Get-DuoForgeObjectValue -Object $result -Name 'summary')) }
+        summary = if ([string]$Step.stage -eq 'context-batch-analysis') { '나눈 문서의 분석 결과를 안전하게 확인하고 저장했습니다.' } else { ConvertTo-DuoForgeProgressTextInternal -Text ([string](Get-DuoForgeObjectValue -Object $result -Name 'summary')) -MaximumCharacters 4000 }
         issueCounts = $issueCounts
         responseCounts = $responseCounts
         adoptionCounts = $adoptionCounts
@@ -437,9 +438,15 @@ function Get-DuoForgeProgressSnapshotInternal {
 
     $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
     $artifactRecords = [System.Collections.Generic.List[object]]::new()
-    foreach ($step in @($graph.steps)) {
+    $graphSteps = @($graph.steps)
+    for ($stepIndex = 0; $stepIndex -lt $graphSteps.Count; $stepIndex++) {
+        $step = $graphSteps[$stepIndex]
         $record = Get-DuoForgeProgressArtifactRecordInternal -Step $step -WorkflowVersion $workflowVersion
-        if ($null -ne $record) { $artifactRecords.Add($record) }
+        if ($null -ne $record) {
+            $record['stepNumber'] = $stepIndex + 1
+            $record['totalSteps'] = $graphSteps.Count
+            $artifactRecords.Add($record)
+        }
     }
     $recentCommitted = @($artifactRecords | Select-Object -Last 3)
     $latest = @($recentCommitted | Select-Object -Last 1)
@@ -475,17 +482,33 @@ function Get-DuoForgeVisibleProgressBarriersInternal {
     [CmdletBinding()]
     param(
         [AllowEmptyCollection()][Parameter(Mandatory)][object[]]$Barriers,
-        [ValidateRange(1, 30)][int]$Maximum
+        [ValidateRange(1, 100)][int]$Maximum
     )
 
-    if ($Barriers.Count -le $Maximum) { return @($Barriers) }
+    return @((Get-DuoForgeProgressBarrierWindowInternal -Barriers $Barriers -Maximum $Maximum).items)
+}
+
+function Get-DuoForgeProgressBarrierWindowInternal {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()][Parameter(Mandatory)][object[]]$Barriers,
+        [ValidateRange(1, 100)][int]$Maximum
+    )
+
+    if ($Barriers.Count -le $Maximum) {
+        return [ordered]@{ items = @($Barriers); omittedBefore = 0; omittedAfter = 0 }
+    }
     $focus = 0
     for ($index = 0; $index -lt $Barriers.Count; $index++) {
         if ([string]$Barriers[$index].status -in @('STARTED', 'FAILED', 'STALE', 'PARTIAL')) { $focus = $index; break }
         if ([string]$Barriers[$index].status -eq 'COMMITTED') { $focus = [Math]::Min($index + 1, $Barriers.Count - 1) }
     }
     $start = [Math]::Max(0, [Math]::Min($focus - [Math]::Floor($Maximum / 2), $Barriers.Count - $Maximum))
-    return @($Barriers[$start..($start + $Maximum - 1)])
+    return [ordered]@{
+        items = @($Barriers[$start..($start + $Maximum - 1)])
+        omittedBefore = $start
+        omittedAfter = $Barriers.Count - ($start + $Maximum)
+    }
 }
 
 function Get-DuoForgeProgressHeartbeatFrameInternal {
@@ -571,7 +594,10 @@ function Get-DuoForgeProgressCurrentLineInternal {
     if ($lastEventType -eq 'STAGE_INTERRUPTED_RECOVERED') {
         return ('지금 작업 중  ↻ 중단 단계 복구 · {0}' -f [string](Get-DuoForgeObjectValue -Object $Snapshot.lastEvent.data -Name 'code'))
     }
-    return ('지금 상태  {0}' -f $Snapshot.statusLabel)
+    $completed = [Math]::Max(0, [int]$Snapshot.committedSteps)
+    $total = [Math]::Max(0, [int]$Snapshot.totalSteps)
+    if ($total -gt 0 -and $completed -ge $total) { return ('AI 작업 {0}/{1} 완료' -f $completed, $total) }
+    return ('AI 작업 {0}/{1} 저장 완료' -f $completed, $total)
 }
 
 function New-DuoForgeProgressRecordHeaderInternal {
@@ -589,7 +615,11 @@ function New-DuoForgeProgressRecordHeaderInternal {
     $target = Get-DuoForgeProgressRecordTargetLabelInternal -Record $Record -Mode ([string]$Snapshot.mode)
     if (-not [string]::IsNullOrWhiteSpace($target)) { $parts += $target }
     $selectionMark = if ($Selected) { '›' } else { ' ' }
-    return ('  {0}/{1}  {2} ✓ {3}' -f ($Index + 1), $Count, $selectionMark, ($parts -join ' · '))
+    $stepNumber = [int](Get-DuoForgeObjectValue -Object $Record -Name 'stepNumber' -Default ($Index + 1))
+    $totalSteps = [int](Get-DuoForgeObjectValue -Object $Record -Name 'totalSteps' -Default $Count)
+    if ($stepNumber -le 0) { $stepNumber = $Index + 1 }
+    if ($totalSteps -le 0) { $totalSteps = $Count }
+    return ('  {0}/{1}  {2} ✓ {3}' -f $stepNumber, $totalSteps, $selectionMark, ($parts -join ' · '))
 }
 
 function New-DuoForgeProgressSectionLineInternal {
@@ -627,13 +657,14 @@ function New-DuoForgeProgressOverviewLinesInternal {
         if ($other -ge 0 -and $other -notin $expanded) { $expanded.Add($other) }
     }
 
-    $summaryMaximum = if ($Height -ge 24) { 3 } else { 2 }
+    $summaryMaximum = if ($Height -ge 32) { 100 } elseif ($Height -ge 24) { 3 } else { 2 }
+    $actionMaximum = if ($Height -ge 32) { 100 } else { 3 }
     $actionContentWidth = [Math]::Max(4, $Width - 13)
     $descriptors = [System.Collections.Generic.List[object]]::new()
     for ($index = 0; $index -lt $Records.Count; $index++) {
         $record = $Records[$index]
         $isExpanded = $index -in $expanded
-        $summaryLines = if ($isExpanded) { @(Split-DuoForgeProgressTextInternal -Text ([string]$record.summary) -Width ([Math]::Max(4, $Width - 2)) -MaximumLines $summaryMaximum) } else { @() }
+        $summaryLines = if ($isExpanded) { @(Split-DuoForgeProgressTextInternal -Text ([string]$record.summary) -Width ([Math]::Max(4, $Width - 2)) -MaximumLines $summaryMaximum -MaximumCharacters 4000) } else { @() }
         $action = if ($isExpanded) { Get-DuoForgeProgressActionSummaryInternal -Record $record } else { '' }
         if (-not [string]::IsNullOrWhiteSpace($action)) {
             $action = $action.Replace('새 검토 항목:', '새 항목:').Replace('검토 의견 처리:', '의견:').Replace('문서 반영:', '반영:')
@@ -642,7 +673,7 @@ function New-DuoForgeProgressOverviewLinesInternal {
         foreach ($summaryLine in $summaryLines) { $summaryList.Add([string]$summaryLine) }
         $actionList = [System.Collections.Generic.List[string]]::new()
         if (-not [string]::IsNullOrWhiteSpace($action)) {
-            foreach ($actionLine in @(Split-DuoForgeProgressTextInternal -Text $action -Width $actionContentWidth -MaximumLines 3)) { $actionList.Add([string]$actionLine) }
+            foreach ($actionLine in @(Split-DuoForgeProgressTextInternal -Text $action -Width $actionContentWidth -MaximumLines $actionMaximum -MaximumCharacters 4000)) { $actionList.Add([string]$actionLine) }
         }
         $descriptors.Add([ordered]@{
             index = $index
@@ -694,6 +725,11 @@ function New-DuoForgeProgressOverviewLinesInternal {
         }
         if ($changed) { continue }
         foreach ($descriptor in @($descriptors | Where-Object { -not [bool]$_.selected } | Sort-Object index)) {
+            if ($descriptor.actionLines.Count -gt 0) { $descriptor.actionLines.Clear(); $changed = $true; break }
+            if ($descriptor.summaryLines.Count -gt 0) { $descriptor.summaryLines.Clear(); $changed = $true; break }
+        }
+        if ($changed) { continue }
+        foreach ($descriptor in @($descriptors | Where-Object { [bool]$_.selected })) {
             if ($descriptor.actionLines.Count -gt 0) { $descriptor.actionLines.Clear(); $changed = $true; break }
             if ($descriptor.summaryLines.Count -gt 0) { $descriptor.summaryLines.Clear(); $changed = $true; break }
         }
@@ -822,8 +858,11 @@ function New-DuoForgeProgressFrameInternal {
     if (-not [string]::IsNullOrWhiteSpace($finalMessage)) {
         foreach ($row in @(New-DuoForgeTextRowsInternal -Text $finalMessage -Layout $displayLayout -MaximumLines 3 -Role 'text')) { $tailLines.Add([string]$row.text) }
     }
-    if ($Height -ge 24) { $tailLines.Add((New-DuoForgeProgressSectionLineInternal -Title '확인할 내용' -Width $lineWidth)) }
-    $issueLabel = if ($Height -ge 24) { '집계' } else { '확인할 내용' }
+    if ($Height -ge 24) {
+        $tailLines.Add('')
+        $tailLines.Add((New-DuoForgeProgressSectionLineInternal -Title '다음 할 일' -Width $lineWidth))
+    }
+    $issueLabel = if ($Height -ge 24) { '검토 항목' } else { '다음 할 일' }
     foreach ($row in @(New-DuoForgeFieldRowsInternal -Label $issueLabel -Value $issueSummary -Layout $displayLayout -Indent $(if ($Height -ge 24) { 2 } else { 0 }) -KeyWidth $(if ($Height -ge 24) { 8 } else { 0 }) -Role 'meta')) { $tailLines.Add([string]$row.text) }
     foreach ($row in @(New-DuoForgeTextRowsInternal -Text $footer -Layout $displayLayout -MaximumLines 2 -Role 'meta')) { $tailLines.Add([string]$row.text) }
 
@@ -831,13 +870,16 @@ function New-DuoForgeProgressFrameInternal {
     $lines.Add('DUOFORGE · AI 작업 진행')
     foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '작업' -Value ("{0} · {1} · {2}" -f $Snapshot.name, $Snapshot.modeLabel, $Snapshot.runId) -Layout $displayLayout -Indent 0 -KeyWidth 8 -Role 'meta')) { $lines.Add([string]$row.text) }
     $total = [Math]::Max(1, [int]$Snapshot.totalSteps)
-    $barWidth = [Math]::Max(10, [Math]::Min(28, $Width - 42))
+    $progressState = if ([int]$Snapshot.committedSteps -ge $total) { '완료' } else { '저장' }
+    $progressPrefix = 'AI 작업  '
+    $progressSuffix = ("  {0}/{1} {2} · 전체 상태  {3}" -f $Snapshot.committedSteps, $Snapshot.totalSteps, $progressState, $Snapshot.statusLabel)
+    $barWidth = [Math]::Max(10, [Math]::Min(28, $lineWidth - (Get-DuoForgeProgressTextWidthInternal -Text ($progressPrefix + $progressSuffix))))
     $filled = [Math]::Min($barWidth, [Math]::Floor($barWidth * [int]$Snapshot.committedSteps / $total))
     $bar = ('█' * $filled) + ('░' * ($barWidth - $filled))
-    $lines.Add(("진행  {0}  {1}/{2} · {3}" -f $bar, $Snapshot.committedSteps, $Snapshot.totalSteps, $Snapshot.statusLabel))
+    $lines.Add(($progressPrefix + $bar + $progressSuffix))
     $currentLine = Get-DuoForgeProgressCurrentLineInternal -Snapshot $Snapshot -ViewState $ViewState -Width $lineWidth
     $currentLines = [System.Collections.Generic.List[string]]::new()
-    if ($currentLine -match '^(?<label>지금 작업 중|지금 상태)\s{2}(?<value>.+)$') {
+    if ($currentLine -match '^(?<label>지금 작업 중)\s{2}(?<value>.+)$') {
         foreach ($row in @(New-DuoForgeFieldRowsInternal -Label ([string]$Matches.label) -Value ([string]$Matches.value) -Layout $displayLayout -Indent 0 -Role 'warning')) { $currentLines.Add([string]$row.text) }
     }
     else {
@@ -860,12 +902,50 @@ function New-DuoForgeProgressFrameInternal {
     else {
         $hasDiagnostics = $diagnosticLines.Count -gt 0
         $minimumBarrierCount = if ($hasDiagnostics) { 1 } else { 3 }
-        $desiredBarrierCount = if ($hasDiagnostics) { 1 } elseif ($Height -ge 32) { 6 } elseif ($Height -ge 30) { 5 } else { 3 }
-        $barrierCount = [Math]::Min($desiredBarrierCount, [Math]::Max($minimumBarrierCount, @($Snapshot.barriers).Count))
-        $minimumFeed = if ($recentCommitted.Count -eq 0) { 1 } else { 1 }
-        while ($barrierCount -gt $minimumBarrierCount -and ($maximumLines - (3 + 1 + $barrierCount + 1 + 1) - $tailLines.Count) -lt $minimumFeed) { $barrierCount-- }
+        $allBarriers = @($Snapshot.barriers)
+        $minimumFeed = if ($hasDiagnostics) {
+            0
+        }
+        elseif ($recentCommitted.Count -eq 0) {
+            1
+        }
+        else {
+            $bodyReserve = if ($Height -le 23) { 2 } elseif ($Height -le 31) { 4 } else { [Math]::Min(6, $recentCommitted.Count * 2) }
+            $recentCommitted.Count + $bodyReserve
+        }
+        $currentSectionTitle = if (@($Snapshot.activeSteps).Count -gt 0 -or [string](Get-DuoForgeObjectValue -Object $Snapshot.lastEvent -Name 'type' -Default '') -in @('STAGE_RETRY_SCHEDULED', 'STAGE_FAILED', 'FINAL_ARTIFACTS_FAILED', 'STAGE_INTERRUPTED_RECOVERED')) { '지금 작업' } else { '현재 위치' }
+        $reservedWithoutBarriers = $lines.Count + 1 + 1 + $currentLines.Count + $tailLines.Count
+        if (-not $hasDiagnostics) { $reservedWithoutBarriers += 1 + $minimumFeed }
+        $barrierCount = [Math]::Min($allBarriers.Count, [Math]::Max($minimumBarrierCount, $allBarriers.Count))
+        $barrierWindow = Get-DuoForgeProgressBarrierWindowInternal -Barriers $allBarriers -Maximum ([Math]::Max(1, $barrierCount))
+        while ($barrierCount -gt $minimumBarrierCount) {
+            $candidate = Get-DuoForgeProgressBarrierWindowInternal -Barriers $allBarriers -Maximum $barrierCount
+            $omissionRows = if ($hasDiagnostics) {
+                if ([int]$candidate.omittedBefore -gt 0 -or [int]$candidate.omittedAfter -gt 0) { 1 } else { 0 }
+            }
+            else {
+                if ($Height -le 23 -and [int]$candidate.omittedBefore -gt 0 -and [int]$candidate.omittedAfter -gt 0) { 1 }
+                else { $(if ([int]$candidate.omittedBefore -gt 0) { 1 } else { 0 }) + $(if ([int]$candidate.omittedAfter -gt 0) { 1 } else { 0 }) }
+            }
+            if ($reservedWithoutBarriers + @($candidate.items).Count + $omissionRows -le $maximumLines) {
+                $barrierWindow = $candidate
+                break
+            }
+            $barrierCount--
+            $barrierWindow = Get-DuoForgeProgressBarrierWindowInternal -Barriers $allBarriers -Maximum $barrierCount
+        }
         $lines.Add((New-DuoForgeProgressSectionLineInternal -Title '단계별 진행' -Width $lineWidth))
-        $visibleBarriers = @(Get-DuoForgeVisibleProgressBarriersInternal -Barriers @($Snapshot.barriers) -Maximum ([Math]::Max(1, $barrierCount)))
+        if ([int]$barrierWindow.omittedBefore -gt 0) {
+            if ($hasDiagnostics) {
+                $suffix = if ([int]$barrierWindow.omittedAfter -gt 0) { " · 뒤 $([int]$barrierWindow.omittedAfter)단계" } else { '' }
+                $lines.Add(("  … 앞 {0}단계{1} 생략" -f [int]$barrierWindow.omittedBefore, $suffix))
+            }
+            elseif ($Height -le 23 -and [int]$barrierWindow.omittedAfter -gt 0) {
+                $lines.Add(("  … 앞 {0}단계 생략 · 뒤 {1}단계 생략" -f [int]$barrierWindow.omittedBefore, [int]$barrierWindow.omittedAfter))
+            }
+            else { $lines.Add(("  … 앞 {0}단계 생략" -f [int]$barrierWindow.omittedBefore)) }
+        }
+        $visibleBarriers = @($barrierWindow.items)
         foreach ($barrierItem in $visibleBarriers) {
             $mark = Get-DuoForgeProgressBarrierMarkInternal -Status ([string]$barrierItem.status)
             $roundLabel = if ([int]$barrierItem.round -eq 0) { '준비' } else { "$([int]$barrierItem.round)차" }
@@ -873,7 +953,8 @@ function New-DuoForgeProgressFrameInternal {
             $claudeMark = Get-DuoForgeProgressProviderMarkInternal -Steps @($barrierItem.steps | Where-Object { [string]$_.provider -eq 'claude' })
             $lines.Add(("{0} {1,-5} {2}  Codex {3}  Claude {4}" -f $mark, $roundLabel, $barrierItem.label, $codexMark, $claudeMark))
         }
-        $lines.Add((New-DuoForgeProgressSectionLineInternal -Title '지금 작업' -Width $lineWidth))
+        if (-not $hasDiagnostics -and [int]$barrierWindow.omittedAfter -gt 0 -and -not ($Height -le 23 -and [int]$barrierWindow.omittedBefore -gt 0)) { $lines.Add(("  … 뒤 {0}단계 생략" -f [int]$barrierWindow.omittedAfter)) }
+        $lines.Add((New-DuoForgeProgressSectionLineInternal -Title $currentSectionTitle -Width $lineWidth))
         foreach ($line in $currentLines) { $lines.Add($line) }
         if (-not $hasDiagnostics) {
             $lines.Add((New-DuoForgeProgressSectionLineInternal -Title '최근 완료' -Width $lineWidth))
@@ -893,6 +974,21 @@ function New-DuoForgeProgressFrameInternal {
     return $result
 }
 
+function Get-DuoForgeProgressViewportInternal {
+    [CmdletBinding()]
+    param(
+        [ValidateRange(0, 2147483647)][int]$Width = 0,
+        [ValidateRange(0, 2147483647)][int]$Height = 0
+    )
+
+    if ($Width -le 0) { try { $Width = [int][Console]::WindowWidth } catch { $Width = 0 } }
+    if ($Height -le 0) { try { $Height = [int][Console]::WindowHeight } catch { $Height = 0 } }
+    return [ordered]@{
+        width = [Math]::Max(48, [Math]::Min(400, $Width))
+        height = [Math]::Max(16, [Math]::Min(100, $Height))
+    }
+}
+
 function Get-DuoForgeProgressTerminalCapabilityInternal {
     [CmdletBinding()]
     param()
@@ -902,8 +998,9 @@ function Get-DuoForgeProgressTerminalCapabilityInternal {
         $unicodeSpinner = [Console]::OutputEncoding.WebName -match 'utf-(8|16|32)|unicode'
         if (-not [bool]$Host.UI.SupportsVirtualTerminal) { return [ordered]@{ fullscreen = $false; reason = 'virtual-terminal-unsupported'; width = 0; height = 0; unicodeSpinner = $unicodeSpinner } }
         if ([string]$env:TERM -eq 'dumb') { return [ordered]@{ fullscreen = $false; reason = 'dumb-terminal'; width = 0; height = 0; unicodeSpinner = $false } }
-        $width = [Math]::Min(400, [Console]::WindowWidth)
-        $height = [Math]::Min(100, [Console]::WindowHeight)
+        $viewport = Get-DuoForgeProgressViewportInternal -Width ([Console]::WindowWidth) -Height ([Console]::WindowHeight)
+        $width = [int]$viewport.width
+        $height = [int]$viewport.height
         if ($width -lt 72 -or $height -lt 20) { return [ordered]@{ fullscreen = $false; reason = 'terminal-too-small'; width = $width; height = $height; unicodeSpinner = $unicodeSpinner } }
         return [ordered]@{ fullscreen = $true; reason = 'ready'; width = $width; height = $height; unicodeSpinner = $unicodeSpinner }
     }
@@ -923,11 +1020,11 @@ function ConvertTo-DuoForgeProgressColoredLineInternal {
     $escape = [char]27
     $reset = "$escape[0m"
     if ($Line.StartsWith('DUOFORGE')) { return "$escape[1;36m$Line$reset" }
-    if ($Line -match '(^|\s)!\s' -or $Line -match '작업 오류|실패') { return "$escape[31m$Line$reset" }
+    if ($Line -match '(^|\s)!\s' -or $Line -match '^── 작업 오류 ' -or $Line -match '^\s*(오류|오류 코드)\s{2}' -or $Line.StartsWith('작업 오류 ·')) { return "$escape[31m$Line$reset" }
     if (($Line -match '✓|\bOK\b') -and ($Line -match '최근 완료' -or $Line -match '^\s*\d+/\d+')) { return "$escape[32m$Line$reset" }
     if ($Line.StartsWith('지금 작업 중')) { return "$escape[1;33m$Line$reset" }
     if ($Line.StartsWith('●')) { return "$escape[33m$Line$reset" }
-    if ($Line.StartsWith('↻')) { return "$escape[31m$Line$reset" }
+    if ($Line.StartsWith('↻')) { return "$escape[33m$Line$reset" }
     if ($Line.StartsWith('─') -or $Line.StartsWith('단계별 진행') -or $Line.StartsWith('Enter 키') -or $Line.StartsWith('↑↓') -or $Line.StartsWith('PgUp')) { return "$escape[90m$Line$reset" }
     return $Line
 }
@@ -937,8 +1034,9 @@ function Write-DuoForgeProgressFrameInternal {
     param([Parameter(Mandatory)][System.Collections.IDictionary]$View)
 
     try {
-        $width = [Console]::WindowWidth
-        $height = [Console]::WindowHeight
+        $viewport = Get-DuoForgeProgressViewportInternal -Width ([Console]::WindowWidth) -Height ([Console]::WindowHeight)
+        $width = [int]$viewport.width
+        $height = [int]$viewport.height
         if ($width -lt 72 -or $height -lt 20) { throw 'terminal-too-small' }
         $snapshot = Get-DuoForgeProgressSnapshotInternal -RunDirectory ([string]$View.runDirectory) -LastEvent $View.lastEvent
         $frame = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width $width -Height $height -ViewState $View)
@@ -1301,7 +1399,7 @@ function Close-DuoForgeProgressViewInternal {
         foreach ($name in @('code', 'diagnosticId', 'diagnosticsLocation', 'diagnosticsRelativePath', 'diagnosticsPath', 'diagnosticWarningCode')) { $View[$name] = Get-DuoForgeObjectValue -Object $ErrorDiagnostic -Name $name }
     }
     elseif ($null -ne $Result) {
-        $View.finalMessage = '작업 종료 · ' + (Get-DuoForgeProgressStateLabelInternal -Status ([string]$Result.status))
+        $View.finalMessage = 'AI 작업 실행을 마쳤습니다.'
         foreach ($name in @('code', 'diagnosticId', 'diagnosticsLocation', 'diagnosticsRelativePath', 'diagnosticsPath', 'diagnosticWarningCode')) { $View[$name] = Get-DuoForgeObjectValue -Object $Result -Name $name }
     }
     if ([string]$View.mode -eq 'fullscreen') {
