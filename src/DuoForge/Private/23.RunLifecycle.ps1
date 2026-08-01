@@ -1,3 +1,107 @@
+function Get-DuoForgeFailedStageRetryEligibilityInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$RunDirectory)
+
+    $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'state.json'))
+    if ([string]$state.status -ne 'FAILED_STAGE') {
+        return [ordered]@{ eligible = $false; reason = '작업 실패 상태에서만 다시 시도를 준비할 수 있습니다.'; step = $null }
+    }
+
+    $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'steps.json'))
+    $failedSteps = @($graph.steps | Where-Object { [string]$_.status -eq 'FAILED' })
+    if ($failedSteps.Count -ne 1) {
+        return [ordered]@{ eligible = $false; reason = '실패 단계를 하나로 안전하게 특정할 수 없습니다.'; step = $null }
+    }
+
+    $step = $failedSteps[0]
+    if ([string](Get-DuoForgeObjectValue -Object $step -Name 'retryMode' -Default '') -ne 'RETRY_EXHAUSTED') {
+        return [ordered]@{ eligible = $false; reason = '자동 재시도가 소진된 단계가 아닙니다.'; step = $step }
+    }
+    $lastError = Get-DuoForgeObjectValue -Object $step -Name 'lastError'
+    if ($null -eq $lastError -or -not [bool](Get-DuoForgeObjectValue -Object $lastError -Name 'retryable' -Default $false)) {
+        return [ordered]@{ eligible = $false; reason = '이 오류는 같은 단계의 추가 시도를 허용하지 않습니다.'; step = $step }
+    }
+    if ([int](Get-DuoForgeObjectValue -Object $step -Name 'manualRetryCount' -Default 0) -ge 1) {
+        return [ordered]@{ eligible = $false; reason = '사용자가 허용할 수 있는 추가 시도 1회를 이미 사용했습니다.'; step = $step }
+    }
+    $budget = Get-DuoForgeRemainingCallBudget -RunDirectory $RunDirectory
+    $providerBudget = Get-DuoForgeObjectValue -Object $budget.providers -Name ([string]$step.provider)
+    if ($null -eq $providerBudget -or [int](Get-DuoForgeObjectValue -Object $providerBudget -Name 'maximumAdditionalCalls' -Default 0) -lt 1) {
+        return [ordered]@{ eligible = $false; reason = '이 AI에 허용된 전체 요청 횟수가 남아 있지 않습니다.'; step = $step }
+    }
+
+    return [ordered]@{ eligible = $true; reason = ''; step = $step }
+}
+
+function Enable-DuoForgeFailedStageRetryInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RunId,
+        [string]$ResultsRoot
+    )
+
+    $run = Get-DuoForgeRunInternal -RunId $RunId -ResultsRoot $ResultsRoot
+    $runDirectory = [string]$run.runDirectory
+    return Invoke-WithDuoForgeRunLock -RunDirectory $runDirectory -ScriptBlock {
+        $current = Get-DuoForgeRunInternal -RunId $RunId -ResultsRoot $ResultsRoot
+        if ([string]$current.state.status -ne 'FAILED_STAGE') {
+            throw (New-DuoForgeException -Code 'DF-RUN-RETRY-STATE' -Message '다시 시도 준비는 실패한 작업에만 사용할 수 있습니다.')
+        }
+
+        $null = Assert-DuoForgeRunStorageContractInternal -RunDirectory $runDirectory
+        $eligibility = Get-DuoForgeFailedStageRetryEligibilityInternal -RunDirectory $runDirectory
+        if (-not [bool]$eligibility.eligible) {
+            throw (New-DuoForgeException -Code 'DF-RUN-RETRY-UNAVAILABLE' -Message ([string]$eligibility.reason))
+        }
+        $pendingPath = Join-Path $runDirectory 'decisions\pending.json'
+        if ((Test-Path -LiteralPath $pendingPath -PathType Leaf) -and @((Read-DuoForgeJson -Path $pendingPath).questions).Count -gt 0) {
+            throw (New-DuoForgeException -Code 'DF-RUN-RETRY-PENDING' -Message '답하지 않은 질문이 있어 실패 단계를 다시 준비할 수 없습니다.')
+        }
+
+        return Invoke-WithDuoForgeRunMutationTransactionInternal -RunDirectory $runDirectory -RelativePaths @('state.json', 'steps.json', 'events.jsonl') -ScriptBlock {
+            $statePath = Join-Path $runDirectory 'state.json'
+            $stepsPath = Join-Path $runDirectory 'steps.json'
+            $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $statePath)
+            $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $stepsPath)
+            $step = @($graph.steps | Where-Object { [string]$_.status -eq 'FAILED' })[0]
+            $lastError = Get-DuoForgeObjectValue -Object $step -Name 'lastError'
+            $preparedAt = Get-DuoForgeUtcNow
+
+            $step.status = 'PENDING'
+            $step.retryMode = 'MANUAL_RETRY'
+            $step.manualRetryCount = 1
+            $state.status = 'RESUMABLE_ERROR'
+            $state.updatedAt = $preparedAt
+
+            Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph
+            Write-DuoForgeJsonAtomic -Path $statePath -Value $state
+            Add-DuoForgeRunEvent -RunDirectory $runDirectory -Type 'FAILED_STAGE_RETRY_PREPARED' -Status 'RESUMABLE_ERROR' -Data ([ordered]@{
+                stepKey = [string]$step.stepKey
+                provider = [string]$step.provider
+                stage = [string]$step.stage
+                targetDocumentId = Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId'
+                round = [int]$step.round
+                previousAttemptCount = [int]$step.attemptCount
+                totalAttemptCount = [int](Get-DuoForgeObjectValue -Object $step -Name 'totalAttemptCount' -Default ([int]$step.attemptCount))
+                manualRetryCount = 1
+                diagnosticId = [string](Get-DuoForgeObjectValue -Object $lastError -Name 'diagnosticId' -Default '')
+                providerCalls = 0
+            })
+            $null = Assert-DuoForgeRunStorageContractInternal -RunDirectory $runDirectory
+            return [ordered]@{
+                runId = $RunId
+                status = 'RESUMABLE_ERROR'
+                stepKey = [string]$step.stepKey
+                attemptCount = [int]$step.attemptCount
+                totalAttemptCount = [int](Get-DuoForgeObjectValue -Object $step -Name 'totalAttemptCount' -Default ([int]$step.attemptCount))
+                manualRetryCount = 1
+                providerCalls = 0
+                runDirectory = $runDirectory
+            }
+        }
+    }
+}
+
 function Abandon-DuoForgeRunInternal {
     [CmdletBinding()]
     param(
@@ -21,7 +125,7 @@ function Abandon-DuoForgeRunInternal {
             }
         }
 
-        $otherTerminalStates = @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED', 'FAILED_STAGE', 'SOURCE_DRIFT')
+        $otherTerminalStates = @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED')
         if ([string]$state.status -in $otherTerminalStates) {
             throw (New-DuoForgeException -Code 'DF-RUN-ABANDON-TERMINAL' -Message '이미 종료된 작업은 포기 상태로 바꿀 수 없습니다.')
         }
@@ -71,17 +175,19 @@ function Restore-DuoForgeRunInternal {
         $null = Assert-DuoForgeRunStorageContractInternal -RunDirectory $runDirectory
         return Invoke-WithDuoForgeRunMutationTransactionInternal -RunDirectory $runDirectory -RelativePaths @('state.json', 'events.jsonl') -ScriptBlock {
             $restoredAt = Get-DuoForgeUtcNow
-            $state.status = 'PAUSED_USER'
+            $abandonedFromStatus = [string](Get-DuoForgeObjectValue -Object $state -Name 'abandonedFromStatus' -Default '')
+            $restoredStatus = if ($abandonedFromStatus -in @('FAILED_STAGE', 'SOURCE_DRIFT')) { $abandonedFromStatus } else { 'PAUSED_USER' }
+            $state.status = $restoredStatus
             $state.updatedAt = $restoredAt
             $state.restoredAt = $restoredAt
             Write-DuoForgeJsonAtomic -Path (Join-Path $runDirectory 'state.json') -Value $state
-            Add-DuoForgeRunEvent -RunDirectory $runDirectory -Type 'STATE_CHANGED' -Status 'PAUSED_USER' -Data ([ordered]@{ lastCompletedStage = $state.lastCompletedStage; round = $state.round })
-            Add-DuoForgeRunEvent -RunDirectory $runDirectory -Type 'RUN_RESTORED' -Status 'PAUSED_USER' -Data ([ordered]@{ previousStatus = 'CANCELLED' })
+            Add-DuoForgeRunEvent -RunDirectory $runDirectory -Type 'STATE_CHANGED' -Status $restoredStatus -Data ([ordered]@{ lastCompletedStage = $state.lastCompletedStage; round = $state.round })
+            Add-DuoForgeRunEvent -RunDirectory $runDirectory -Type 'RUN_RESTORED' -Status $restoredStatus -Data ([ordered]@{ previousStatus = 'CANCELLED'; restoredStatus = $restoredStatus })
             $null = Assert-DuoForgeRunStorageContractInternal -RunDirectory $runDirectory
             return [ordered]@{
                 runId = $RunId
                 name = [string]$current.manifest.name
-                status = 'PAUSED_USER'
+                status = $restoredStatus
                 restored = $true
                 previousStatus = 'CANCELLED'
                 restoredAt = $restoredAt

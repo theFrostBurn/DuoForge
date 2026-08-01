@@ -223,6 +223,7 @@ function Get-DuoForgeProgressRetryLabelInternal {
     switch ($RetryMode) {
         'FORMAT_REPAIR' { '답변 형식 다시 확인 대기' }
         'STANDARD_RETRY' { 'AI 답변 재시도 대기' }
+        'MANUAL_RETRY' { '사용자가 허용한 추가 시도 대기' }
         default { '재시도 대기' }
     }
 }

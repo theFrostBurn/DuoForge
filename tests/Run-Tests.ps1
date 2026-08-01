@@ -1286,6 +1286,78 @@ try {
         Assert-ContainsText $output '허용된 요청 횟수를 모두 사용한 작업이 1개 있습니다.'
     }
 
+    Test-Case '실패 단계 수동 재시도 준비는 시도 기록을 보존하고 공급자 호출 없이 한 번만 열린다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'manual-failed-retry\input\brief.md')
+        $workspace = Join-Path $tempRoot 'manual-failed-retry\results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $graph = & $module { param($directory) Initialize-DuoForgeStageGraph -RunDirectory $directory } $run.runDirectory
+        $failedStep = @($graph.steps)[0]
+        $failedStep.status = 'FAILED'
+        $failedStep.attemptCount = 2
+        $failedStep.totalAttemptCount = 3
+        $failedStep.retryMode = 'RETRY_EXHAUSTED'
+        $failedStep.lastError = [ordered]@{ code = 'DF-PROVIDER-TIMEOUT'; category = 'timeout'; retryable = $true; attempt = 2; diagnosticId = 'diag-manual-retry'; validationErrors = @() }
+        & $module {
+            param($directory, $value)
+            Write-DuoForgeJsonAtomic -Path (Join-Path $directory 'steps.json') -Value $value
+            $statePath = Join-Path $directory 'state.json'
+            $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $statePath)
+            $state.status = 'FAILED_STAGE'
+            Write-DuoForgeJsonAtomic -Path $statePath -Value $state
+        } $run.runDirectory $graph
+
+        $beforeProviderEvents = @(Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ConvertFrom-Json | Where-Object type -eq 'PROVIDER_CALL_STARTED').Count
+        $prepared = & $module { param($runId, $root) Enable-DuoForgeFailedStageRetryInternal -RunId $runId -ResultsRoot $root } $run.runId $workspace
+        Assert-Equal $prepared.status 'RESUMABLE_ERROR'
+        Assert-Equal $prepared.attemptCount 2
+        Assert-Equal $prepared.totalAttemptCount 3
+        Assert-Equal $prepared.manualRetryCount 1
+        Assert-Equal $prepared.providerCalls 0
+
+        $preparedRun = & $module { param($runId, $root) Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $root } $run.runId $workspace
+        $preparedGraph = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'steps.json') | ConvertFrom-Json -Depth 100
+        $preparedStep = @($preparedGraph.steps | Where-Object stepKey -eq $failedStep.stepKey)[0]
+        Assert-Equal $preparedRun.state.status 'RESUMABLE_ERROR'
+        Assert-Equal $preparedStep.status 'PENDING'
+        Assert-Equal $preparedStep.retryMode 'MANUAL_RETRY'
+        Assert-Equal $preparedStep.attemptCount 2
+        Assert-Equal $preparedStep.totalAttemptCount 3
+        Assert-Equal $preparedStep.manualRetryCount 1
+        Assert-Equal $preparedStep.lastError.diagnosticId 'diag-manual-retry'
+        $afterProviderEvents = @(Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ConvertFrom-Json | Where-Object type -eq 'PROVIDER_CALL_STARTED').Count
+        Assert-Equal $afterProviderEvents $beforeProviderEvents
+        $preparedEvents = @(Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ConvertFrom-Json | Where-Object type -eq 'FAILED_STAGE_RETRY_PREPARED')
+        Assert-Equal $preparedEvents.Count 1
+        Assert-Equal $preparedEvents[0].data.providerCalls 0
+
+        & $module {
+            param($directory, $stepKey)
+            $stepsPath = Join-Path $directory 'steps.json'
+            $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $stepsPath)
+            $step = @($graph.steps | Where-Object stepKey -eq $stepKey)[0]
+            $step.status = 'FAILED'
+            $step.retryMode = 'RETRY_EXHAUSTED'
+            Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph
+            $statePath = Join-Path $directory 'state.json'
+            $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $statePath)
+            $state.status = 'FAILED_STAGE'
+            Write-DuoForgeJsonAtomic -Path $statePath -Value $state
+        } $run.runDirectory $failedStep.stepKey
+        Assert-ThrowsCode { & $module { param($runId, $root) Enable-DuoForgeFailedStageRetryInternal -RunId $runId -ResultsRoot $root } $run.runId $workspace } 'DF-RUN-RETRY-UNAVAILABLE'
+
+        $abandoned = & $module { param($runId, $root) Abandon-DuoForgeRunInternal -RunId $runId -ResultsRoot $root } $run.runId $workspace
+        Assert-Equal $abandoned.previousStatus 'FAILED_STAGE'
+        $restored = & $module { param($runId, $root) Restore-DuoForgeRunInternal -RunId $runId -ResultsRoot $root } $run.runId $workspace
+        Assert-Equal $restored.status 'FAILED_STAGE'
+        $restoredRun = & $module { param($runId, $root) Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $root } $run.runId $workspace
+        $restoredGraph = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'steps.json') | ConvertFrom-Json -Depth 100
+        Assert-Equal $restoredRun.state.status 'FAILED_STAGE'
+        Assert-Equal @($restoredGraph.steps | Where-Object { [int]$_.manualRetryCount -eq 1 }).Count 1
+        Assert-Equal @(Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ConvertFrom-Json | Where-Object type -eq 'PROVIDER_CALL_STARTED').Count $beforeProviderEvents
+    }
+
     Test-Case '직렬화된 workflow-v1 저장 fixture는 STARTED 체크포인트부터 원본 불변으로 재개된다' {
         $fixtureRoot = Join-Path $PSScriptRoot 'fixtures\workflow-v1-resume\run-template'
         $fixtureHashesBefore = @{}

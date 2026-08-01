@@ -1038,9 +1038,10 @@ Test-Case 'CLI abandon, restore, delete는 확인 이탈을 보존하고 정확�
     Assert-Equal $calls.delete 1
 }
 
-Test-Case 'CLI 도움말은 포기한 작업 복원 명령과 확인 플래그를 안내한다' {
+Test-Case 'CLI 도움말은 포기한 작업 복원과 실패 재시도 명령을 안내한다' {
     $help = (& $module { Write-DuoForgeHelp 6>&1 } | Out-String)
     Assert-ContainsText $help 'duoforge restore --run <실행 ID> [--workspace <폴더>] [--confirm-restore]'
+    Assert-ContainsText $help 'duoforge retry-failed --run <실행 ID> [--workspace <폴더>] [--confirm-retry]'
 }
 
 Test-Case '작업 메뉴와 홈은 포기와 영구 삭제를 별도 항목으로 표시한다' {
@@ -1106,16 +1107,128 @@ Test-Case '작업 메뉴와 홈은 포기와 영구 삭제를 별도 항목으�
         param($runValue, $menuInvoker)
         Invoke-DuoForgeInteractiveHome -SetupInvoker { [ordered]@{ readyForDocumentModes = $true } } -RunsInvoker { @([ordered]@{ runId = [string]$runValue.state.runId; name = '포기 작업'; mode = 'shared-document'; status = 'CANCELLED'; updatedAt = ''; runDirectory = [string]$runValue.runDirectory }) } -MenuInvoker $menuInvoker 6>$null
     } $fixture.run $homeMenu
-    Assert-Equal @($homeCapture.items | Where-Object { [string]$_.label -eq '포기한 작업 관리 (1)' }).Count 1
-    Assert-Equal @($homeCapture.items | Where-Object { [string]$_.label -eq '실행 환경 확인, 로그인 및 설정' -and [string]$_.value -eq '5' }).Count 1
+    Assert-Equal @($homeCapture.items | Where-Object { [string]$_.label -eq '포기한 작업 관리 (1)' -and [string]$_.value -eq '5' }).Count 1
+    Assert-Equal @($homeCapture.items | Where-Object { [string]$_.label -eq '실행 환경 확인, 로그인 및 설정' -and [string]$_.value -eq '6' }).Count 1
 }
 
-Test-Case '홈의 빈 진행/완료/포기 분류를 실제 선택해도 안내 뒤 홈에 남고 파일을 변경하지 않는다' {
+Test-Case '실패한 작업은 홈 전용 목록과 제한된 다시 시도 준비 동작에 나타난다' {
+    $fixture = New-DuoForgeInteractionTestRun -Name 'failed-run-menu'
+    $null = & $module {
+        param($directory)
+        $statePath = Join-Path $directory 'state.json'
+        $stepsPath = Join-Path $directory 'steps.json'
+        $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $statePath)
+        $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $stepsPath)
+        $step = @($graph.steps)[0]
+        $step.status = 'FAILED'
+        $step.attemptCount = 2
+        $step.totalAttemptCount = 2
+        $step.retryMode = 'RETRY_EXHAUSTED'
+        $step.lastError = [ordered]@{ code = 'DF-PROVIDER-TIMEOUT'; retryable = $true; diagnosticId = 'diag-synthetic' }
+        $state.status = 'FAILED_STAGE'
+        Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph
+        Write-DuoForgeJsonAtomic -Path $statePath -Value $state
+    } $fixture.run.runDirectory
+
+    $homeCapture = [ordered]@{ items = $null }
+    $homeMenu = {
+        param($items, $title, $initialSelectedIndex, $returnTarget, $cancelReturnTarget, $interruptReturnTarget)
+        $homeCapture.items = @($items)
+        return [ordered]@{ action = 'submit'; value = 'exit'; source = 'line'; returnTarget = $returnTarget }
+    }.GetNewClosure()
+    $null = & $module {
+        param($runValue, $menuInvoker)
+        Invoke-DuoForgeInteractiveHome -SetupInvoker { [ordered]@{ readyForDocumentModes = $true } } -RunsInvoker { @([ordered]@{ runId = [string]$runValue.state.runId; name = '실패 작업'; mode = 'shared-document'; status = 'FAILED_STAGE'; updatedAt = ''; runDirectory = [string]$runValue.runDirectory }) } -MenuInvoker $menuInvoker 6>$null
+    } $fixture.run $homeMenu
+    Assert-Equal @($homeCapture.items | Where-Object { [string]$_.label -eq '진행 중인 작업 보기 (0)' }).Count 1
+    Assert-Equal @($homeCapture.items | Where-Object { [string]$_.label -eq '실패한 작업 확인 (1)' -and [string]$_.value -eq '4' }).Count 1
+
+    $workCapture = [ordered]@{ items = $null }
+    $workMenu = {
+        param($items, $title, $initialSelectedIndex, $returnTarget, $cancelReturnTarget, $interruptReturnTarget)
+        $workCapture.items = @($items)
+        return [ordered]@{ action = 'back'; value = $null; source = 'line'; returnTarget = $returnTarget }
+    }.GetNewClosure()
+    $null = & $module {
+        param($runValue, $menuInvoker)
+        Invoke-DuoForgeInteractiveRun -RunRecord ([ordered]@{ runId = [string]$runValue.state.runId; runDirectory = [string]$runValue.runDirectory }) -MenuInvoker $menuInvoker 6>$null
+    } $fixture.run $workMenu
+    Assert-Equal @($workCapture.items | Where-Object { $_.value -eq 'retry-failed' -and [bool]$_.enabled }).Count 1
+    Assert-Equal @($workCapture.items | Where-Object value -eq 'R').Count 0
+    Assert-Equal @($workCapture.items | Where-Object value -eq 'abandon').Count 1
+
+    $before = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
+    $cancelCalls = [ordered]@{ count = 0 }
+    $cancelReader = (New-DuoForgeInteractionTestLineReader -Values @('B')).reader
+    $cancelResult = & $module {
+        param($runId, $root, $reader, $control)
+        $run = Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $root
+        $invoker = { param($id, $resultsRoot) $control.count++; throw '취소 경로에서 다시 시도를 준비하면 안 됩니다.' }.GetNewClosure()
+        Invoke-DuoForgeInteractiveFailedRetryInternal -Run $run -InputReader $reader -RetryInvoker $invoker 6>$null
+    } ([string]$fixture.run.state.runId) $fixture.workspace $cancelReader $cancelCalls
+    Assert-Equal $cancelResult.interaction.action 'back'
+    Assert-Equal $cancelResult.interaction.returnTarget 'work-menu'
+    Assert-Equal $cancelCalls.count 0
+    Assert-Equal (Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot) $before
+
+    $retryCalls = [ordered]@{ count = 0 }
+    $retryReader = (New-DuoForgeInteractionTestLineReader -Values @('RETRY')).reader
+    $retryResult = & $module {
+        param($runId, $root, $reader, $control)
+        $run = Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $root
+        $invoker = { param($id, $resultsRoot) $control.count++; return [ordered]@{ runId = $id; status = 'RESUMABLE_ERROR'; providerCalls = 0 } }.GetNewClosure()
+        Invoke-DuoForgeInteractiveFailedRetryInternal -Run $run -InputReader $reader -RetryInvoker $invoker 6>$null
+    } ([string]$fixture.run.state.runId) $fixture.workspace $retryReader $retryCalls
+    Assert-Equal $retryCalls.count 1
+    Assert-Equal $retryResult.result.status 'RESUMABLE_ERROR'
+    Assert-Equal $retryResult.result.providerCalls 0
+
+    $cliBefore = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
+    $cliCalls = [ordered]@{ count = 0 }
+    $cliCancelReader = (New-DuoForgeInteractionTestLineReader -Values @('Q')).reader
+    $null = & $module {
+        param($runId, $root, $reader, $control)
+        $invoker = { param($id, $resultsRoot) $control.count++; throw '취소 경로에서 CLI가 다시 시도를 준비하면 안 됩니다.' }.GetNewClosure()
+        Invoke-DuoForgeCliCoreInternal -Arguments @('retry-failed', '--run', $runId, '--workspace', $root) -InputReader $reader -RetryInvoker $invoker -InteractiveHostProbe { $true } 6>$null
+    } ([string]$fixture.run.state.runId) $fixture.workspace $cliCancelReader $cliCalls
+    Assert-Equal $cliCalls.count 0
+    Assert-Equal (Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot) $cliBefore
+
+    $cliRetryReader = (New-DuoForgeInteractionTestLineReader -Values @('RETRY')).reader
+    $cliResult = & $module {
+        param($runId, $root, $reader, $control)
+        $invoker = { param($id, $resultsRoot) $control.count++; return [ordered]@{ runId = $id; status = 'RESUMABLE_ERROR'; providerCalls = 0 } }.GetNewClosure()
+        Invoke-DuoForgeCliCoreInternal -Arguments @('retry-failed', '--run', $runId, '--workspace', $root) -InputReader $reader -RetryInvoker $invoker -InteractiveHostProbe { $true } 6>$null
+    } ([string]$fixture.run.state.runId) $fixture.workspace $cliRetryReader $cliCalls
+    Assert-Equal $cliCalls.count 1
+    Assert-Equal $cliResult.status 'RESUMABLE_ERROR'
+    Assert-Equal $cliResult.providerCalls 0
+
+    Assert-ThrowsCode {
+        & $module {
+            param($runId, $root, $control)
+            $invoker = { param($id, $resultsRoot) $control.count++; throw '무확인 CLI에서 다시 시도를 준비하면 안 됩니다.' }.GetNewClosure()
+            Invoke-DuoForgeCliCoreInternal -Arguments @('retry-failed', '--run', $runId, '--workspace', $root) -RetryInvoker $invoker -InteractiveHostProbe { $false } 6>$null
+        } ([string]$fixture.run.state.runId) $fixture.workspace $cliCalls
+    } 'DF-RUN-RETRY-CONFIRM'
+    Assert-Equal $cliCalls.count 1
+
+    $cliFlagResult = & $module {
+        param($runId, $root, $control)
+        $invoker = { param($id, $resultsRoot) $control.count++; return [ordered]@{ runId = $id; status = 'RESUMABLE_ERROR'; providerCalls = 0 } }.GetNewClosure()
+        Invoke-DuoForgeCliCoreInternal -Arguments @('retry-failed', '--run', $runId, '--workspace', $root, '--confirm-retry') -RetryInvoker $invoker -InteractiveHostProbe { $false } 6>$null
+    } ([string]$fixture.run.state.runId) $fixture.workspace $cliCalls
+    Assert-Equal $cliCalls.count 2
+    Assert-Equal $cliFlagResult.providerCalls 0
+}
+
+Test-Case '홈의 빈 진행/완료/실패/포기 분류를 실제 선택해도 안내 뒤 홈에 남고 파일을 변경하지 않는다' {
     $fixture = New-DuoForgeInteractionTestRun -Name 'empty-home-categories'
     $cases = @(
         [ordered]@{ choice = '2'; status = 'COMPLETED'; message = '진행 중인 작업이 없습니다.' }
         [ordered]@{ choice = '3'; status = 'PAUSED_USER'; message = '완료된 결과가 없습니다.' }
-        [ordered]@{ choice = '4'; status = 'PAUSED_USER'; message = '포기한 작업이 없습니다.' }
+        [ordered]@{ choice = '4'; status = 'PAUSED_USER'; message = '실패한 작업이 없습니다.' }
+        [ordered]@{ choice = '5'; status = 'PAUSED_USER'; message = '포기한 작업이 없습니다.' }
     )
     foreach ($case in $cases) {
         $before = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot

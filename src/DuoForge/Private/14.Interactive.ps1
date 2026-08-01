@@ -1724,7 +1724,9 @@ function Invoke-DuoForgeInteractiveRestoreInternal {
     }
     $layout = Get-DuoForgeDisplayLayoutInternal
     $rows = [System.Collections.Generic.List[object]]::new()
-    foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '이 작업을 복원하려고 합니다.' -Message '작업은 사용자 요청으로 멈춘 상태로 돌아가며 AI 작업은 시작되지 않습니다.' -NextAction '계속하려면 확인어 RESTORE를 입력해 주세요.' -Layout $layout)) { $rows.Add($row) }
+    $abandonedFromStatus = [string](Get-DuoForgeObjectValue -Object $Run.state -Name 'abandonedFromStatus' -Default '')
+    $restoreMessage = if ($abandonedFromStatus -in @('FAILED_STAGE', 'SOURCE_DRIFT')) { '작업은 원래 실패 상태로 돌아가며 AI 작업은 시작되지 않습니다.' } else { '작업은 사용자 요청으로 멈춘 상태로 돌아가며 AI 작업은 시작되지 않습니다.' }
+    foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '이 작업을 복원하려고 합니다.' -Message $restoreMessage -NextAction '계속하려면 확인어 RESTORE를 입력해 주세요.' -Layout $layout)) { $rows.Add($row) }
     foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '작업 이름' -Value ([string]$Run.manifest.name) -Layout $layout -KeyWidth 12)) { $rows.Add($row) }
     foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '작업 ID' -Value ([string]$Run.state.runId) -Layout $layout -KeyWidth 12 -Role 'meta')) { $rows.Add($row) }
     Write-DuoForgeDisplayRowsInternal -Rows @($rows) -Layout $layout
@@ -1735,7 +1737,11 @@ function Invoke-DuoForgeInteractiveRestoreInternal {
     }
     $resultsRoot = [System.IO.Path]::GetDirectoryName([string]$Run.runDirectory)
     $result = if ($null -ne $RestoreInvoker) { & $RestoreInvoker ([string]$Run.state.runId) $resultsRoot } else { Restore-DuoForgeRunInternal -RunId ([string]$Run.state.runId) -ResultsRoot $resultsRoot }
-    Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '작업을 복원했습니다.' -Message '사용자 요청으로 멈춘 상태로 돌아갔습니다. AI 작업은 시작하지 않았습니다.' -NextAction '홈의 진행 중인 작업에서 내용을 확인한 뒤 직접 이어가 주세요.' -Layout $layout) -Layout $layout
+    $restoredStatus = [string](Get-DuoForgeObjectValue -Object $result -Name 'status' -Default '')
+    $restoredFailure = $restoredStatus -in @('FAILED_STAGE', 'SOURCE_DRIFT')
+    $successMessage = if ($restoredFailure) { '원래 실패 상태로 돌아갔습니다. AI 작업은 시작하지 않았습니다.' } else { '사용자 요청으로 멈춘 상태로 돌아갔습니다. AI 작업은 시작하지 않았습니다.' }
+    $nextAction = if ($restoredFailure) { '홈의 실패한 작업에서 기록을 확인하고, 가능한 경우 추가 시도를 준비해 주세요.' } else { '홈의 진행 중인 작업에서 내용을 확인한 뒤 직접 이어가 주세요.' }
+    Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '작업을 복원했습니다.' -Message $successMessage -NextAction $nextAction -Layout $layout) -Layout $layout
     return [ordered]@{ interaction = $confirmation; result = $result }
 }
 
@@ -1770,6 +1776,39 @@ function Invoke-DuoForgeInteractiveDeleteInternal {
     return [ordered]@{ interaction = $confirmation; result = $result }
 }
 
+function Invoke-DuoForgeInteractiveFailedRetryInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Run,
+        [scriptblock]$InputReader,
+        [scriptblock]$RetryInvoker,
+        [scriptblock]$ConfirmationKeyReader,
+        [scriptblock]$ConfirmationFrameWriter,
+        [scriptblock]$ConfirmationCapabilityProbe
+    )
+
+    $eligibility = Get-DuoForgeFailedStageRetryEligibilityInternal -RunDirectory ([string]$Run.runDirectory)
+    if (-not [bool]$eligibility.eligible) {
+        throw (New-DuoForgeException -Code 'DF-RUN-RETRY-UNAVAILABLE' -Message ([string]$eligibility.reason))
+    }
+    $step = $eligibility.step
+    $layout = Get-DuoForgeDisplayLayoutInternal
+    $rows = [System.Collections.Generic.List[object]]::new()
+    foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '실패한 AI 작업을 한 번 더 시도할 수 있게 준비합니다.' -Message '이 확인만으로 AI를 호출하지 않습니다. 준비 뒤 작업 계속하기에서 확인어 LIVE를 별도로 입력해야 하며 추가 시도는 1회뿐입니다.' -NextAction '계속하려면 확인어 RETRY를 입력해 주세요.' -Layout $layout)) { $rows.Add($row) }
+    foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '실패한 작업' -Value (Get-DuoForgeDisplayCheckpointLabelInternal -StepKey ([string]$step.stepKey) -RunDirectory ([string]$Run.runDirectory)) -Layout $layout -KeyWidth 14)) { $rows.Add($row) }
+    foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '오류 코드' -Value ([string](Get-DuoForgeObjectValue -Object (Get-DuoForgeObjectValue -Object $step -Name 'lastError') -Name 'code' -Default '')) -Layout $layout -KeyWidth 14 -Role 'error')) { $rows.Add($row) }
+    Write-DuoForgeDisplayRowsInternal -Rows @($rows) -Layout $layout
+    $confirmation = Read-DuoForgeExactConfirmationInternal -Token 'RETRY' -Prompt '추가 시도 1회를 준비하려면 RETRY를 입력하세요' -ReturnTarget work-menu -CancelReturnTarget work-menu -InterruptReturnTarget work-menu -InputReader $InputReader -KeyReader $ConfirmationKeyReader -FrameWriter $ConfirmationFrameWriter -CapabilityProbe $ConfirmationCapabilityProbe
+    if ([string]$confirmation.action -ne 'submit') {
+        Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '다시 시도를 준비하지 않았습니다.' -Message '작업 상태와 저장 파일을 변경하지 않았고 AI도 호출하지 않았습니다.' -Layout $layout) -Layout $layout
+        return [ordered]@{ interaction = $confirmation; result = $null }
+    }
+    $resultsRoot = [System.IO.Path]::GetDirectoryName([string]$Run.runDirectory)
+    $result = if ($null -ne $RetryInvoker) { & $RetryInvoker ([string]$Run.state.runId) $resultsRoot } else { Enable-DuoForgeFailedStageRetryInternal -RunId ([string]$Run.state.runId) -ResultsRoot $resultsRoot }
+    Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '추가 시도 1회를 준비했습니다.' -Message '아직 AI를 호출하지 않았습니다.' -NextAction '홈의 진행 중인 작업에서 이 작업을 열고, 계속하려면 별도의 LIVE 확인을 진행해 주세요.' -Layout $layout) -Layout $layout
+    return [ordered]@{ interaction = $confirmation; result = $result }
+}
+
 function Invoke-DuoForgeInteractiveRun {
     [CmdletBinding()]
     param(
@@ -1778,7 +1817,8 @@ function Invoke-DuoForgeInteractiveRun {
         [scriptblock]$MenuInvoker,
         [scriptblock]$AbandonInvoker,
         [scriptblock]$RestoreInvoker,
-        [scriptblock]$DeleteInvoker
+        [scriptblock]$DeleteInvoker,
+        [scriptblock]$RetryInvoker
     )
 
     $resultsRoot = [System.IO.Path]::GetDirectoryName([string]$RunRecord.runDirectory)
@@ -1822,11 +1862,24 @@ function Invoke-DuoForgeInteractiveRun {
         if ([string]$run.state.status -notin @('PAUSED_USER') -and [string]$run.state.status -notin $terminalStates) { $menuItems.Add([ordered]@{ value = 'P'; label = '현재 AI 작업이 끝난 뒤 멈추기'; shortcuts = @('P'); enabled = $true }) }
         $menuItems.Add([ordered]@{ value = 'I'; label = '확인할 내용 보기'; shortcuts = @('I'); enabled = $true })
         if (Test-Path -LiteralPath (Join-Path ([string]$run.runDirectory) 'final') -PathType Container) { $menuItems.Add([ordered]@{ value = 'O'; label = '결과 폴더 열기'; shortcuts = @('O'); enabled = $true }) }
+        if ([string]$run.state.status -eq 'FAILED_STAGE') {
+            $retryEligibility = Get-DuoForgeFailedStageRetryEligibilityInternal -RunDirectory ([string]$run.runDirectory)
+            $menuItems.Add([ordered]@{
+                value = 'retry-failed'
+                label = '실패 단계 한 번 더 시도 준비'
+                detail = '이 동작은 AI를 호출하지 않으며, 실제 시도에는 별도의 LIVE 확인이 필요합니다.'
+                shortcuts = @('T')
+                enabled = [bool]$retryEligibility.eligible
+                disabledReason = if ([bool]$retryEligibility.eligible) { '' } else { [string]$retryEligibility.reason }
+            })
+        }
         if ([string]$run.state.status -eq 'CANCELLED') {
-            $menuItems.Add([ordered]@{ value = 'restore'; label = '이 작업 복원'; detail = '사용자 요청으로 멈춘 상태로 되돌리며 AI 작업은 시작하지 않습니다.'; shortcuts = @('R'); enabled = $true })
+            $abandonedFromStatus = [string](Get-DuoForgeObjectValue -Object $run.state -Name 'abandonedFromStatus' -Default '')
+            $restoreDetail = if ($abandonedFromStatus -in @('FAILED_STAGE', 'SOURCE_DRIFT')) { '원래 실패 상태로 되돌리며 AI 작업은 시작하지 않습니다.' } else { '사용자 요청으로 멈춘 상태로 되돌리며 AI 작업은 시작하지 않습니다.' }
+            $menuItems.Add([ordered]@{ value = 'restore'; label = '이 작업 복원'; detail = $restoreDetail; shortcuts = @('R'); enabled = $true })
             $menuItems.Add([ordered]@{ value = 'delete'; label = '이 작업 영구 삭제'; detail = '문서 사본과 모든 작업 기록을 복구할 수 없게 삭제합니다.'; shortcuts = @('X'); enabled = $true })
         }
-        elseif ([string]$run.state.status -notin $terminalStates) {
+        elseif ([string]$run.state.status -notin $terminalStates -or [string]$run.state.status -in @('FAILED_STAGE', 'SOURCE_DRIFT')) {
             $menuItems.Add([ordered]@{ value = 'abandon'; label = '이 작업 포기'; detail = '다시 이어갈 수 없게 종료하지만 저장된 기록은 남깁니다.'; shortcuts = @('X'); enabled = $true })
         }
         $menuItems.Add([ordered]@{ value = 'back'; label = '이전으로'; shortcuts = @('B'); enabled = $true })
@@ -1851,6 +1904,11 @@ function Invoke-DuoForgeInteractiveRun {
         if ($choice -ieq 'O') {
             $finalDirectory = Join-Path ([string]$run.runDirectory) 'final'
             if (Test-Path -LiteralPath $finalDirectory -PathType Container) { Start-Process -FilePath 'explorer.exe' -ArgumentList @($finalDirectory); continue }
+        }
+        if ($choice -ieq 'retry-failed' -and [string]$run.state.status -eq 'FAILED_STAGE') {
+            $outcome = Invoke-DuoForgeInteractiveFailedRetryInternal -Run $run -InputReader $InputReader -RetryInvoker $RetryInvoker
+            if ($null -ne $outcome.result) { return [ordered]@{ action = 'submit'; value = 'retry-failed'; source = 'menu'; returnTarget = 'home' } }
+            continue
         }
         if ($choice -ieq 'abandon') {
             $outcome = Invoke-DuoForgeInteractiveAbandonInternal -Run $run -InputReader $InputReader -AbandonInvoker $AbandonInvoker
@@ -1889,15 +1947,18 @@ function Invoke-DuoForgeInteractiveHome {
     $setupReport = & $invokeSetup $false
     while ($true) {
         $runs = @(if ($null -ne $RunsInvoker) { & $RunsInvoker } else { Get-DuoForgeRunsInternal })
+        $failedStates = @('FAILED_STAGE', 'SOURCE_DRIFT')
         $activeCount = @($runs | Where-Object { $_.status -notin @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED') }).Count
+        $failedCount = @($runs | Where-Object { $_.status -in $failedStates }).Count
         $abandonedCount = @($runs | Where-Object { $_.status -eq 'CANCELLED' }).Count
         Write-DuoForgeDisplaySpacerInternal
         $choiceInteraction = Invoke-DuoForgeMenuInteractionInternal -Title 'DuoForge' -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -Footer '↑/↓ 이동 · Home/End · Enter 선택 · Esc/Q 종료' -InputReader $InputReader -MenuInvoker $MenuInvoker -Items @(
             [ordered]@{ value = '1'; label = '새 작업 시작'; shortcuts = @('1'); enabled = $true }
             [ordered]@{ value = '2'; label = "진행 중인 작업 보기 ($activeCount)"; shortcuts = @('2'); enabled = $true }
             [ordered]@{ value = '3'; label = '완료된 결과 보기'; shortcuts = @('3'); enabled = $true }
-            [ordered]@{ value = '4'; label = "포기한 작업 관리 ($abandonedCount)"; shortcuts = @('4'); enabled = $true }
-            [ordered]@{ value = '5'; label = '실행 환경 확인, 로그인 및 설정'; shortcuts = @('5'); enabled = $true }
+            [ordered]@{ value = '4'; label = "실패한 작업 확인 ($failedCount)"; shortcuts = @('4'); enabled = $true }
+            [ordered]@{ value = '5'; label = "포기한 작업 관리 ($abandonedCount)"; shortcuts = @('5'); enabled = $true }
+            [ordered]@{ value = '6'; label = '실행 환경 확인, 로그인 및 설정'; shortcuts = @('6'); enabled = $true }
             [ordered]@{ value = 'exit'; label = '종료'; shortcuts = @('Q'); enabled = $true }
         )
         if ([string]$choiceInteraction.action -ne 'submit') { return }
@@ -1910,7 +1971,7 @@ function Invoke-DuoForgeInteractiveHome {
                 }
                 $null = Invoke-DuoForgeInteractiveNew -InputReader $InputReader -MenuInvoker $MenuInvoker
             }
-            '^(2|3|4)$' {
+            '^(2|3|4|5)$' {
                 if ($runs.Count -eq 0) { Write-DuoForgeTextInternal '저장된 실행이 없습니다.'; continue }
                 $candidates = @(if ($choice -eq '2') {
                     $runs | Where-Object { $_.status -notin @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED') }
@@ -1918,16 +1979,17 @@ function Invoke-DuoForgeInteractiveHome {
                 elseif ($choice -eq '3') {
                     $runs | Where-Object { $_.status -in @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED') }
                 }
+                elseif ($choice -eq '4') { $runs | Where-Object { $_.status -in $failedStates } }
                 else { $runs | Where-Object { $_.status -eq 'CANCELLED' } })
                 if ($candidates.Count -eq 0) {
-                    $emptyMessage = if ($choice -eq '2') { '진행 중인 작업이 없습니다.' } elseif ($choice -eq '3') { '완료된 결과가 없습니다.' } else { '포기한 작업이 없습니다.' }
+                    $emptyMessage = if ($choice -eq '2') { '진행 중인 작업이 없습니다.' } elseif ($choice -eq '3') { '완료된 결과가 없습니다.' } elseif ($choice -eq '4') { '실패한 작업이 없습니다.' } else { '포기한 작업이 없습니다.' }
                     Write-DuoForgeTextInternal $emptyMessage
                     continue
                 }
                 $selected = Select-DuoForgeInteractiveRun -Runs $candidates -Prompt '작업을 선택해 주세요.' -InputReader $InputReader -MenuInvoker $MenuInvoker
                 if ($null -ne $selected) { $null = Invoke-DuoForgeInteractiveRun -RunRecord $selected -InputReader $InputReader -MenuInvoker $MenuInvoker }
             }
-            '^(5)$' {
+            '^(6)$' {
                 $setupReport = & $invokeSetup $true
             }
             '^(exit)$' { return }

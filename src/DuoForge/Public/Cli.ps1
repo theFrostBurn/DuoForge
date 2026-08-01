@@ -11,6 +11,7 @@ function Invoke-DuoForgeCliCoreInternal {
         [scriptblock]$AbandonInvoker,
         [scriptblock]$RestoreInvoker,
         [scriptblock]$DeleteInvoker,
+        [scriptblock]$RetryInvoker,
         [scriptblock]$InteractiveHostProbe,
         [scriptblock]$InteractiveHomeInvoker,
         [scriptblock]$ConfirmationKeyReader,
@@ -265,7 +266,9 @@ function Invoke-DuoForgeCliCoreInternal {
                 if (-not (& $isInteractive)) { throw (New-DuoForgeException -Code 'DF-RUN-RESTORE-CONFIRM' -Message '비대화형 작업 복원에는 --confirm-restore가 필요합니다.') }
                 $layout = Get-DuoForgeDisplayLayoutInternal
                 $rows = [System.Collections.Generic.List[object]]::new()
-                foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '이 작업을 복원하려고 합니다.' -Message '작업은 사용자 요청으로 멈춘 상태로 돌아가며 AI 작업은 시작되지 않습니다.' -NextAction '계속하려면 확인어 RESTORE를 입력해 주세요.' -Layout $layout)) { $rows.Add($row) }
+                $abandonedFromStatus = [string](Get-DuoForgeObjectValue -Object $run.state -Name 'abandonedFromStatus' -Default '')
+                $restoreMessage = if ($abandonedFromStatus -in @('FAILED_STAGE', 'SOURCE_DRIFT')) { '작업은 원래 실패 상태로 돌아가며 AI 작업은 시작되지 않습니다.' } else { '작업은 사용자 요청으로 멈춘 상태로 돌아가며 AI 작업은 시작되지 않습니다.' }
+                foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '이 작업을 복원하려고 합니다.' -Message $restoreMessage -NextAction '계속하려면 확인어 RESTORE를 입력해 주세요.' -Layout $layout)) { $rows.Add($row) }
                 foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '작업 이름' -Value ([string]$run.manifest.name) -Layout $layout -KeyWidth 12)) { $rows.Add($row) }
                 foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '작업 ID' -Value $runId -Layout $layout -KeyWidth 12 -Role 'meta')) { $rows.Add($row) }
                 Write-DuoForgeDisplayRowsInternal -Rows @($rows) -Layout $layout
@@ -275,7 +278,41 @@ function Invoke-DuoForgeCliCoreInternal {
             if (-not $confirmed) { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '작업을 복원하지 않았습니다.' -Message '작업 상태와 저장 파일을 변경하지 않았습니다.' -Layout $layout) -Layout $layout; return }
             $result = if ($null -ne $RestoreInvoker) { & $RestoreInvoker $runId $workspace } else { Restore-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace }
             $layout = Get-DuoForgeDisplayLayoutInternal
-            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '작업을 복원했습니다.' -Message '사용자 요청으로 멈춘 상태로 돌아갔습니다. AI 작업은 시작하지 않았습니다.' -NextAction '내용을 확인한 뒤 resume 명령으로 직접 이어가 주세요.' -Layout $layout) -Layout $layout
+            $restoredStatus = [string](Get-DuoForgeObjectValue -Object $result -Name 'status' -Default '')
+            $restoredFailure = $restoredStatus -in @('FAILED_STAGE', 'SOURCE_DRIFT')
+            $successMessage = if ($restoredFailure) { '원래 실패 상태로 돌아갔습니다. AI 작업은 시작하지 않았습니다.' } else { '사용자 요청으로 멈춘 상태로 돌아갔습니다. AI 작업은 시작하지 않았습니다.' }
+            $nextAction = if ($restoredFailure) { '실패한 작업 기록을 확인하고, 가능한 경우 retry-failed 명령으로 추가 시도를 준비해 주세요.' } else { '내용을 확인한 뒤 resume 명령으로 직접 이어가 주세요.' }
+            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '작업을 복원했습니다.' -Message $successMessage -NextAction $nextAction -Layout $layout) -Layout $layout
+            return $result
+        }
+        'retry-failed' {
+            $null = Assert-DuoForgeCliOptionsInternal -Parsed $parsed -AllowedNames @('run', 'workspace', 'confirm-retry')
+            $runId = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'run' -Default '')
+            if ([string]::IsNullOrWhiteSpace($runId)) { throw (New-DuoForgeException -Code 'DF-CLI-RUN' -Message 'retry-failed에는 --run <실행 ID>가 필요합니다.') }
+            $workspace = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')
+            $run = Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace
+            $eligibility = Get-DuoForgeFailedStageRetryEligibilityInternal -RunDirectory ([string]$run.runDirectory)
+            if (-not [bool]$eligibility.eligible) { throw (New-DuoForgeException -Code 'DF-RUN-RETRY-UNAVAILABLE' -Message ([string]$eligibility.reason)) }
+            $confirmRetry = Get-DuoForgeCliOption -Parsed $parsed -Name 'confirm-retry' -Default $false
+            if ($parsed.options.Contains('confirm-retry') -and $confirmRetry -isnot [bool]) {
+                throw (New-DuoForgeException -Code 'DF-CLI-OPTION' -Message '--confirm-retry는 값을 붙이지 않은 확인 플래그로만 사용할 수 있습니다.')
+            }
+            $confirmed = [bool]$confirmRetry
+            if (-not $confirmed) {
+                if (-not (& $isInteractive)) { throw (New-DuoForgeException -Code 'DF-RUN-RETRY-CONFIRM' -Message '비대화형 추가 시도 준비에는 --confirm-retry가 필요합니다.') }
+                $layout = Get-DuoForgeDisplayLayoutInternal
+                $rows = [System.Collections.Generic.List[object]]::new()
+                foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '실패한 AI 작업을 한 번 더 시도할 수 있게 준비합니다.' -Message '이 확인만으로 AI를 호출하지 않습니다. 준비 뒤 실제 시도에는 별도의 LIVE 확인이 필요합니다.' -NextAction '계속하려면 확인어 RETRY를 입력해 주세요.' -Layout $layout)) { $rows.Add($row) }
+                foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '실패한 작업' -Value (Get-DuoForgeDisplayCheckpointLabelInternal -StepKey ([string]$eligibility.step.stepKey) -RunDirectory ([string]$run.runDirectory)) -Layout $layout -KeyWidth 14)) { $rows.Add($row) }
+                foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '오류 코드' -Value ([string](Get-DuoForgeObjectValue -Object (Get-DuoForgeObjectValue -Object $eligibility.step -Name 'lastError') -Name 'code' -Default '')) -Layout $layout -KeyWidth 14 -Role 'error')) { $rows.Add($row) }
+                Write-DuoForgeDisplayRowsInternal -Rows @($rows) -Layout $layout
+                $confirmation = Read-DuoForgeExactConfirmationInternal -Token 'RETRY' -Prompt '추가 시도 1회를 준비하려면 RETRY를 입력하세요' -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -InputReader $InputReader -KeyReader $ConfirmationKeyReader -FrameWriter $ConfirmationFrameWriter -CapabilityProbe $ConfirmationCapabilityProbe
+                $confirmed = [string]$confirmation.action -eq 'submit'
+            }
+            if (-not $confirmed) { $layout = Get-DuoForgeDisplayLayoutInternal; Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '다시 시도를 준비하지 않았습니다.' -Message '작업 상태와 저장 파일을 변경하지 않았고 AI도 호출하지 않았습니다.' -Layout $layout) -Layout $layout; return }
+            $result = if ($null -ne $RetryInvoker) { & $RetryInvoker $runId $workspace } else { Enable-DuoForgeFailedStageRetryInternal -RunId $runId -ResultsRoot $workspace }
+            $layout = Get-DuoForgeDisplayLayoutInternal
+            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '추가 시도 1회를 준비했습니다.' -Message '아직 AI를 호출하지 않았습니다.' -NextAction '내용을 확인한 뒤 resume --live에서 별도의 LIVE 확인을 진행해 주세요.' -Layout $layout) -Layout $layout
             return $result
         }
         'delete' {

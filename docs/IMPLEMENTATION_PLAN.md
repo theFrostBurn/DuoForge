@@ -388,7 +388,7 @@ source: key | line | dialog
 
 1. 진행 중인 작업의 `이 작업 포기`는 정확한 `ABANDON` 확인 뒤 상태를 terminal `CANCELLED`로 전이한다. 문서 사본, 단계, 답변, 이벤트와 진단은 그대로 보존하고 `RUN_ABANDONED` 이벤트에 이전 상태만 기록한다.
 2. 홈은 진행 중, 완료, 포기한 작업을 별도 목록으로 구분한다. `CANCELLED` 작업은 일반 재개를 숨기고 `[R] 이 작업 복원`과 `[X] 이 작업 영구 삭제`를 분리해 제공한다.
-3. 복원은 정확한 `RESTORE` 확인과 `CANCELLED` 상태를 요구한다. 실행 잠금 안에서 상태를 다시 확인하고 `state.json`과 `events.jsonl`을 원자적으로 변경해 항상 `PAUSED_USER`, `restoredAt`, `RUN_RESTORED`를 남긴다. `abandonedFromStatus`는 감사 정보로 보존하고 복원만으로 AI 작업이나 재개를 시작하지 않는다.
+3. 복원은 정확한 `RESTORE` 확인과 `CANCELLED` 상태를 요구한다. 실행 잠금 안에서 상태를 다시 확인하고 `state.json`과 `events.jsonl`을 원자적으로 변경해 일반 실행은 `PAUSED_USER`, 실패 상태에서 포기한 실행은 원래 `FAILED_STAGE` 또는 `SOURCE_DRIFT`와 `restoredAt`, `RUN_RESTORED`를 남긴다. `abandonedFromStatus`는 감사 정보로 보존하고 복원만으로 AI 작업이나 재개를 시작하지 않는다.
 4. 영구 삭제는 정확한 `DELETE` 확인과 `CANCELLED` 상태를 모두 요구한다. 결과 루트의 직계 `run-*` 폴더인지, 폴더명과 저장 `runId`가 같은지, 실행 잠금을 얻었는지, 폴더와 하위 항목에 연결 지점이 없는지를 확인한다.
 5. 검증을 통과한 폴더는 같은 결과 루트의 임시 삭제 격리 폴더로 원자적으로 옮긴 뒤 재귀 삭제한다. 원본 입력 문서와 다른 실행은 대상에 포함하지 않는다.
 6. 고급 CLI는 `abandon`, `restore`, `delete`를 제공하며 대화형 확인을 기본으로 한다. 무인 자동화는 각각 `--confirm-abandon`, `--confirm-restore`, `--confirm-delete`를 명시해야 한다.
@@ -425,6 +425,49 @@ source: key | line | dialog
 - PowerShell 파서 55개 파일 오류 0건, 전체 오프라인 회귀 `176개 통과, 0개 실패`, `git diff --check` 통과.
 - Unicode·ASCII 네 pulse 프레임의 5셀 고정 폭, 활성 행의 굵은 밝은 노란색, 기존 단계 장벽 색상 유지와 process → writer 연결을 합성 검증했다.
 - 실제 공급자 호출과 `resume --live`는 수행하지 않았고 기존 사용자 실행은 `PAUSED_USER`를 유지했다.
+
+## 슬라이스 19: 실패 작업 조회와 제한된 수동 재시도
+
+1. 홈은 `FAILED_STAGE`와 `SOURCE_DRIFT`를 진행·완료·포기 목록에서
+   누락하지 않고 `실패한 작업 확인` 전용 목록으로 분리한다.
+2. `FAILED_STAGE` 상세 화면은 일반 재개를 계속 숨기고, 실패 단계가
+   정확히 하나이며 `RETRY_EXHAUSTED`·`retryable=true`인 경우에만
+   `실패 단계 한 번 더 시도 준비`를 제공한다.
+3. 정확한 `RETRY` 확인은 실행 잠금과 원자 트랜잭션 안에서 실패 단계만
+   `PENDING`, 실행을 `RESUMABLE_ERROR`로 바꾼다. 기존 `attemptCount`,
+   `totalAttemptCount`, 마지막 진단과 완료 산출물은 보존한다.
+4. 수동 추가 시도는 현재 입력 세대에서 단계당 한 번만 허용한다. 준비 자체의
+   공급자 호출은 0건이고 실제 호출은 기존의 별도 `LIVE` 확인을 다시
+   통과해야 하며 실패 단계의 수동 추가 호출은 1회다. 후속 정상 단계는
+   기존 실행 계획과 LIVE 미리보기의 호출 수를 따른다.
+5. 실패 실행도 정확한 `ABANDON`으로 포기·삭제 동선에 넣을 수 있다.
+   이 실행을 복원하면 원래 실패 상태로 돌아가며 `PAUSED_USER`를 통한
+   재시도 제한 우회를 허용하지 않는다.
+6. 메뉴와 고급 CLI `retry-failed`는 같은 준비 함수를 호출한다. CLI의
+   비대화형 확인은 `--confirm-retry`를 명시해야 한다.
+7. 취소·이전·오타·리디렉션과 재시도 불가능한 실패는 상태·단계·이벤트,
+   공급자 호출을 만들지 않는다.
+
+완료 기준:
+
+- 혼합 실행에서 진행·완료·실패·포기 카운트와 후보가 각각 정확하다.
+- 합성 `FAILED_STAGE`에서 정확한 `RETRY`만 추가 1회를 준비하고
+  `PROVIDER_CALL_STARTED`는 증가하지 않는다.
+- 준비된 추가 시도의 호출 예산은 1회이며 두 번째 준비는 차단된다.
+- 실패 실행의 포기·복원 뒤 원래 실패 상태와 기록이 보존된다.
+- PowerShell 파서, 전체 오프라인 회귀와 `git diff --check`를 통과한다.
+
+검증 결과:
+
+- PowerShell 파서 58개 파일 오류 0건, 전체 오프라인 회귀
+  `180개 통과, 0개 실패`, `git diff --check` 통과.
+- 홈의 실패 목록, 메뉴·CLI의 `RETRY` 확인/취소 경계,
+  시도 기록·진단·완료 산출물 보존, 이중 준비 차단,
+  실패 포기·복원의 원상태 복귀와 공급자 0-call을 합성 실행으로
+  확인했다.
+- 실제 공급자 호출과 `resume --live`는 수행하지 않았다. 사용자 실행
+  `run-20260801-050529-22d6e8`은 `FAILED_STAGE`, 11개 `COMMITTED`,
+  1개 `FAILED`, 2개 `PENDING`을 그대로 유지한다.
 
 ## 모드 4 격리 게이트
 

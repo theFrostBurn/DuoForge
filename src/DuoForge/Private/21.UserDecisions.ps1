@@ -137,6 +137,7 @@ function Reset-DuoForgeDecisionAffectedSteps {
         $step.artifactHash = $null
         $step.lastError = $null
         $step.retryMode = $null
+        if ($step.Contains('manualRetryCount')) { $step.manualRetryCount = 0 }
         $step.lastPromptKind = $null
     }
     Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph
