@@ -995,7 +995,14 @@ function Assert-DuoForgeRunStorageContractInternal {
     }
 
     if ($manifestSchema -ne 4 -or [string](Get-DuoForgeObjectValue -Object $manifest -Name 'storageContractVersion' -Default '') -ne 'duoforge-run-v2') { & $fail '신규 workflow-v2 manifest는 schemaVersion 4와 duoforge-run-v2 계약을 선언해야 합니다.' }
-    if ($stateSchema -ne 2 -or [string](Get-DuoForgeObjectValue -Object $state -Name 'workflowVersion' -Default '') -ne 'workflow-v2' -or [string](Get-DuoForgeObjectValue -Object $state -Name 'promptContractVersion' -Default '') -ne 'duoforge-stage-v3') { & $fail 'state 계약이 workflow-v2/schemaVersion 2/duoforge-stage-v3가 아닙니다.' }
+    $manifestPromptContract = [string](Get-DuoForgeObjectValue -Object $manifest -Name 'promptTemplateVersion' -Default '')
+    $statePromptContract = [string](Get-DuoForgeObjectValue -Object $state -Name 'promptContractVersion' -Default '')
+    if ($stateSchema -ne 2 -or
+        [string](Get-DuoForgeObjectValue -Object $state -Name 'workflowVersion' -Default '') -ne 'workflow-v2' -or
+        $manifestPromptContract -notin @('duoforge-stage-v3', 'duoforge-stage-v4') -or
+        $statePromptContract -cne $manifestPromptContract) {
+        & $fail 'state와 manifest의 workflow-v2 프롬프트 계약 세대가 일치하지 않습니다.'
+    }
     if ($inventorySchema -ne 2 -or [string](Get-DuoForgeObjectValue -Object $inventory -Name 'workflowVersion' -Default '') -ne 'workflow-v2') { & $fail 'inventory 계약이 workflow-v2/schemaVersion 2가 아닙니다.' }
     if ($ledgerSchema -ne 2 -or [string](Get-DuoForgeObjectValue -Object $ledger -Name 'workflowVersion' -Default '') -ne 'workflow-v2' -or [int](Get-DuoForgeObjectValue -Object $ledger -Name 'issueSchemaVersion' -Default 0) -ne 2) { & $fail 'ledger 계약이 workflow-v2/schemaVersion 2/issueSchemaVersion 2가 아닙니다.' }
     try { $null = Assert-DuoForgeIssueLedgerV2Internal -Issues @($ledger.issues) }
@@ -1097,7 +1104,7 @@ function New-DuoForgeRunInternal {
         $state = [ordered]@{
             schemaVersion = 2
             workflowVersion = 'workflow-v2'
-            promptContractVersion = 'duoforge-stage-v3'
+            promptContractVersion = 'duoforge-stage-v4'
             runId = $runId
             mode = $request.mode
             documentType = $request.documentType
@@ -1113,6 +1120,10 @@ function New-DuoForgeRunInternal {
             decisionReviewLimitReached = $false
             coverage = $null
             runtimeSeconds = 0.0
+            runtimeExtensionMinutes = 0
+            runtimeExtensionGrantCount = 0
+            schemaRepairGrantCount = 0
+            schemaRepairPreparedAt = $null
             createdAt = $now
             updatedAt = $now
         }
@@ -1166,7 +1177,7 @@ function New-DuoForgeRunInternal {
             pauseAfterRound = [bool](Get-DuoForgeObjectValue -Object $request -Name 'pauseAfterRound' -Default $false)
             allowPartial = [bool](Get-DuoForgeObjectValue -Object $request -Name 'allowPartial' -Default $false)
             subscriptionOnly = $true
-            promptTemplateVersion = 'duoforge-stage-v3'
+            promptTemplateVersion = 'duoforge-stage-v4'
             artifactVisibilityPolicy = 'transitive-dependencies-v1'
             providers = [ordered]@{
                 codex = [ordered]@{ version = $ValidationResult.doctor.providers.codex.version; authType = $ValidationResult.doctor.providers.codex.authType }

@@ -45,7 +45,7 @@ function Get-DuoForgeRemainingCallBudget {
         foreach ($step in $providerSteps) { $attempted += [int](Get-DuoForgeObjectValue -Object $step -Name 'totalAttemptCount' -Default ([int]$step.attemptCount)) }
         $baseCallsRemaining = @($remainingSteps | Where-Object { [int]$_.attemptCount -eq 0 }).Count
         $retryBudgetRemaining = @($remainingSteps | Where-Object { [int]$_.attemptCount -lt 2 }).Count
-        $blockedSteps = @($remainingSteps | Where-Object { [string]$_.status -eq 'FAILED' -and [string]$_.retryMode -eq 'RETRY_EXHAUSTED' })
+        $blockedSteps = @($remainingSteps | Where-Object { [string]$_.status -eq 'FAILED' -and [string]$_.retryMode -in @('RETRY_EXHAUSTED', 'REFERENCE_REPAIR_REQUIRED') })
         $runnableSteps = @($remainingSteps | Where-Object { $_ -notin $blockedSteps })
         $scheduledCallsRemaining = $runnableSteps.Count
         $failureRetryCallsRemaining = @($runnableSteps | Where-Object { [int]$_.attemptCount -eq 0 }).Count

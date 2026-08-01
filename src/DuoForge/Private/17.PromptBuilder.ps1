@@ -75,8 +75,8 @@ function Assert-DuoForgeStagePromptPolicyInternal {
     $templateVersion = [string](Get-DuoForgeObjectValue -Object $Manifest -Name 'promptTemplateVersion' -Default '')
     $visibilityPolicy = [string](Get-DuoForgeObjectValue -Object $Manifest -Name 'artifactVisibilityPolicy' -Default '')
     $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $Manifest
-    $expectedTemplateVersion = if ($workflowVersion -eq 'workflow-v2') { 'duoforge-stage-v3' } else { 'duoforge-stage-v2' }
-    if ($templateVersion -ne $expectedTemplateVersion -or $visibilityPolicy -ne 'transitive-dependencies-v1') {
+    $supportedTemplateVersions = if ($workflowVersion -eq 'workflow-v2') { @('duoforge-stage-v3', 'duoforge-stage-v4') } else { @('duoforge-stage-v2') }
+    if ($templateVersion -notin $supportedTemplateVersions -or $visibilityPolicy -ne 'transitive-dependencies-v1') {
         throw (New-DuoForgeException -Code 'DF-PROMPT-VISIBILITY-POLICY' -Message '이 실행은 공정한 단계 입력 가시성 정책이 적용되기 전에 생성되었습니다. 입력에서 새 실행을 만들어 주세요.')
     }
     return $true
@@ -181,6 +181,108 @@ function Get-DuoForgeIssueKeyExampleInternal {
     return '{0}-R{1:D2}-{2}-{3}{4}{5}-001' -f $Step.provider.ToUpperInvariant(), [int]$Step.round, $Step.stage.ToUpperInvariant(), $IssueTargetToken.ToUpperInvariant(), $batchToken, $generationToken
 }
 
+function Get-DuoForgeNewIssueKeyPrefixInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Step,
+        [Parameter(Mandatory)][string]$IssueTargetToken
+    )
+
+    $contextBatchId = [string](Get-DuoForgeObjectValue -Object $Step -Name 'contextBatchId' -Default '')
+    $batchToken = if ([string]::IsNullOrWhiteSpace($contextBatchId)) { '' } else { '-' + (($contextBatchId.ToUpperInvariant() -replace '[^A-Z0-9]+', '-').Trim('-')) }
+    $inputGeneration = [Math]::Max(1, [int](Get-DuoForgeObjectValue -Object $Step -Name 'inputGeneration' -Default 1))
+    return '{0}-R{1:D2}-{2}-{3}{4}-G{5:D2}-' -f $Step.provider.ToUpperInvariant(), [int]$Step.round, $Step.stage.ToUpperInvariant(), $IssueTargetToken.ToUpperInvariant(), $batchToken, $inputGeneration
+}
+
+function Get-DuoForgeAdoptableIssueCatalogInternal {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()][object[]]$PriorArtifacts = @(),
+        [AllowEmptyCollection()][object[]]$EvidenceLinkedIssues = @(),
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Step
+    )
+
+    $lineagePolicy = Get-DuoForgeStageLineagePolicyInternal `
+        -Stage ([string]$Step.stage) `
+        -TargetDocumentId (Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId') `
+        -SourceDocumentIds @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @())
+    if (-not [bool]$lineagePolicy.adoptionsAllowed) { return @() }
+    $allowedTargets = @($lineagePolicy.adoptionTargetDocumentIds)
+    $candidates = [System.Collections.Generic.List[object]]::new()
+    foreach ($artifact in @($PriorArtifacts)) {
+        $proposedByProvider = [string](Get-DuoForgeObjectValue -Object $artifact -Name 'provider' -Default '')
+        foreach ($issue in @(Get-DuoForgeObjectValue -Object (Get-DuoForgeObjectValue -Object $artifact -Name 'result') -Name 'issues' -Default @())) {
+            $candidates.Add([ordered]@{
+                issueKey = [string](Get-DuoForgeObjectValue -Object $issue -Name 'issueKey' -Default '')
+                targetDocumentId = [string](Get-DuoForgeObjectValue -Object $issue -Name 'targetDocumentId' -Default '')
+                proposedByProvider = $proposedByProvider
+            })
+        }
+    }
+    foreach ($issue in @($EvidenceLinkedIssues)) { $candidates.Add($issue) }
+
+    $catalog = [System.Collections.Generic.List[object]]::new()
+    $seen = @{}
+    foreach ($candidate in @($candidates)) {
+        $issueKey = [string](Get-DuoForgeObjectValue -Object $candidate -Name 'issueKey' -Default '')
+        $targetDocumentId = [string](Get-DuoForgeObjectValue -Object $candidate -Name 'targetDocumentId' -Default '')
+        $proposedByProvider = [string](Get-DuoForgeObjectValue -Object $candidate -Name 'proposedByProvider' -Default '')
+        if ([string]::IsNullOrWhiteSpace($issueKey) -or $targetDocumentId -notin @('A', 'B', 'merged') -or $proposedByProvider -notin @('codex', 'claude')) { continue }
+        if ($targetDocumentId -notin $allowedTargets) { continue }
+        if ($seen.ContainsKey($issueKey)) {
+            $prior = $seen[$issueKey]
+            if ([string]$prior.targetDocumentId -cne $targetDocumentId -or [string]$prior.proposedByProvider -cne $proposedByProvider) {
+                throw (New-DuoForgeIssueReferenceIntegrityExceptionInternal -FailureCode 'DF-INTEGRITY-CATALOG-CONFLICT' -Path 'issues[].issueKey')
+            }
+            continue
+        }
+        $record = [ordered]@{
+            issueKey = $issueKey
+            targetDocumentId = $targetDocumentId
+            proposedByProvider = $proposedByProvider
+        }
+        $seen[$issueKey] = $record
+        $catalog.Add($record)
+    }
+    return @($catalog | Sort-Object targetDocumentId, proposedByProvider, issueKey)
+}
+
+function Get-DuoForgeEvidenceLinkedIssueCatalogInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RunDirectory,
+        [AllowEmptyCollection()][object[]]$UserEvidence = @()
+    )
+
+    if (@($UserEvidence).Count -eq 0) { return @() }
+    $ledger = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'issues.json'))
+    $ledgerById = @{}
+    foreach ($issue in @(Get-DuoForgeObjectValue -Object $ledger -Name 'issues' -Default @())) {
+        $issueId = [string](Get-DuoForgeObjectValue -Object $issue -Name 'issueId' -Default '')
+        if (-not [string]::IsNullOrWhiteSpace($issueId)) { $ledgerById[$issueId] = $issue }
+    }
+
+    $records = [System.Collections.Generic.List[object]]::new()
+    foreach ($evidence in @($UserEvidence)) {
+        $issueId = [string](Get-DuoForgeObjectValue -Object $evidence -Name 'issueId' -Default '')
+        if ([string]::IsNullOrWhiteSpace($issueId) -or -not $ledgerById.ContainsKey($issueId)) {
+            throw (New-DuoForgeIssueReferenceIntegrityExceptionInternal -FailureCode 'DF-INTEGRITY-EVIDENCE-ISSUE' -Path 'issues[].issueId')
+        }
+        $issue = $ledgerById[$issueId]
+        $targetDocumentId = [string](Get-DuoForgeObjectValue -Object $issue -Name 'targetDocumentId' -Default '')
+        $proposedByProvider = [string](Get-DuoForgeObjectValue -Object $issue -Name 'raisedBy' -Default '')
+        $keys = @($issueId) + @((Get-DuoForgeObjectValue -Object $evidence -Name 'externalKeys' -Default @()) | ForEach-Object { [string]$_ })
+        foreach ($key in @($keys | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Sort-Object -Unique)) {
+            $records.Add([ordered]@{
+                issueKey = [string]$key
+                targetDocumentId = $targetDocumentId
+                proposedByProvider = $proposedByProvider
+            })
+        }
+    }
+    return @($records)
+}
+
 function New-DuoForgeStagePrompt {
     [CmdletBinding()]
     param(
@@ -199,6 +301,7 @@ function New-DuoForgeStagePrompt {
     $userDecisionRecords = @(Read-DuoForgeJsonLines -Path (Join-Path $RunDirectory 'decisions\user-answers.jsonl') -AllowMissing)
     $userDecisions = @(Get-DuoForgeEffectiveUserDecisionsInternal -Records $userDecisionRecords)
     $userEvidence = @(Read-DuoForgeJsonLines -Path (Join-Path $RunDirectory 'decisions\user-evidence.jsonl') -AllowMissing)
+    $priorArtifacts = if ([string]$Step.stage -eq 'context-batch-analysis') { @() } else { @(Get-DuoForgePriorStageArtifacts -RunDirectory $RunDirectory -Graph $Graph -CurrentStep $Step) }
     $payload = [ordered]@{
         contractVersion = [string]$manifest.promptTemplateVersion
         mode = [string]$manifest.mode
@@ -250,7 +353,7 @@ function New-DuoForgeStagePrompt {
                 Get-DuoForgePromptDocuments -RunDirectory $RunDirectory -Inventory $inventory | Where-Object { [string]$_.role -eq 'user-evidence' }
             }
         )
-        priorArtifacts = if ([string]$Step.stage -eq 'context-batch-analysis') { @() } else { @(Get-DuoForgePriorStageArtifacts -RunDirectory $RunDirectory -Graph $Graph -CurrentStep $Step) }
+        priorArtifacts = @($priorArtifacts)
         userDecisions = @($userDecisions | ForEach-Object {
             [ordered]@{
                 issueId = [string](Get-DuoForgeObjectValue -Object $_ -Name 'issueId' -Default '')
@@ -291,7 +394,6 @@ function New-DuoForgeStagePrompt {
         $payload.allowedAdoptionSourceDocumentIds = @($lineagePolicy.adoptionSourceDocumentIds)
         $payload.inputGeneration = [int](Get-DuoForgeObjectValue -Object $Step -Name 'inputGeneration' -Default 1)
     }
-    $payloadJson = $payload | ConvertTo-Json -Depth 100 -Compress
     $workflowContract = if ($workflowVersion -eq 'workflow-v2') {
         @'
 - performedBy는 공급자 작업 할당이며 문서 소유권이 아닙니다. targetDocumentId와 sourceDocumentIds를 DATA의 단계 할당대로 지키세요.
@@ -323,7 +425,20 @@ function New-DuoForgeStagePrompt {
         $issueTargetToken = if ('A' -in $stepSources -and 'B' -in $stepSources) { 'AB' } elseif ('A' -in $stepSources) { 'A' } elseif ('B' -in $stepSources) { 'B' } elseif ('brief' -in $stepSources) { 'MERGED' } else { 'NONE' }
     }
     $issueKeyExample = Get-DuoForgeIssueKeyExampleInternal -Step $Step -IssueTargetToken $issueTargetToken -WorkflowVersion $workflowVersion
-    $issueReferenceContract = if ($workflowVersion -eq 'workflow-v2') {
+    if ($workflowVersion -eq 'workflow-v2' -and [string]$manifest.promptTemplateVersion -eq 'duoforge-stage-v4') {
+        $evidenceLinkedIssues = @(Get-DuoForgeEvidenceLinkedIssueCatalogInternal -RunDirectory $RunDirectory -UserEvidence $userEvidence)
+        $payload.adoptableIssues = @(Get-DuoForgeAdoptableIssueCatalogInternal -PriorArtifacts $priorArtifacts -EvidenceLinkedIssues $evidenceLinkedIssues -Step $Step)
+        $payload.newIssueKeyPrefix = Get-DuoForgeNewIssueKeyPrefixInternal -Step $Step -IssueTargetToken $issueTargetToken
+    }
+    $payloadJson = $payload | ConvertTo-Json -Depth 100 -Compress
+    $issueReferenceContract = if ($workflowVersion -eq 'workflow-v2' -and [string]$manifest.promptTemplateVersion -eq 'duoforge-stage-v4') {
+        @"
+- issues에는 이번 호출에서 새로 발견한 쟁점만 넣고 선행 쟁점을 복사하지 마세요. 새 issueKey는 DATA.newIssueKeyPrefix로 시작하고 뒤에 001부터 순번을 붙이세요.
+- issueResponses와 openQuestions는 같은 출력의 issues 또는 priorArtifacts에 실제로 정의된 issueKey만 참조하세요.
+- adoptions.issueKey는 DATA.adoptableIssues에 있는 키만 사용하세요. targetDocumentId와 proposedByProvider는 그 카탈로그 항목의 값과 정확히 같아야 합니다.
+"@
+    }
+    elseif ($workflowVersion -eq 'workflow-v2') {
         @"
 - 새 쟁점 issueKey는 공급자, 라운드, 단계와 대상이 포함된 '$issueKeyExample' 형식으로 실행 전체에서 고유하게 부여하고, 근거 없는 주장은 만들지 마세요.
 - issueResponses, adoptions와 openQuestions는 priorArtifacts 또는 같은 출력의 issues에 실제로 정의된 issueKey만 참조하세요. dangling 참조나 다른 A/B 대상의 키를 재사용하지 마세요.
@@ -375,6 +490,7 @@ $payloadJson
         snapshotNames = @($payload.documents | ForEach-Object { $_.snapshotName })
         artifactStepKeys = @($payload.priorArtifacts | ForEach-Object { $_.stepKey })
         artifactHashes = @($payload.priorArtifacts | ForEach-Object { $_.sha256 })
+        adoptableIssues = @((Get-DuoForgeObjectValue -Object $payload -Name 'adoptableIssues' -Default @()))
     }
 }
 
@@ -383,10 +499,24 @@ function New-DuoForgeFormatRepairPrompt {
     param(
         [Parameter(Mandatory)][System.Collections.IDictionary]$OriginalPrompt,
         [Parameter(Mandatory)][System.Collections.IDictionary]$Step,
-        [AllowEmptyCollection()][string[]]$ValidationErrors = @()
+        [AllowEmptyCollection()][object[]]$ValidationFailures = @()
     )
 
-    $failureSummary = if ($ValidationErrors.Count -eq 0) { 'JSON 파싱 또는 필수 구조 검증에 실패했습니다.' } else { $ValidationErrors -join ' ' }
+    $allowedFailureCodes = @('DF-VAL-STRUCTURE', 'DF-VAL-LEGACY', 'DF-REF-DUPLICATE', 'DF-REF-KEY-REUSED', 'DF-REF-DANGLING', 'DF-REF-TARGET-MISMATCH', 'DF-REF-PROVIDER-MISMATCH')
+    $safeFailures = @($ValidationFailures | ForEach-Object {
+        $failureCode = [string](Get-DuoForgeObjectValue -Object $_ -Name 'code' -Default 'DF-VAL-STRUCTURE')
+        if ($failureCode -notin $allowedFailureCodes) { $failureCode = 'DF-VAL-STRUCTURE' }
+        $failurePath = [string](Get-DuoForgeObjectValue -Object $_ -Name 'path' -Default '$')
+        if ($failurePath -notmatch '^(?:\$|(?:issues|issueResponses|adoptions|openQuestions)\[\d+\]\.[A-Za-z][A-Za-z0-9]*)$') { $failurePath = '$' }
+        [ordered]@{
+            code = $failureCode
+            path = $failurePath
+            count = [Math]::Max(1, [int](Get-DuoForgeObjectValue -Object $_ -Name 'count' -Default 1))
+            expected = @((Get-DuoForgeObjectValue -Object $_ -Name 'expected' -Default @()) | Where-Object { [string]$_ -in @('A', 'B', 'merged', 'brief', 'codex', 'claude') })
+        }
+    })
+    if ($safeFailures.Count -eq 0) { $safeFailures = @([ordered]@{ code = 'DF-VAL-STRUCTURE'; path = '$'; count = 1; expected = @() }) }
+    $failureSummary = $safeFailures | ConvertTo-Json -Depth 10 -Compress
     $stageResultSchemaVersion = if ($Step.Contains('performedBy')) { 2 } else { 1 }
     $prompt = @"
 당신은 DuoForge의 구조화 출력 복구 실행자입니다.

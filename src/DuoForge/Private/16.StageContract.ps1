@@ -108,6 +108,40 @@ function Get-DuoForgeStageLineagePolicyInternal {
     }
 }
 
+function New-DuoForgeSafeValidationFailureInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Code,
+        [Parameter(Mandatory)][string]$Path,
+        [int]$Count = 1,
+        [AllowEmptyCollection()][string[]]$Expected = @()
+    )
+
+    return [ordered]@{
+        code = $Code
+        path = $Path
+        count = [Math]::Max(1, $Count)
+        expected = @($Expected | Where-Object { [string]$_ -in @('A', 'B', 'merged', 'brief', 'codex', 'claude') } | Sort-Object -Unique)
+    }
+}
+
+function New-DuoForgeIssueReferenceIntegrityExceptionInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$FailureCode
+    )
+
+    $exception = New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message '저장된 단계 산출물과 쟁점 원장의 참조 무결성이 일치하지 않습니다.'
+    $exception.Data['DuoForgeValidationFailures'] = @(
+        New-DuoForgeSafeValidationFailureInternal -Code $FailureCode -Path $Path
+    )
+    $exception.Data['DuoForgeFailureCategory'] = 'issue-reference-integrity'
+    $exception.Data['DuoForgeFailureStatus'] = 'FAILED_STAGE'
+    $exception.Data['DuoForgeRetryable'] = $false
+    return $exception
+}
+
 function Test-DuoForgeStageResultInternal {
     [CmdletBinding()]
     param(
@@ -121,12 +155,15 @@ function Test-DuoForgeStageResultInternal {
         [AllowNull()][System.Collections.IDictionary]$DefinitionIssueTargets,
         [AllowNull()][System.Collections.IDictionary]$ReferenceIssueTargets,
         [AllowNull()][System.Collections.IDictionary]$ReservedIssueFingerprints,
+        [AllowNull()][System.Collections.IDictionary]$AdoptableIssueTargets,
+        [AllowNull()][System.Collections.IDictionary]$AdoptableIssueProviders,
         [AllowNull()][System.Collections.IDictionary]$ContextEvidenceContract,
         [switch]$ThrowOnIssueReferenceIntegrityError,
         [switch]$ThrowOnError
     )
 
     $errors = [System.Collections.Generic.List[string]]::new()
+    $referenceFailures = [System.Collections.Generic.List[object]]::new()
     if ($null -eq $DefinitionIssueTargets) { $DefinitionIssueTargets = $KnownIssueTargets }
     if ($null -eq $ReferenceIssueTargets) { $ReferenceIssueTargets = $KnownIssueTargets }
     $requiredProperties = @(
@@ -211,20 +248,24 @@ function Test-DuoForgeStageResultInternal {
 
     $issueItems = if ($Result -is [System.Collections.IDictionary] -and $Result.Contains('issues')) { $Result['issues'] } else { @() }
     $resultIssueTargets = [ordered]@{}
-    foreach ($issue in @($issueItems)) {
+    $issueArray = @($issueItems)
+    for ($issueIndex = 0; $issueIndex -lt $issueArray.Count; $issueIndex++) {
+        $issue = $issueArray[$issueIndex]
         $issueKey = [string](Get-DuoForgeObjectValue -Object $issue -Name 'issueKey')
         $issueTargetValue = [string](Get-DuoForgeObjectValue -Object $issue -Name 'targetDocumentId')
         $issueCategoryValue = [string](Get-DuoForgeObjectValue -Object $issue -Name 'category')
         $issueClaimValue = [string](Get-DuoForgeObjectValue -Object $issue -Name 'claim')
         if (-not [string]::IsNullOrWhiteSpace($issueKey)) {
             if ($resultIssueTargets.Contains($issueKey)) {
-                $errors.Add("issues.issueKey가 결과 안에서 중복되었습니다: $issueKey")
+                $errors.Add('issues.issueKey가 결과 안에서 중복되었습니다.')
+                $referenceFailures.Add((New-DuoForgeSafeValidationFailureInternal -Code 'DF-REF-DUPLICATE' -Path "issues[$issueIndex].issueKey"))
             }
             else {
                 $resultIssueTargets[$issueKey] = $issueTargetValue
             }
             if ($WorkflowVersion -eq 'workflow-v2' -and $null -ne $DefinitionIssueTargets -and $DefinitionIssueTargets.Contains($issueKey)) {
-                $errors.Add("issues.issueKey가 이전 단계에서 이미 정의되었습니다: $issueKey")
+                $errors.Add('issues.issueKey가 이전 단계에서 이미 정의되었습니다.')
+                $referenceFailures.Add((New-DuoForgeSafeValidationFailureInternal -Code 'DF-REF-KEY-REUSED' -Path "issues[$issueIndex].issueKey"))
             }
             if (
                 $WorkflowVersion -eq 'workflow-v2' -and
@@ -237,10 +278,11 @@ function Test-DuoForgeStageResultInternal {
                 $issueFingerprint = Get-DuoForgeIssueFingerprintInternal -Target $issueTargetValue -Category $issueCategoryValue -Claim $issueClaimValue
                 if ([string]$ReservedIssueFingerprints[$issueKey] -cne $issueFingerprint) {
                     if ($ThrowOnIssueReferenceIntegrityError) {
-                        throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "issueKey가 보존된 다른 쟁점에서 이미 사용되었습니다: $issueKey")
+                        throw (New-DuoForgeIssueReferenceIntegrityExceptionInternal -FailureCode 'DF-INTEGRITY-KEY-FINGERPRINT' -Path "issues[$issueIndex].issueKey")
                     }
                     else {
-                        $errors.Add("issues.issueKey가 보존된 다른 쟁점에서 이미 사용되었습니다: $issueKey")
+                        $errors.Add('issues.issueKey가 보존된 다른 쟁점에서 이미 사용되었습니다.')
+                        $referenceFailures.Add((New-DuoForgeSafeValidationFailureInternal -Code 'DF-REF-KEY-REUSED' -Path "issues[$issueIndex].issueKey"))
                     }
                 }
             }
@@ -257,7 +299,8 @@ function Test-DuoForgeStageResultInternal {
             $issueTarget = [string](Get-DuoForgeObjectValue -Object $issue -Name 'targetDocumentId')
             if ($issueTarget -cnotin @('A', 'B', 'merged')) { $errors.Add('issue.targetDocumentId 값이 잘못되었습니다.') }
             elseif ($issueTarget -cnotin @($lineagePolicy.issueTargetDocumentIds)) {
-                $errors.Add("issue.targetDocumentId가 $ExpectedStage 단계의 허용 대상과 다릅니다: $issueTarget")
+                $errors.Add('issue.targetDocumentId가 현재 단계의 허용 대상과 다릅니다.')
+                $referenceFailures.Add((New-DuoForgeSafeValidationFailureInternal -Code 'DF-REF-TARGET-MISMATCH' -Path "issues[$issueIndex].targetDocumentId" -Expected @($lineagePolicy.issueTargetDocumentIds)))
             }
             $evidenceItems = @(Get-DuoForgeObjectValue -Object $issue -Name 'evidence' -Default @())
             if ($ExpectedStage -eq 'context-batch-analysis' -and $null -ne $ContextEvidenceContract -and $evidenceItems.Count -lt 1) { $errors.Add('schema 2 context-batch-analysis issue에는 CORE 근거가 하나 이상 필요합니다.') }
@@ -314,14 +357,18 @@ function Test-DuoForgeStageResultInternal {
         }
     }
     if ($WorkflowVersion -eq 'workflow-v2' -and $null -ne $ReferenceIssueTargets) {
-        foreach ($response in @($responseItems)) {
+        $responseArray = @($responseItems)
+        for ($responseIndex = 0; $responseIndex -lt $responseArray.Count; $responseIndex++) {
+            $response = $responseArray[$responseIndex]
             $referenceKey = [string](Get-DuoForgeObjectValue -Object $response -Name 'issueKey')
             $referenceTarget = if ($resultIssueTargets.Contains($referenceKey)) { [string]$resultIssueTargets[$referenceKey] } elseif ($ReferenceIssueTargets.Contains($referenceKey)) { [string]$ReferenceIssueTargets[$referenceKey] } else { '' }
             if ([string]::IsNullOrWhiteSpace($referenceTarget)) {
-                $errors.Add("issueResponses.issueKey가 정의된 쟁점을 참조하지 않습니다: $referenceKey")
+                $errors.Add('issueResponses.issueKey가 정의된 쟁점을 참조하지 않습니다.')
+                $referenceFailures.Add((New-DuoForgeSafeValidationFailureInternal -Code 'DF-REF-DANGLING' -Path "issueResponses[$responseIndex].issueKey"))
             }
             elseif ($referenceTarget -notin @($lineagePolicy.issueTargetDocumentIds)) {
-                $errors.Add("issueResponses.issueKey가 $ExpectedStage 단계의 허용 대상 쟁점과 다릅니다: $referenceKey")
+                $errors.Add('issueResponses.issueKey가 현재 단계의 허용 대상 쟁점과 다릅니다.')
+                $referenceFailures.Add((New-DuoForgeSafeValidationFailureInternal -Code 'DF-REF-TARGET-MISMATCH' -Path "issueResponses[$responseIndex].issueKey" -Expected @($lineagePolicy.issueTargetDocumentIds)))
             }
         }
     }
@@ -330,7 +377,9 @@ function Test-DuoForgeStageResultInternal {
     if ($WorkflowVersion -eq 'workflow-v2' -and -not [bool]$lineagePolicy.adoptionsAllowed -and @($adoptionItems).Count -gt 0) {
         $errors.Add("$ExpectedStage 단계에는 adoptions를 기록할 수 없습니다.")
     }
-    foreach ($adoption in @($adoptionItems)) {
+    $adoptionArray = @($adoptionItems)
+    for ($adoptionIndex = 0; $adoptionIndex -lt $adoptionArray.Count; $adoptionIndex++) {
+        $adoption = $adoptionArray[$adoptionIndex]
         foreach ($name in @('issueKey', 'rationale')) {
             if ([string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $adoption -Name $name))) {
                 $errors.Add("adoptions.$name 값이 비어 있습니다.")
@@ -367,23 +416,40 @@ function Test-DuoForgeStageResultInternal {
                 $errors.Add('adoptions.targetDocumentId 값이 잘못되었습니다.')
             }
             elseif ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'targetDocumentId') -cnotin @($lineagePolicy.adoptionTargetDocumentIds)) {
-                $errors.Add("adoptions.targetDocumentId가 $ExpectedStage 단계의 허용 대상과 다릅니다.")
+                $errors.Add('adoptions.targetDocumentId가 현재 단계의 허용 대상과 다릅니다.')
+                $referenceFailures.Add((New-DuoForgeSafeValidationFailureInternal -Code 'DF-REF-TARGET-MISMATCH' -Path "adoptions[$adoptionIndex].targetDocumentId" -Expected @($lineagePolicy.adoptionTargetDocumentIds)))
             }
-            if ($null -ne $ReferenceIssueTargets) {
+            if ($null -ne $ReferenceIssueTargets -or $null -ne $AdoptableIssueTargets) {
                 $referenceKey = [string](Get-DuoForgeObjectValue -Object $adoption -Name 'issueKey')
-                $referenceTarget = if ($resultIssueTargets.Contains($referenceKey)) { [string]$resultIssueTargets[$referenceKey] } elseif ($ReferenceIssueTargets.Contains($referenceKey)) { [string]$ReferenceIssueTargets[$referenceKey] } else { '' }
+                $referenceTarget = if ($null -ne $AdoptableIssueTargets) {
+                    if ($AdoptableIssueTargets.Contains($referenceKey)) { [string]$AdoptableIssueTargets[$referenceKey] } else { '' }
+                }
+                elseif ($resultIssueTargets.Contains($referenceKey)) { [string]$resultIssueTargets[$referenceKey] }
+                elseif ($ReferenceIssueTargets.Contains($referenceKey)) { [string]$ReferenceIssueTargets[$referenceKey] }
+                else { '' }
                 if ([string]::IsNullOrWhiteSpace($referenceTarget)) {
-                    $errors.Add("adoptions.issueKey가 정의된 쟁점을 참조하지 않습니다: $referenceKey")
+                    $errors.Add('adoptions.issueKey가 정의된 쟁점을 참조하지 않습니다.')
+                    $referenceFailures.Add((New-DuoForgeSafeValidationFailureInternal -Code 'DF-REF-DANGLING' -Path "adoptions[$adoptionIndex].issueKey"))
                 }
                 elseif ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'targetDocumentId') -cne $referenceTarget) {
-                    $errors.Add("adoptions.targetDocumentId가 참조 쟁점의 대상과 다릅니다: $referenceKey")
+                    $errors.Add('adoptions.targetDocumentId가 참조 쟁점의 대상과 다릅니다.')
+                    $referenceFailures.Add((New-DuoForgeSafeValidationFailureInternal -Code 'DF-REF-TARGET-MISMATCH' -Path "adoptions[$adoptionIndex].targetDocumentId" -Expected @($referenceTarget)))
+                }
+                if ($null -ne $AdoptableIssueProviders -and $AdoptableIssueProviders.Contains($referenceKey)) {
+                    $referenceProvider = [string]$AdoptableIssueProviders[$referenceKey]
+                    if ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'proposedByProvider') -cne $referenceProvider) {
+                        $errors.Add('adoptions.proposedByProvider가 참조 카탈로그의 공급자와 다릅니다.')
+                        $referenceFailures.Add((New-DuoForgeSafeValidationFailureInternal -Code 'DF-REF-PROVIDER-MISMATCH' -Path "adoptions[$adoptionIndex].proposedByProvider" -Expected @($referenceProvider)))
+                    }
                 }
             }
         }
     }
 
     $questionItems = if ($Result -is [System.Collections.IDictionary] -and $Result.Contains('openQuestions')) { $Result['openQuestions'] } else { @() }
-    foreach ($question in @($questionItems)) {
+    $questionArray = @($questionItems)
+    for ($questionIndex = 0; $questionIndex -lt $questionArray.Count; $questionIndex++) {
+        $question = $questionArray[$questionIndex]
         foreach ($name in @('issueKey', 'title', 'question', 'recommendedOption', 'reasonNow', 'plainExplanation', 'codexOpinion', 'claudeOpinion', 'impactIfDeferred', 'estimatedCost', 'safeDefault')) {
             if ([string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $question -Name $name))) { $errors.Add("openQuestions.$name 값이 비어 있습니다.") }
         }
@@ -423,18 +489,34 @@ function Test-DuoForgeStageResultInternal {
             $referenceKey = [string](Get-DuoForgeObjectValue -Object $question -Name 'issueKey')
             $referenceTarget = if ($resultIssueTargets.Contains($referenceKey)) { [string]$resultIssueTargets[$referenceKey] } elseif ($ReferenceIssueTargets.Contains($referenceKey)) { [string]$ReferenceIssueTargets[$referenceKey] } else { '' }
             if ([string]::IsNullOrWhiteSpace($referenceTarget)) {
-                $errors.Add("openQuestions.issueKey가 정의된 쟁점을 참조하지 않습니다: $referenceKey")
+                $errors.Add('openQuestions.issueKey가 정의된 쟁점을 참조하지 않습니다.')
+                $referenceFailures.Add((New-DuoForgeSafeValidationFailureInternal -Code 'DF-REF-DANGLING' -Path "openQuestions[$questionIndex].issueKey"))
             }
             elseif ($referenceTarget -notin @($lineagePolicy.issueTargetDocumentIds)) {
-                $errors.Add("openQuestions.issueKey가 $ExpectedStage 단계의 허용 대상 쟁점과 다릅니다: $referenceKey")
+                $errors.Add('openQuestions.issueKey가 현재 단계의 허용 대상 쟁점과 다릅니다.')
+                $referenceFailures.Add((New-DuoForgeSafeValidationFailureInternal -Code 'DF-REF-TARGET-MISMATCH' -Path "openQuestions[$questionIndex].issueKey" -Expected @($lineagePolicy.issueTargetDocumentIds)))
             }
         }
     }
 
-    $validation = [ordered]@{ valid = $errors.Count -eq 0; errors = @($errors) }
+    $structuralErrorCount = [Math]::Max(0, $errors.Count - $referenceFailures.Count)
+    $validationFailures = [System.Collections.Generic.List[object]]::new()
+    if ($structuralErrorCount -gt 0) {
+        $validationFailures.Add((New-DuoForgeSafeValidationFailureInternal -Code 'DF-VAL-STRUCTURE' -Path '$' -Count $structuralErrorCount))
+    }
+    foreach ($failure in @($referenceFailures)) { $validationFailures.Add($failure) }
+    $validation = [ordered]@{ valid = $errors.Count -eq 0; errors = @($errors); validationFailures = @($validationFailures) }
     if ($ThrowOnError -and -not $validation.valid) {
-        $exception = New-DuoForgeException -Code 'DF-STAGE-SCHEMA' -Message ($validation.errors -join ' ')
+        $errorCode = if ($structuralErrorCount -gt 0) { 'DF-STAGE-SCHEMA' } else { 'DF-STAGE-REFERENCE' }
+        $message = if ($errorCode -eq 'DF-STAGE-REFERENCE') { '단계 결과의 쟁점 참조 검증에 실패했습니다.' } else { '단계 결과의 구조 검증에 실패했습니다.' }
+        $exception = New-DuoForgeException -Code $errorCode -Message $message
         $exception.Data['DuoForgeValidationErrors'] = @($validation.errors)
+        $exception.Data['DuoForgeValidationFailures'] = @($validation.validationFailures)
+        if ($errorCode -eq 'DF-STAGE-REFERENCE') {
+            $exception.Data['DuoForgeFailureCategory'] = 'stage-reference'
+            $exception.Data['DuoForgeFailureStatus'] = 'FAILED_STAGE'
+            $exception.Data['DuoForgeRetryable'] = $false
+        }
         throw $exception
     }
     return $validation
@@ -465,7 +547,7 @@ function Get-DuoForgeIssueTargetMapsInternal {
             $target = [string](Get-DuoForgeObjectValue -Object $issue -Name 'targetDocumentId' -Default '')
             if ([string]::IsNullOrWhiteSpace($key)) { continue }
             if ($definitionKeys.ContainsKey($key)) {
-                throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "단계 산출물에 중복 issueKey 정의가 있습니다: $key")
+                throw (New-DuoForgeIssueReferenceIntegrityExceptionInternal -FailureCode 'DF-INTEGRITY-DUPLICATE-KEY' -Path 'issues[].issueKey')
             }
             $definitionKeys[$key] = $true
             $definitionTargets[$key] = $target
@@ -486,19 +568,19 @@ function Get-DuoForgeIssueTargetMapsInternal {
             }
             else { '' }
             if (-not [string]::IsNullOrWhiteSpace($storedFingerprint) -and $storedFingerprint -cne $fingerprint) {
-                throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "쟁점 원장의 내용 지문이 현재 내용과 일치하지 않습니다: $([string](Get-DuoForgeObjectValue -Object $issue -Name 'issueId' -Default ''))")
+                throw (New-DuoForgeIssueReferenceIntegrityExceptionInternal -FailureCode 'DF-INTEGRITY-LEDGER-FINGERPRINT' -Path 'issues[].fingerprint')
             }
             $keys = @([string](Get-DuoForgeObjectValue -Object $issue -Name 'issueId' -Default '')) + @(Get-DuoForgeObjectValue -Object $issue -Name 'externalKeys' -Default @())
             foreach ($keyValue in $keys) {
                 $key = [string]$keyValue
                 if ([string]::IsNullOrWhiteSpace($key)) { continue }
                 if ($referenceTargets.Contains($key) -and [string]$referenceTargets[$key] -cne [string]$target) {
-                    throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "쟁점 원장의 issueKey 대상이 단계 산출물과 충돌합니다: $key")
+                    throw (New-DuoForgeIssueReferenceIntegrityExceptionInternal -FailureCode 'DF-INTEGRITY-TARGET-MISMATCH' -Path 'issues[].externalKeys')
                 }
                 $referenceTargets[$key] = [string]$target
                 if (-not [string]::IsNullOrWhiteSpace($fingerprint)) {
                     if ($reservedFingerprints.Contains($key) -and [string]$reservedFingerprints[$key] -cne $fingerprint) {
-                        throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "쟁점 원장의 issueKey가 서로 다른 내용 지문에 연결됩니다: $key")
+                        throw (New-DuoForgeIssueReferenceIntegrityExceptionInternal -FailureCode 'DF-INTEGRITY-KEY-FINGERPRINT' -Path 'issues[].externalKeys')
                     }
                     $reservedFingerprints[$key] = $fingerprint
                 }

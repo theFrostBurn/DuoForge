@@ -96,7 +96,14 @@ function Get-DuoForgeDisplayCheckpointLabelInternal {
 
 function Get-DuoForgeDisplayStateLabelInternal {
     [CmdletBinding()]
-    param([AllowEmptyString()][Parameter(Mandatory)][string]$Status)
+    param(
+        [AllowEmptyString()][Parameter(Mandatory)][string]$Status,
+        [AllowEmptyString()][string]$FailureCode = ''
+    )
+
+    if ($Status -eq 'RESUMABLE_ERROR' -and $FailureCode -ceq 'DF-RUN-TIME-LIMIT') {
+        return '총 실행시간 한도 도달 · 연장 준비 필요'
+    }
 
     switch ($Status) {
         'CREATED' { '작업 생성' }

@@ -175,12 +175,12 @@ function Merge-DuoForgeStageIssues {
             $externalKey = [string]$modelIssue.issueKey
             if ($WorkflowVersion -eq 'workflow-v2') {
                 if ($definedExternalKeys.ContainsKey($externalKey)) {
-                    throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "단계 결과에 중복 issueKey 정의가 있습니다: $externalKey")
+                    throw (New-DuoForgeIssueReferenceIntegrityExceptionInternal -FailureCode 'DF-INTEGRITY-DUPLICATE-KEY' -Path 'issues[].issueKey')
                 }
                 $definedExternalKeys[$externalKey] = $fingerprint
             }
             if ($byExternalKey.ContainsKey($externalKey) -and [string]$byExternalKey[$externalKey].fingerprint -cne $fingerprint) {
-                throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "issueKey가 서로 다른 쟁점에 연결됩니다: $externalKey")
+                throw (New-DuoForgeIssueReferenceIntegrityExceptionInternal -FailureCode 'DF-INTEGRITY-KEY-FINGERPRINT' -Path 'issues[].issueKey')
             }
             if ($byFingerprint.ContainsKey($fingerprint)) {
                 $issue = $byFingerprint[$fingerprint]
@@ -263,7 +263,7 @@ function Merge-DuoForgeStageIssues {
             $issue = if ($byExternalKey.ContainsKey($key)) { $byExternalKey[$key] } else { $null }
             if ($null -eq $issue) {
                 if ($WorkflowVersion -eq 'workflow-v2') {
-                    throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "issueResponses가 정의되지 않은 issueKey를 참조합니다: $key")
+                    throw (New-DuoForgeIssueReferenceIntegrityExceptionInternal -FailureCode 'DF-INTEGRITY-DANGLING' -Path 'issueResponses[].issueKey')
                 }
                 continue
             }
@@ -325,14 +325,14 @@ function Merge-DuoForgeStageIssues {
         }
 
         if ($WorkflowVersion -eq 'workflow-v2' -and @($stageRecord.result.adoptions).Count -gt 0 -and [string]$stageRecord.stage -notin @('synthesis', 'document-revision')) {
-            throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "비편집 단계에는 adoptions를 기록할 수 없습니다: $($stageRecord.stage)")
+            throw (New-DuoForgeIssueReferenceIntegrityExceptionInternal -FailureCode 'DF-INTEGRITY-STAGE-CONTRACT' -Path 'adoptions')
         }
         foreach ($adoption in @($stageRecord.result.adoptions)) {
             $key = [string]$adoption.issueKey
             if ($byExternalKey.ContainsKey($key)) {
                 $issue = $byExternalKey[$key]
                 if ($WorkflowVersion -eq 'workflow-v2' -and [string](Get-DuoForgeObjectValue -Object $adoption -Name 'targetDocumentId' -Default '') -cne [string](Get-DuoForgeObjectValue -Object $issue -Name 'targetDocumentId' -Default '')) {
-                    throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "adoption 대상이 참조 쟁점의 대상과 다릅니다: $key")
+                    throw (New-DuoForgeIssueReferenceIntegrityExceptionInternal -FailureCode 'DF-INTEGRITY-TARGET-MISMATCH' -Path 'adoptions[].targetDocumentId')
                 }
                 $adoptionRecord = [ordered]@{
                     at = Get-DuoForgeUtcNow
@@ -379,7 +379,7 @@ function Merge-DuoForgeStageIssues {
                 }
             }
             elseif ($WorkflowVersion -eq 'workflow-v2') {
-                throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "adoptions가 정의되지 않은 issueKey를 참조합니다: $key")
+                throw (New-DuoForgeIssueReferenceIntegrityExceptionInternal -FailureCode 'DF-INTEGRITY-DANGLING' -Path 'adoptions[].issueKey')
             }
         }
 
@@ -413,7 +413,7 @@ function Merge-DuoForgeStageIssues {
                 $issue.resolutionStatus = 'AWAITING_USER'
             }
             elseif ($WorkflowVersion -eq 'workflow-v2') {
-                throw (New-DuoForgeException -Code 'DF-ISSUE-REFERENCE-INTEGRITY' -Message "openQuestions가 정의되지 않은 issueKey를 참조합니다: $key")
+                throw (New-DuoForgeIssueReferenceIntegrityExceptionInternal -FailureCode 'DF-INTEGRITY-DANGLING' -Path 'openQuestions[].issueKey')
             }
         }
     }

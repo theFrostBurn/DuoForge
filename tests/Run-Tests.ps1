@@ -172,6 +172,18 @@ function Get-TestPromptPriorArtifactStepKeys {
     return @($payload.priorArtifacts | ForEach-Object { [string]$_.stepKey })
 }
 
+function Get-TestPromptPayload {
+    param([Parameter(Mandatory)][string]$PromptText)
+
+    $startMarker = '<DUOFORGE_UNTRUSTED_DATA_JSON>'
+    $endMarker = '</DUOFORGE_UNTRUSTED_DATA_JSON>'
+    $start = $PromptText.IndexOf($startMarker, [StringComparison]::Ordinal)
+    $end = $PromptText.IndexOf($endMarker, [StringComparison]::Ordinal)
+    if ($start -lt 0 -or $end -le $start) { throw '프롬프트에서 DuoForge DATA JSON을 찾을 수 없습니다.' }
+    $jsonStart = $start + $startMarker.Length
+    return $PromptText.Substring($jsonStart, $end - $jsonStart).Trim() | ConvertFrom-Json -Depth 100
+}
+
 try {
     Test-Case '기본 설정은 2라운드, 최대 3라운드, 3A 비활성화다' {
         $config = Get-DuoForgeDefaultConfig
@@ -1358,6 +1370,131 @@ try {
         Assert-Equal @(Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ConvertFrom-Json | Where-Object type -eq 'PROVIDER_CALL_STARTED').Count $beforeProviderEvents
     }
 
+    Test-Case '레거시 참조 스키마 실패는 정확한 별도 복구로 한 번만 공급자 0-call 준비된다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'schema-reference-repair\input\brief.md')
+        $workspace = Join-Path $tempRoot 'schema-reference-repair\results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $graph = & $module { param($directory) Initialize-DuoForgeStageGraph -RunDirectory $directory } $run.runDirectory
+        $failedStep = @($graph.steps)[0]
+        $failedStep.status = 'FAILED'
+        $failedStep.attemptCount = 4
+        $failedStep.totalAttemptCount = 5
+        $failedStep.manualRetryCount = 1
+        $failedStep.inputGeneration = 1
+        $failedStep.retryMode = 'RETRY_EXHAUSTED'
+        $failedStep.lastError = [ordered]@{
+            code = 'DF-STAGE-SCHEMA'; category = 'provider-error'; retryable = $true; attempt = 4
+            validationErrors = @(
+                'issues.issueKey가 보존된 다른 쟁점에서 이미 사용되었습니다: RAW-ISSUE-KEY-CANARY',
+                'adoptions.targetDocumentId가 참조 쟁점의 대상과 다릅니다: RAW-ISSUE-KEY-CANARY'
+            )
+        }
+        & $module {
+            param($directory, $value)
+            $manifestPath = Join-Path $directory 'manifest.json'
+            $statePath = Join-Path $directory 'state.json'
+            $manifest = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $manifestPath)
+            $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $statePath)
+            $manifest.promptTemplateVersion = 'duoforge-stage-v3'
+            $state.promptContractVersion = 'duoforge-stage-v3'
+            $state.status = 'FAILED_STAGE'
+            $state.runtimeSeconds = 600.0
+            $state.runtimeExtensionMinutes = 60
+            $state.runtimeExtensionGrantCount = 1
+            $state.Remove('schemaRepairGrantCount')
+            $state.Remove('schemaRepairPreparedAt')
+            Write-DuoForgeJsonAtomic -Path (Join-Path $directory 'steps.json') -Value $value
+            Write-DuoForgeJsonAtomic -Path $manifestPath -Value $manifest
+            Write-DuoForgeJsonAtomic -Path $statePath -Value $state
+        } $run.runDirectory $graph
+
+        $statePath = Join-Path $run.runDirectory 'state.json'
+        $stepsPath = Join-Path $run.runDirectory 'steps.json'
+        $manifestPath = Join-Path $run.runDirectory 'manifest.json'
+        $eventsPath = Join-Path $run.runDirectory 'events.jsonl'
+        $hashesBeforeRead = @{
+            state = (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash
+            steps = (Get-FileHash -LiteralPath $stepsPath -Algorithm SHA256).Hash
+            manifest = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash
+            events = (Get-FileHash -LiteralPath $eventsPath -Algorithm SHA256).Hash
+        }
+        $eligibility = & $module { param($directory) Get-DuoForgeSchemaRepairEligibilityInternal -RunDirectory $directory } $run.runDirectory
+        Assert-True ([bool]$eligibility.eligible)
+        Assert-True ([bool]$eligibility.legacy)
+        Assert-Equal @($eligibility.failures).Count 2
+        Assert-Equal (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash $hashesBeforeRead.state
+        Assert-Equal (Get-FileHash -LiteralPath $stepsPath -Algorithm SHA256).Hash $hashesBeforeRead.steps
+        Assert-Equal (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash $hashesBeforeRead.manifest
+        Assert-Equal (Get-FileHash -LiteralPath $eventsPath -Algorithm SHA256).Hash $hashesBeforeRead.events
+        $generalRetry = & $module { param($directory) Get-DuoForgeFailedStageRetryEligibilityInternal -RunDirectory $directory } $run.runDirectory
+        Assert-False ([bool]$generalRetry.eligible)
+
+        $prepared = & $module { param($runId, $root) Enable-DuoForgeSchemaRepairInternal -RunId $runId -ResultsRoot $root } $run.runId $workspace
+        Assert-Equal $prepared.recoveryKind 'schema-reference-repair'
+        Assert-Equal $prepared.providerCalls 0
+        Assert-Equal $prepared.inputGeneration 2
+        Assert-Equal $prepared.attemptCount 0
+        Assert-Equal $prepared.totalAttemptCount 5
+        Assert-Equal $prepared.manualRetryCount 1
+        $preparedState = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json -Depth 100
+        $preparedGraph = Get-Content -Raw -LiteralPath $stepsPath | ConvertFrom-Json -Depth 100
+        $preparedManifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json -Depth 100
+        $preparedStep = @($preparedGraph.steps | Where-Object stepKey -eq $failedStep.stepKey)[0]
+        Assert-Equal $preparedState.status 'RESUMABLE_ERROR'
+        Assert-Equal $preparedState.schemaRepairGrantCount 1
+        Assert-Equal $preparedState.runtimeSeconds 600
+        Assert-Equal $preparedState.runtimeExtensionMinutes 60
+        Assert-Equal $preparedState.runtimeExtensionGrantCount 1
+        Assert-Equal $preparedState.promptContractVersion 'duoforge-stage-v4'
+        Assert-Equal $preparedManifest.promptTemplateVersion 'duoforge-stage-v4'
+        Assert-Equal $preparedStep.status 'PENDING'
+        Assert-Equal $preparedStep.inputGeneration 2
+        Assert-Equal $preparedStep.attemptCount 0
+        Assert-Equal $preparedStep.totalAttemptCount 5
+        Assert-Equal $preparedStep.manualRetryCount 1
+        Assert-True ($null -eq $preparedStep.lastError)
+        $repairEvents = @(Get-Content -LiteralPath $eventsPath | ConvertFrom-Json | Where-Object type -eq 'SCHEMA_REPAIR_PREPARED')
+        Assert-Equal $repairEvents.Count 1
+        Assert-Equal $repairEvents[0].data.providerCalls 0
+        Assert-Equal @((Get-Content -LiteralPath $eventsPath | ConvertFrom-Json) | Where-Object type -eq 'PROVIDER_CALL_STARTED').Count 0
+        $durableText = (Get-Content -Raw -LiteralPath $statePath) + (Get-Content -Raw -LiteralPath $stepsPath) + (Get-Content -Raw -LiteralPath $manifestPath) + (Get-Content -Raw -LiteralPath $eventsPath)
+        Assert-NotContainsText $durableText 'RAW-ISSUE-KEY-CANARY'
+
+        $beforeSecond = @{
+            state = (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash
+            steps = (Get-FileHash -LiteralPath $stepsPath -Algorithm SHA256).Hash
+            manifest = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash
+            events = (Get-FileHash -LiteralPath $eventsPath -Algorithm SHA256).Hash
+        }
+        Assert-ThrowsCode { & $module { param($runId, $root) Enable-DuoForgeSchemaRepairInternal -RunId $runId -ResultsRoot $root } $run.runId $workspace } 'DF-SCHEMA-REPAIR-UNAVAILABLE'
+        Assert-Equal (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash $beforeSecond.state
+        Assert-Equal (Get-FileHash -LiteralPath $stepsPath -Algorithm SHA256).Hash $beforeSecond.steps
+        Assert-Equal (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash $beforeSecond.manifest
+        Assert-Equal (Get-FileHash -LiteralPath $eventsPath -Algorithm SHA256).Hash $beforeSecond.events
+
+        $control = [ordered]@{ calls = 0 }
+        $result = & $module {
+            param($directory, $counter)
+            $callback = {
+                param($step)
+                $counter.calls++
+                $exception = [InvalidOperationException]::new('합성 중단')
+                $exception.Data['DuoForgeCode'] = 'DF-SYNTHETIC-STOP'
+                throw $exception
+            }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory $control
+        Assert-Equal $control.calls 1
+        Assert-Equal $result.code 'DF-SYNTHETIC-STOP'
+        $calledGraph = Get-Content -Raw -LiteralPath $stepsPath | ConvertFrom-Json -Depth 100
+        $calledStep = @($calledGraph.steps | Where-Object stepKey -eq $failedStep.stepKey)[0]
+        Assert-Equal $calledStep.attemptCount 1
+        Assert-Equal $calledStep.totalAttemptCount 6
+        Assert-Equal $calledStep.manualRetryCount 1
+    }
+
     Test-Case '직렬화된 workflow-v1 저장 fixture는 STARTED 체크포인트부터 원본 불변으로 재개된다' {
         $fixtureRoot = Join-Path $PSScriptRoot 'fixtures\workflow-v1-resume\run-template'
         $fixtureHashesBefore = @{}
@@ -1535,13 +1672,13 @@ try {
         Assert-Equal $run.manifest.schemaVersion 4
         Assert-Equal $run.manifest.workflowVersion 'workflow-v2'
         Assert-Equal $run.manifest.storageContractVersion 'duoforge-run-v2'
-        Assert-Equal $run.manifest.promptTemplateVersion 'duoforge-stage-v3'
+        Assert-Equal $run.manifest.promptTemplateVersion 'duoforge-stage-v4'
         $inventory = Get-Content -LiteralPath (Join-Path $run.runDirectory 'inputs\inventory.json') -Raw | ConvertFrom-Json -Depth 50
         $state = Get-Content -LiteralPath (Join-Path $run.runDirectory 'state.json') -Raw | ConvertFrom-Json -Depth 50
         $ledger = Get-Content -LiteralPath (Join-Path $run.runDirectory 'issues.json') -Raw | ConvertFrom-Json -Depth 50
         Assert-Equal $state.schemaVersion 2
         Assert-Equal $state.workflowVersion 'workflow-v2'
-        Assert-Equal $state.promptContractVersion 'duoforge-stage-v3'
+        Assert-Equal $state.promptContractVersion 'duoforge-stage-v4'
         Assert-Equal $inventory.schemaVersion 2
         Assert-Equal $inventory.workflowVersion 'workflow-v2'
         Assert-Equal $ledger.schemaVersion 2
@@ -2422,7 +2559,7 @@ try {
         Assert-False (Test-Path -LiteralPath (Join-Path $run.runDirectory 'diagnostics.jsonl'))
         Assert-Equal $run.manifest.schemaVersion 4
         Assert-Equal $run.manifest.workflowVersion 'workflow-v2'
-        Assert-Equal $run.manifest.promptTemplateVersion 'duoforge-stage-v3'
+        Assert-Equal $run.manifest.promptTemplateVersion 'duoforge-stage-v4'
         Assert-Equal $run.manifest.artifactVisibilityPolicy 'transitive-dependencies-v1'
         Assert-Equal $run.manifest.providerSelections.codex.model 'gpt-5.6-sol'
         Assert-Equal $run.manifest.providerSelections.codex.reasoningEffort 'high'
@@ -3415,6 +3552,10 @@ try {
         $dualResponses = "$dualReviews,r01-codex-review-response,r01-claude-review-response"
         Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-codex-document-a-revision']) -join ',')) $dualResponses
         Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-claude-document-b-revision']) -join ',')) $dualResponses
+        $revisionPayload = Get-TestPromptPayload -PromptText $dualPrompts['r01-codex-document-a-revision']
+        Assert-Equal $revisionPayload.contractVersion 'duoforge-stage-v4'
+        Assert-Equal $revisionPayload.newIssueKeyPrefix 'CODEX-R01-DOCUMENT-REVISION-A-G01-'
+        Assert-Equal @($revisionPayload.adoptableIssues).Count 0
         $dualRound2Codex = @(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r02-codex-document-review'])
         $dualRound2Claude = @(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r02-claude-document-review'])
         Assert-Equal (($dualRound2Codex -join ',')) (($dualRound2Claude -join ','))
@@ -3592,7 +3733,7 @@ try {
             targetDocumentId = $null; sourceDocumentIds = @('A', 'B'); stage = 'review-response'; round = 1
         }
 
-        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-REFERENCE' -Body {
             & $module {
                 param($step)
                 $result = New-DuoForgeFakeStageResult -Step $step
@@ -3615,7 +3756,7 @@ try {
                 Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -ThrowOnError
             } $validationStep
         }
-        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-REFERENCE' -Body {
             & $module {
                 param($step)
                 $result = New-DuoForgeFakeStageResult -Step $step
@@ -3637,7 +3778,7 @@ try {
                 Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -ThrowOnError
             } $revisionStep
         }
-        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-REFERENCE' -Body {
             & $module {
                 param($step)
                 $result = New-DuoForgeFakeStageResult -Step $step
@@ -3691,6 +3832,64 @@ try {
         }
         $knownTargets = [ordered]@{ 'KNOWN-A' = 'A' }
 
+        $validAdoption = & $module {
+            param($step, $known)
+            $result = New-DuoForgeFakeStageResult -Step $step
+            $result.adoptions = @([ordered]@{
+                issueKey = 'KNOWN-A'; sourceDocumentId = 'B'; proposedByProvider = 'claude'; targetDocumentId = 'A'
+                disposition = 'ACCEPTED'; rationale = '정상 연결'; locations = @('본문')
+            })
+            Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -KnownIssueTargets $known
+        } $revisionStep $knownTargets
+        Assert-True ([bool]$validAdoption.valid) ($validAdoption.errors -join ' | ')
+        $strictAdoption = & $module {
+            param($step, $known)
+            $result = New-DuoForgeFakeStageResult -Step $step
+            $result.adoptions = @([ordered]@{
+                issueKey = 'KNOWN-A'; sourceDocumentId = 'B'; proposedByProvider = 'claude'; targetDocumentId = 'A'
+                disposition = 'ACCEPTED'; rationale = '카탈로그 정상 연결'; locations = @('본문')
+            })
+            Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -KnownIssueTargets $known -AdoptableIssueTargets ([ordered]@{ 'KNOWN-A' = 'A' }) -AdoptableIssueProviders ([ordered]@{ 'KNOWN-A' = 'claude' })
+        } $revisionStep $knownTargets
+        Assert-True ([bool]$strictAdoption.valid) ($strictAdoption.errors -join ' | ')
+
+        $catalog = @(& $module {
+            param($step)
+            Get-DuoForgeAdoptableIssueCatalogInternal -Step $step -PriorArtifacts @(
+                [ordered]@{
+                    provider = 'claude'
+                    result = [ordered]@{ issues = @(
+                        [ordered]@{ issueKey = 'VISIBLE-A'; targetDocumentId = 'A' },
+                        [ordered]@{ issueKey = 'VISIBLE-B'; targetDocumentId = 'B' }
+                    ) }
+                }
+            )
+        } $revisionStep)
+        Assert-Equal @($catalog).Count 1
+        Assert-Equal $catalog[0].issueKey 'VISIBLE-A'
+        Assert-Equal $catalog[0].targetDocumentId 'A'
+        Assert-Equal $catalog[0].proposedByProvider 'claude'
+        $catalogConflict = & $module {
+            param($step)
+            try {
+                $null = Get-DuoForgeAdoptableIssueCatalogInternal -Step $step -PriorArtifacts @(
+                    [ordered]@{ provider = 'claude'; result = [ordered]@{ issues = @([ordered]@{ issueKey = 'RAW-CATALOG-KEY-CANARY'; targetDocumentId = 'A' }) } },
+                    [ordered]@{ provider = 'codex'; result = [ordered]@{ issues = @([ordered]@{ issueKey = 'RAW-CATALOG-KEY-CANARY'; targetDocumentId = 'A' }) } }
+                )
+            }
+            catch {
+                return [ordered]@{
+                    code = [string]$_.Exception.Data['DuoForgeCode']
+                    message = [string]$_.Exception.Message
+                    failures = @($_.Exception.Data['DuoForgeValidationFailures'])
+                }
+            }
+        } $revisionStep
+        Assert-Equal $catalogConflict.code 'DF-ISSUE-REFERENCE-INTEGRITY'
+        Assert-Equal $catalogConflict.failures[0].code 'DF-INTEGRITY-CATALOG-CONFLICT'
+        Assert-Equal $catalogConflict.failures[0].path 'issues[].issueKey'
+        Assert-NotContainsText ($catalogConflict | ConvertTo-Json -Depth 20 -Compress) 'RAW-CATALOG-KEY-CANARY'
+
         $ledgerSelfResult = & $module {
             param($step)
             $result = New-DuoForgeFakeStageResult -Step $step
@@ -3702,7 +3901,7 @@ try {
         $reservedFingerprint = & $module {
             Get-DuoForgeIssueFingerprintInternal -Target 'A' -Category 'correctness' -Claim '이전 세대의 쟁점입니다.'
         }
-        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-REFERENCE' -Body {
             & $module {
                 param($step, $fingerprint)
                 $result = New-DuoForgeFakeStageResult -Step $step
@@ -3710,6 +3909,30 @@ try {
                 Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -DefinitionIssueTargets ([ordered]@{}) -ReferenceIssueTargets ([ordered]@{ 'SELF-A' = 'A' }) -ReservedIssueFingerprints ([ordered]@{ 'SELF-A' = $fingerprint }) -ThrowOnError
             } $revisionStep $reservedFingerprint
         }
+        $safeFailure = & $module {
+            param($step, $known)
+            try {
+                $result = New-DuoForgeFakeStageResult -Step $step
+                $result.adoptions = @([ordered]@{
+                    issueKey = 'RAW-ISSUE-KEY-CANARY'; sourceDocumentId = 'B'; proposedByProvider = 'claude'; targetDocumentId = 'B'
+                    disposition = 'ACCEPTED'; rationale = 'RAW-MODEL-RESPONSE-CANARY'; locations = @('본문')
+                })
+                $null = Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -KnownIssueTargets $known -ThrowOnError
+            }
+            catch {
+                return [ordered]@{
+                    code = [string]$_.Exception.Data['DuoForgeCode']
+                    message = [string]$_.Exception.Message
+                    failures = @($_.Exception.Data['DuoForgeValidationFailures'])
+                }
+            }
+        } $revisionStep $knownTargets
+        Assert-Equal $safeFailure.code 'DF-STAGE-REFERENCE'
+        Assert-Equal $safeFailure.failures[0].code 'DF-REF-TARGET-MISMATCH'
+        Assert-True ([string]$safeFailure.failures[0].path -match '^adoptions\[\d+\]\.targetDocumentId$')
+        $safeFailureJson = $safeFailure | ConvertTo-Json -Depth 20 -Compress
+        Assert-NotContainsText $safeFailureJson 'RAW-ISSUE-KEY-CANARY'
+        Assert-NotContainsText $safeFailureJson 'RAW-MODEL-RESPONSE-CANARY'
         Assert-ThrowsCode -ExpectedCode 'DF-ISSUE-REFERENCE-INTEGRITY' -Body {
             & $module {
                 param($step, $fingerprint)
@@ -3726,7 +3949,7 @@ try {
         } $revisionStep $reservedFingerprint
         Assert-True ([bool]$sameFingerprintResult.valid) ($sameFingerprintResult.errors -join ' | ')
 
-        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-REFERENCE' -Body {
             & $module {
                 param($step)
                 $result = New-DuoForgeFakeStageResult -Step $step
@@ -3735,7 +3958,7 @@ try {
             } $revisionStep
         }
 
-        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-REFERENCE' -Body {
             & $module {
                 param($step)
                 $result = New-DuoForgeFakeStageResult -Step $step
@@ -3754,7 +3977,7 @@ try {
                 Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -KnownIssueTargets $known -ThrowOnError
             } $revisionStep $knownTargets
         }
-        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-REFERENCE' -Body {
             & $module {
                 param($step, $known)
                 $result = New-DuoForgeFakeStageResult -Step $step
@@ -3765,7 +3988,7 @@ try {
                 Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $step.stage -ExpectedProvider $step.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId A -ExpectedSourceDocumentIds $step.sourceDocumentIds -KnownIssueTargets $known -ThrowOnError
             } $revisionStep $knownTargets
         }
-        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-SCHEMA' -Body {
+        Assert-ThrowsCode -ExpectedCode 'DF-STAGE-REFERENCE' -Body {
             & $module {
                 param($step, $known)
                 $result = New-DuoForgeFakeStageResult -Step $step
@@ -3823,6 +4046,50 @@ try {
 
         Assert-Equal $examples.first 'CLAUDE-R02-DOCUMENT-VALIDATION-B-001'
         Assert-Equal $examples.second 'CLAUDE-R02-DOCUMENT-VALIDATION-B-G02-001'
+    }
+
+    Test-Case '이번 응답의 참조 오류는 안전한 실패 정보만 저장하고 자동 재호출하지 않는다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'safe-reference-failure\input\brief.md')
+        $workspace = Join-Path $tempRoot 'safe-reference-failure\results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $control = [ordered]@{ calls = 0 }
+        $result = & $module {
+            param($directory, $counter)
+            $callback = {
+                param($step)
+                $counter.calls++
+                $response = New-DuoForgeFakeStageResult -Step $step
+                $response.issues = @(
+                    [ordered]@{ issueKey = 'RAW-REFERENCE-CANARY'; targetDocumentId = 'merged'; category = 'key'; severity = 'minor'; claim = '첫 쟁점'; evidence = @(); proposal = '첫 제안'; requiresUser = $false; blockingProposal = $false },
+                    [ordered]@{ issueKey = 'RAW-REFERENCE-CANARY'; targetDocumentId = 'merged'; category = 'key'; severity = 'minor'; claim = '둘째 쟁점'; evidence = @(); proposal = '둘째 제안'; requiresUser = $false; blockingProposal = $false }
+                )
+                return $response
+            }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory $control
+        Assert-Equal $control.calls 1
+        Assert-Equal $result.status 'FAILED_STAGE'
+        Assert-Equal $result.code 'DF-STAGE-REFERENCE'
+        Assert-False ([bool]$result.retryable)
+        $storedGraph = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'steps.json') | ConvertFrom-Json -Depth 100
+        $failedStep = @($storedGraph.steps | Where-Object status -eq 'FAILED')[0]
+        Assert-Equal $failedStep.lastError.code 'DF-STAGE-REFERENCE'
+        Assert-Equal $failedStep.lastError.validationFailures[0].code 'DF-REF-DUPLICATE'
+        Assert-Equal $failedStep.lastError.validationFailures[0].path 'issues[1].issueKey'
+        Assert-True ($null -eq $failedStep.lastError.PSObject.Properties['validationErrors'])
+        Assert-Equal $failedStep.retryMode 'REFERENCE_REPAIR_REQUIRED'
+        $durableText = @(Get-ChildItem -LiteralPath $run.runDirectory -File -Recurse -Force | ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName -ErrorAction SilentlyContinue }) -join "`n"
+        Assert-NotContainsText $durableText 'RAW-REFERENCE-CANARY'
+        $blockedControl = [ordered]@{ calls = 0 }
+        $blocked = & $module {
+            param($directory, $counter)
+            $callback = { param($step) $counter.calls++; throw '복구 준비 전에는 invoker에 진입하면 안 됩니다.' }.GetNewClosure()
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory $blockedControl
+        Assert-Equal $blocked.status 'FAILED_STAGE'
+        Assert-Equal $blockedControl.calls 0
     }
 
     Test-Case '문서별 최종 검증 거부는 대상 계보의 Critical 쟁점으로 실패 폐쇄한다' {
@@ -4194,15 +4461,16 @@ try {
         $retryRequest = New-TestStartRequest -Mode shared-document -Brief $retryInput -Workspace $retryWorkspace -DocumentType prd
         $retryValidation = Test-DuoForgeStartRequest -Request $retryRequest -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $retryWorkspace)
         $retryRun = New-DuoForgeRun -ValidationResult $retryValidation
-        $retryControl = @{ failed = $false; promptKinds = @(); promptHashes = @(); repairHasOptionError = $false }
+        $retryControl = @{ failed = $false; promptKinds = @(); promptHashes = @(); repairHasSafeStructureFailure = $false; repairContainsRawOptionError = $false }
         $retryResult = & $module {
             param($directory, $control)
             $callback = {
                 param($step, $prompt)
                 $control.promptKinds = @($control.promptKinds) + @([string]$prompt.kind)
                 $control.promptHashes = @($control.promptHashes) + @([string]$prompt.sha256)
-                if ([string]$prompt.kind -eq 'FORMAT_REPAIR' -and [string]$prompt.text -like '*실제 선택지 두 개 또는 세 개*') {
-                    $control.repairHasOptionError = $true
+                if ([string]$prompt.kind -eq 'FORMAT_REPAIR') {
+                    if ([string]$prompt.text -like '*"code":"DF-VAL-STRUCTURE"*') { $control.repairHasSafeStructureFailure = $true }
+                    if ([string]$prompt.text -like '*실제 선택지 두 개 또는 세 개*') { $control.repairContainsRawOptionError = $true }
                 }
                 $result = New-DuoForgeFakeStageResult -Step $step
                 if (-not $control.failed -and [string]$step.stepKey -eq 'r01-codex-independent-draft') {
@@ -4222,7 +4490,8 @@ try {
         } $retryRun.runDirectory $retryControl
         Assert-Equal $retryResult.status 'COMPLETED'
         Assert-Equal @($retryControl.promptKinds | Where-Object { $_ -eq 'FORMAT_REPAIR' }).Count 1
-        Assert-True ([bool]$retryControl.repairHasOptionError) '선택지 계약 오류가 형식 복구 프롬프트에 전달되지 않았습니다.'
+        Assert-True ([bool]$retryControl.repairHasSafeStructureFailure) '안전한 구조 오류 코드가 형식 복구 프롬프트에 전달되지 않았습니다.'
+        Assert-False ([bool]$retryControl.repairContainsRawOptionError) '원문 선택지 검증 오류가 형식 복구 프롬프트에 남았습니다.'
         $stageIndex = [Array]::IndexOf([object[]]$retryControl.promptKinds, 'STAGE')
         $repairIndex = [Array]::IndexOf([object[]]$retryControl.promptKinds, 'FORMAT_REPAIR')
         Assert-True ($retryControl.promptHashes[$stageIndex] -ne $retryControl.promptHashes[$repairIndex]) '형식 복구 프롬프트 해시가 원래 프롬프트와 달라야 합니다.'
@@ -4477,7 +4746,7 @@ try {
                 }
                 if ([string]$step.stepKey -eq 'r01-codex-document-a-revision') {
                     $stageResult.adoptions = @([ordered]@{
-                        issueKey = 'DUAL-R01-001'; sourceDocumentId = 'B'; proposedByProvider = 'claude'; targetDocumentId = 'A'
+                        issueKey = 'DUAL-R01-001'; sourceDocumentId = 'B'; proposedByProvider = 'codex'; targetDocumentId = 'A'
                         disposition = 'PARTIALLY_ACCEPTED'; rationale = '문서 A의 목적에 맞는 정의만 반영했습니다.'; locations = @('용어 정의')
                     })
                 }
@@ -4493,7 +4762,7 @@ try {
         Assert-ContainsText (Get-Content -LiteralPath (Join-Path $run.runDirectory 'final\document-B-final.md') -Raw) '라운드: 2'
         $adoptionLog = Get-Content -LiteralPath (Join-Path $run.runDirectory 'final\adoption-log.md') -Raw
         Assert-ContainsText $adoptionLog '| 쟁점 | 원천 문서 | 제안 작업자 | 편집 작업자 | 대상 문서 | 채택 상태 | 이유 | 반영 위치 | 라운드 |'
-        Assert-ContainsText $adoptionLog '| D-001 | B | claude | codex | A | PARTIALLY_ACCEPTED | 문서 A의 목적에 맞는 정의만 반영했습니다. | 용어 정의 | 1 |'
+        Assert-ContainsText $adoptionLog '| D-001 | B | codex | codex | A | PARTIALLY_ACCEPTED | 문서 A의 목적에 맞는 정의만 반영했습니다. | 용어 정의 | 1 |'
         Assert-Equal (Get-FileHash -LiteralPath $documentA -Algorithm SHA256).Hash $beforeA
         Assert-Equal (Get-FileHash -LiteralPath $documentB -Algorithm SHA256).Hash $beforeB
     }
@@ -4737,15 +5006,15 @@ try {
         Assert-NotContainsText $prompt.text ([System.IO.Path]::GetFullPath($evidenceFile))
 
         $resumed = & $module {
-            param($directory, $issueId)
+            param($directory, $issueKey, $issueProvider)
             $callback = {
                 param($step)
                 $stageResult = New-DuoForgeFakeStageResult -Step $step
                 if ([string]$step.stage -eq 'synthesis') {
                     $stageResult.adoptions = @([ordered]@{
-                        issueKey = $issueId
+                        issueKey = $issueKey
                         sourceDocumentId = 'brief'
-                        proposedByProvider = [string]$step.provider
+                        proposedByProvider = $issueProvider
                         targetDocumentId = 'merged'
                         disposition = 'ACCEPTED'
                         rationale = '추가 근거에서 30일 보존 기간을 확인해 문서에 반영했습니다.'
@@ -4755,7 +5024,7 @@ try {
                 return $stageResult
             }
             Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
-        } $run.runDirectory ([string]$issue.issueId)
+        } $run.runDirectory ([string]@($issue.externalKeys)[0]) ([string]$issue.raisedBy)
         Assert-Equal $resumed.status 'COMPLETED' ($resumed | ConvertTo-Json -Depth 20 -Compress)
         Assert-Equal $resumed.invoked 2
         $finalLedger = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'issues.json') | ConvertFrom-Json -Depth 50
@@ -6388,16 +6657,16 @@ Setext 결론
             $expectedContextCalls = @($plan.batches).Count * 2
             Assert-Equal @($trace.steps | Where-Object { $_ -like 'context-batch-analysis|*' }).Count $expectedContextCalls
             Assert-True (@($trace.steps | Select-Object -First $expectedContextCalls | Where-Object { $_ -notlike 'context-batch-analysis|*' }).Count -eq 0) '문맥 배치 장벽 전에 일반 토론 단계가 실행됐습니다.'
-            $contextIssueKeyExamples = @()
+            $contextIssueKeyPrefixes = @()
             foreach ($promptKey in @($trace.prompts.Keys | Where-Object { $_ -like 'context-*' })) {
-                $match = [regex]::Match([string]$trace.prompts[$promptKey], "새 쟁점 issueKey는[^']*'(?<key>[^']+)' 형식")
-                Assert-True $match.Success "문맥 배치 $promptKey 프롬프트에서 issueKey 예시를 찾지 못했습니다."
-                $contextIssueKeyExamples += $match.Groups['key'].Value
+                $promptPayload = Get-TestPromptPayload -PromptText ([string]$trace.prompts[$promptKey])
+                Assert-True (-not [string]::IsNullOrWhiteSpace([string]$promptPayload.newIssueKeyPrefix)) "문맥 배치 $promptKey 프롬프트에서 새 issueKey 접두사를 찾지 못했습니다."
+                $contextIssueKeyPrefixes += [string]$promptPayload.newIssueKeyPrefix
             }
-            Assert-Equal @($contextIssueKeyExamples | Sort-Object -Unique).Count $expectedContextCalls '문맥 배치별 issueKey namespace가 고유하지 않습니다.'
+            Assert-Equal @($contextIssueKeyPrefixes | Sort-Object -Unique).Count $expectedContextCalls '문맥 배치별 issueKey namespace가 고유하지 않습니다.'
             if ($largeMode -eq 'dual-document') {
-                Assert-True @($contextIssueKeyExamples | Where-Object { $_ -like '*-A-*' }).Count '문서 A 문맥 배치 키에 대상 토큰이 없습니다.'
-                Assert-True @($contextIssueKeyExamples | Where-Object { $_ -like '*-B-*' }).Count '문서 B 문맥 배치 키에 대상 토큰이 없습니다.'
+                Assert-True @($contextIssueKeyPrefixes | Where-Object { $_ -like '*-A-*' }).Count '문서 A 문맥 배치 키에 대상 토큰이 없습니다.'
+                Assert-True @($contextIssueKeyPrefixes | Where-Object { $_ -like '*-B-*' }).Count '문서 B 문맥 배치 키에 대상 토큰이 없습니다.'
             }
             $storedGraph = Get-Content -LiteralPath (Join-Path $run.runDirectory 'steps.json') -Raw | ConvertFrom-Json -Depth 100
             foreach ($contextStep in @($storedGraph.steps | Where-Object { $_.stage -eq 'context-batch-analysis' })) {
@@ -6444,6 +6713,9 @@ Setext 결론
         $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
         $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
         $run = New-DuoForgeRun -ValidationResult $validation
+        $null = & $module { param($directory) Initialize-DuoForgeStageGraph -RunDirectory $directory } $run.runDirectory
+        $graphBefore = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'steps.json') | ConvertFrom-Json -Depth 100
+        $firstBefore = @($graphBefore.steps)[0]
         $statePath = Join-Path $run.runDirectory 'state.json'
         $state = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json -Depth 50
         $state.runtimeSeconds = 5400.0
@@ -6457,6 +6729,158 @@ Setext 결론
         Assert-Equal $result.status 'RESUMABLE_ERROR'
         Assert-Equal $result.code 'DF-RUN-TIME-LIMIT'
         Assert-Equal $control.calls 0
+        $stateAfter = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json -Depth 50
+        $graphAfter = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'steps.json') | ConvertFrom-Json -Depth 100
+        $firstAfter = @($graphAfter.steps)[0]
+        $eventTypes = @(Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ConvertFrom-Json | ForEach-Object type)
+        $budget = & $module { param($directory) Get-DuoForgeRuntimeBudgetInternal -RunDirectory $directory } $run.runDirectory
+        Assert-Equal $firstAfter.status 'FAILED'
+        Assert-Equal $firstAfter.attemptCount $firstBefore.attemptCount
+        Assert-Equal $firstAfter.totalAttemptCount $firstBefore.totalAttemptCount
+        Assert-Equal @($eventTypes | Where-Object { $_ -eq 'STAGE_STARTED' }).Count 0
+        Assert-Equal @($eventTypes | Where-Object { $_ -eq 'PROVIDER_CALL_STARTED' }).Count 0
+        Assert-Equal $stateAfter.runtimeSeconds 5400.0
+        Assert-Equal $budget.baseMaximumMinutes 90
+        Assert-Equal $budget.extensionMinutes 0
+        Assert-Equal $budget.effectiveMaximumMinutes 90
+    }
+
+    Test-Case '현재 저장 형태의 시간 제한 실패는 RETRY 뒤 한 번만 60분 연장되고 기존 시도와 사용시간을 보존한다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'runtime-extension-compat\input\brief.md')
+        $workspace = Join-Path $tempRoot 'runtime-extension-compat-results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $null = & $module { param($directory) Initialize-DuoForgeStageGraph -RunDirectory $directory } $run.runDirectory
+        $stepKey = & $module {
+            param($directory)
+            $statePath = Join-Path $directory 'state.json'
+            $stepsPath = Join-Path $directory 'steps.json'
+            $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $statePath)
+            $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $stepsPath)
+            $state.Remove('runtimeExtensionMinutes')
+            $state.Remove('runtimeExtensionGrantCount')
+            $state.runtimeSeconds = 5554.349
+            $state.status = 'RESUMABLE_ERROR'
+            $step = @($graph.steps)[0]
+            $step.status = 'FAILED'
+            $step.attemptCount = 3
+            $step.totalAttemptCount = 3
+            $step.manualRetryCount = 1
+            $step.retryMode = $null
+            $step.lastError = [ordered]@{ code = 'DF-RUN-TIME-LIMIT'; category = 'run-time-limit'; retryable = $false; attempt = 3; diagnosticId = 'diag-runtime-synthetic'; validationErrors = @() }
+            Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph
+            Write-DuoForgeJsonAtomic -Path $statePath -Value $state
+            return [string]$step.stepKey
+        } $run.runDirectory
+
+        $statePath = Join-Path $run.runDirectory 'state.json'
+        $stepsPath = Join-Path $run.runDirectory 'steps.json'
+        $stateHashBeforeRead = (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash
+        $stepsHashBeforeRead = (Get-FileHash -LiteralPath $stepsPath -Algorithm SHA256).Hash
+        $eligibility = & $module { param($directory) Get-DuoForgeFailedStageRetryEligibilityInternal -RunDirectory $directory } $run.runDirectory
+        Assert-True ([bool]$eligibility.eligible)
+        Assert-Equal $eligibility.recoveryKind 'runtime-extension'
+        Assert-Equal (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash $stateHashBeforeRead
+        Assert-Equal (Get-FileHash -LiteralPath $stepsPath -Algorithm SHA256).Hash $stepsHashBeforeRead
+
+        $prepared = & $module { param($runId, $root) Enable-DuoForgeFailedStageRetryInternal -RunId $runId -ResultsRoot $root } $run.runId $workspace
+        Assert-Equal $prepared.recoveryKind 'runtime-extension'
+        Assert-Equal $prepared.providerCalls 0
+        Assert-Equal $prepared.runtimeSeconds 5554.349
+        Assert-Equal $prepared.baseMaximumMinutes 90
+        Assert-Equal $prepared.extensionMinutes 60
+        Assert-Equal $prepared.effectiveMaximumMinutes 150
+        Assert-Equal $prepared.extensionGrantCount 1
+        Assert-Equal $prepared.attemptCount 3
+        Assert-Equal $prepared.totalAttemptCount 3
+        Assert-Equal $prepared.manualRetryCount 1
+
+        $preparedState = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json -Depth 50
+        $preparedGraph = Get-Content -Raw -LiteralPath $stepsPath | ConvertFrom-Json -Depth 100
+        $preparedStep = @($preparedGraph.steps | Where-Object stepKey -eq $stepKey)[0]
+        $preparedBudget = & $module { param($directory) Get-DuoForgeRuntimeBudgetInternal -RunDirectory $directory } $run.runDirectory
+        Assert-Equal $preparedState.runtimeSeconds 5554.349
+        Assert-Equal $preparedState.runtimeExtensionMinutes 60
+        Assert-Equal $preparedState.runtimeExtensionGrantCount 1
+        Assert-Equal $preparedStep.status 'PENDING'
+        Assert-Equal $preparedStep.retryMode 'MANUAL_RETRY'
+        Assert-Equal $preparedStep.manualRetryCount 1
+        Assert-Equal $preparedStep.attemptCount 3
+        Assert-Equal $preparedStep.totalAttemptCount 3
+        Assert-Equal $preparedBudget.effectiveMaximumMinutes 150
+        $extensionEvents = @(Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ConvertFrom-Json | Where-Object type -eq 'RUNTIME_EXTENSION_GRANTED')
+        Assert-Equal $extensionEvents.Count 1
+        Assert-Equal $extensionEvents[0].data.usedSeconds 5554.349
+        Assert-Equal $extensionEvents[0].data.baseMaximumMinutes 90
+        Assert-Equal $extensionEvents[0].data.extensionMinutes 60
+        Assert-Equal $extensionEvents[0].data.effectiveMaximumMinutes 150
+        Assert-Equal $extensionEvents[0].data.extensionGrantCount 1
+        Assert-Equal $extensionEvents[0].data.providerCalls 0
+
+        $treeBeforeSecond = @{
+            state = (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash
+            steps = (Get-FileHash -LiteralPath $stepsPath -Algorithm SHA256).Hash
+            events = (Get-FileHash -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') -Algorithm SHA256).Hash
+        }
+        Assert-ThrowsCode { & $module { param($runId, $root) Enable-DuoForgeFailedStageRetryInternal -RunId $runId -ResultsRoot $root } $run.runId $workspace } 'DF-RUN-RETRY-STATE'
+        Assert-Equal (Get-FileHash -LiteralPath $statePath -Algorithm SHA256).Hash $treeBeforeSecond.state
+        Assert-Equal (Get-FileHash -LiteralPath $stepsPath -Algorithm SHA256).Hash $treeBeforeSecond.steps
+        Assert-Equal (Get-FileHash -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') -Algorithm SHA256).Hash $treeBeforeSecond.events
+
+        $control = @{ calls = 0; attempts = @() }
+        $result = & $module {
+            param($directory, $counter)
+            $callback = {
+                param($step)
+                $counter.calls++
+                $counter.attempts = @($counter.attempts) + @([int]$step.attemptCount)
+                $exception = [InvalidOperationException]::new('합성 중단')
+                $exception.Data['DuoForgeCode'] = 'DF-SYNTHETIC-STOP'
+                throw $exception
+            }.GetNewClosure()
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory $control
+        Assert-Equal $control.calls 1
+        Assert-Equal $control.attempts[0] 4
+        Assert-Equal $result.code 'DF-SYNTHETIC-STOP'
+        $calledGraph = Get-Content -Raw -LiteralPath $stepsPath | ConvertFrom-Json -Depth 100
+        $calledStep = @($calledGraph.steps | Where-Object stepKey -eq $stepKey)[0]
+        Assert-Equal $calledStep.attemptCount 4
+        Assert-Equal $calledStep.totalAttemptCount 4
+        Assert-Equal $calledStep.manualRetryCount 1
+    }
+
+    Test-Case '연장된 150분 상한도 단계 시작과 시도 계수보다 먼저 실패 폐쇄한다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'runtime-extended-limit\input\brief.md')
+        $workspace = Join-Path $tempRoot 'runtime-extended-limit-results'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $null = & $module { param($directory) Initialize-DuoForgeStageGraph -RunDirectory $directory } $run.runDirectory
+        $statePath = Join-Path $run.runDirectory 'state.json'
+        $state = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json -Depth 50
+        $state.runtimeSeconds = 9000.0
+        $state.runtimeExtensionMinutes = 60
+        $state.runtimeExtensionGrantCount = 1
+        [System.IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json -Depth 50), [System.Text.UTF8Encoding]::new($false))
+        $graphBefore = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'steps.json') | ConvertFrom-Json -Depth 100
+        $firstBefore = @($graphBefore.steps)[0]
+        $control = @{ calls = 0 }
+        $result = & $module {
+            param($directory, $counter)
+            $callback = { param($step) $counter.calls++; New-DuoForgeFakeStageResult -Step $step }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory $control
+        $graphAfter = Get-Content -Raw -LiteralPath (Join-Path $run.runDirectory 'steps.json') | ConvertFrom-Json -Depth 100
+        $firstAfter = @($graphAfter.steps)[0]
+        $eventTypes = @(Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ConvertFrom-Json | ForEach-Object type)
+        Assert-Equal $result.code 'DF-RUN-TIME-LIMIT'
+        Assert-Equal $control.calls 0
+        Assert-Equal $firstAfter.attemptCount $firstBefore.attemptCount
+        Assert-Equal $firstAfter.totalAttemptCount $firstBefore.totalAttemptCount
+        Assert-Equal @($eventTypes | Where-Object { $_ -eq 'STAGE_STARTED' }).Count 0
+        Assert-Equal @($eventTypes | Where-Object { $_ -eq 'PROVIDER_CALL_STARTED' }).Count 0
     }
 
     Test-Case '완료 산출물 손상은 해당 단계와 의존 단계만 감사 보존 후 재실행한다' {

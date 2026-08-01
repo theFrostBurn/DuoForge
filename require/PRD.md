@@ -3,9 +3,9 @@
 | 항목 | 내용 |
 |---|---|
 | 제품명 | DuoForge |
-| 문서 버전 | 1.8 |
+| 문서 버전 | 1.10 |
 | 문서 상태 | 문서 모드 확장 Beta 구현 기준선 |
-| 작성일 | 2026-07-30 |
+| 작성일 | 2026-08-01 |
 | 대상 릴리스 | v1 MVP |
 | 기본 환경 | Windows 10/11, PowerShell 7 |
 | AI 실행 방식 | Codex CLI 및 Claude Code CLI의 로컬 비대화형 실행 |
@@ -717,6 +717,8 @@ Minor 쟁점만 남으면 경고와 함께 최종 산출물에 기록하고 완�
 - 의미상 같은 쟁점은 삭제하지 않고 대표 쟁점에 연결한다.
 - 상태 변경 이력을 덮어쓰지 않고 이벤트로 추가한다.
 - workflow-v2의 새 `issueKey`는 공급자·라운드·단계·대상을 포함한 안정적인 형식으로 실행 전체에서 고유해야 한다. `issueResponses`, `adoptions`, `openQuestions`는 같은 결과 또는 확정된 선행 산출물에 존재하는 키만 참조하고, 참조 대상 문서가 원래 쟁점의 A/B 대상과 다르면 저장 전에 실패 폐쇄한다.
+- 신규 `duoforge-stage-v4` 프롬프트는 현재 단계에서 가시적인 확정 선행 산출물과 현재 프롬프트의 사용자 근거에 명시 연결된 원장 쟁점만 사용해 `adoptableIssues(issueKey, targetDocumentId, proposedByProvider)`를 제공한다. 대상 문서가 정해진 단계는 그 대상의 쟁점만 포함하며, 새 쟁점은 공급자·라운드·단계·대상·`inputGeneration`을 포함한 `newIssueKeyPrefix`를 사용한다. `issues`에는 이번 호출의 새 쟁점만 기록하고 `adoptions.issueKey`는 카탈로그에 있는 키만 사용한다.
+- 필수 속성·자료형·열거값 같은 구조 오류는 `DF-STAGE-SCHEMA`, 이번 모델 응답의 중복·dangling·보존 키 재사용·쟁점/채택 대상 불일치는 `DF-STAGE-REFERENCE`, 저장된 단계 산출물과 쟁점 원장의 충돌은 `DF-ISSUE-REFERENCE-INTEGRITY`로 구분한다. 신규 검증 기록은 고정 코드, 배열 경로, 개수와 `A/B/merged` 같은 안전한 기대 열거값만 저장하며 실제 키와 응답 값은 상태·이벤트·화면·로그·진단에 남기지 않는다.
 - `openQuestions.options`에는 사용자가 실제로 선택할 수 있고 서로 다른 대안 두 개 또는 세 개만 허용한다. `recommendedOption`은 그중 하나의 문구 또는 대응하는 A/B/C 코드여야 하며, 필드 설명·자리 표시·권장안 유무 같은 메타 문구가 선택지에 들어오면 저장 전에 실패 폐쇄하고 형식 복구 대상으로 처리한다. `safeDefault`는 추가 선택지가 아니라 사용자가 답하기 전까지 지킬 안전 동작을 설명한다.
 - workflow-v2의 내부 issues/evidence/adoptions는 단계별 대상·출처 허용 행렬을 따르며 각 항목의 `targetDocumentId`와 `sourceDocumentId`는 단계 결과 상위의 `targetDocumentId`와 `sourceDocumentIds` 범위를 벗어날 수 없다.
 - `editorialDecisions`는 대상 문서별 편집 판단이며 `performedBy`는 해당 단계의 작업자를 나타낼 뿐 소유권을 뜻하지 않는다.
@@ -1144,6 +1146,7 @@ duoforge answer --run "run-20260727-001" --issue "D-004" --choice "1"
 duoforge defer --run "run-20260727-001" --issue "D-009"
 duoforge pause --run "run-20260727-001"
 duoforge retry-failed --run "run-20260727-001"
+duoforge repair-schema --run "run-20260727-001"
 duoforge resume --run "run-20260727-001"
 ```
 
@@ -1369,6 +1372,8 @@ claude -p `
 | FR-COM-086 | 영구 삭제는 정확한 `DELETE` 확인과 `CANCELLED` 상태, 실행 잠금, 결과 루트 직계 `run-*` 폴더, 저장 ID 일치와 연결 지점 부재를 확인한 뒤 실행 폴더만 삭제한다. 확인 이탈과 검증 실패는 파일 변경 0건이어야 한다. | P0 |
 | FR-COM-087 | 작업 복원은 정확한 `RESTORE` 확인과 `CANCELLED` 상태를 요구한다. 일반 실행은 `PAUSED_USER`로 복원하고 실패 상태에서 포기한 실행은 원래 실패 상태로 복원해 재시도 제한 우회를 막는다. `abandonedFromStatus`를 보존하며 복원만으로 공급자 호출이나 재개를 시작하지 않는다. | P0 |
 | FR-COM-088 | `FAILED_STAGE`와 `SOURCE_DRIFT`는 홈의 전용 실패 목록에서 조회할 수 있다. 재시도 가능한 단일 `FAILED_STAGE`는 메뉴 또는 `retry-failed` CLI의 정확한 `RETRY` 확인으로 현재 입력 세대에서 추가 1회만 준비하며, 확인 전 이탈은 변경·호출 0건이고 확인 뒤에도 별도 `LIVE` 전까지 공급자 호출 0건이다. | P0 |
+| FR-COM-089 | 마지막 단계 오류가 정확히 `DF-RUN-TIME-LIMIT`인 실행은 메뉴 또는 대화형 `retry-failed` CLI의 정확한 `RETRY` 확인 뒤 실행당 한 번만 총 실행시간을 60분 연장한다. 기본 90분과 누적 `runtimeSeconds`는 보존하고 유효 상한만 150분으로 계산하며, 확인 전 이탈과 두 번째 연장은 상태·단계·이벤트·호출을 만들지 않는다. 연장 뒤에도 실제 공급자 호출에는 별도의 정확한 `LIVE` 확인이 필요하고 다른 오류의 재시도 계약은 바꾸지 않는다. | P0 |
+| FR-COM-090 | 복구 가능한 단일 `DF-STAGE-REFERENCE` 또는 안전하게 호환 분류된 기존 참조형 `DF-STAGE-SCHEMA`는 메뉴나 `repair-schema` CLI의 정확한 `REPAIR` 확인으로 실행당 한 번만 공급자 0-call 복구를 준비한다. 준비 시 `inputGeneration`을 증가시키고 현재 세대 `attemptCount`만 0으로 초기화하며 `totalAttemptCount`, `manualRetryCount`, 누적 실행시간과 시간 연장 기록, 완료 산출물은 보존한다. 취소·오타·비대화형 무확인·두 번째 복구는 변경과 호출 0건이며 실제 호출에는 다시 정확한 `LIVE` 확인이 필요하다. | P0 |
 
 ### 16.2 모드별 요구사항
 
@@ -1413,7 +1418,8 @@ claude -p `
 - `workflow-v2`는 `inputs.documentA/documentB`, `roles.documents.A/B`, `targetDocumentId`, `performedBy`와 신규 단계 계약을 사용한다.
 - 레거시 필드는 읽기 경계에서만 정규형으로 변환하며 저장된 매니페스트, 단계 결과, 쟁점 원장과 완료 산출물을 재작성하지 않는다.
 - 단계 그래프 생성, 추가 라운드, 사용자 결정 변경에 따른 무효화와 선택 재실행은 `workflowVersion`으로 분기한다.
-- 기존 `duoforge-stage-v2` 프롬프트 계약 실행은 같은 계약으로 재개한다. 신규 실행은 `duoforge-stage-v3`처럼 구분된 계약을 사용하고 기존 실행을 일괄 승격하지 않는다.
+- 기존 `duoforge-stage-v2`와 `duoforge-stage-v3` 프롬프트 계약 실행은 저장된 계약 세대를 유지해 재개하며 기존 실행을 일괄 승격하지 않는다.
+- 신규 실행은 쟁점 참조 카탈로그가 포함된 `duoforge-stage-v4`를 사용한다. 기존 `duoforge-stage-v3` 실행은 묵시적으로 승격하지 않으며, 복구 가능한 참조 실패에 대한 정확한 `REPAIR` 트랜잭션에서만 state와 manifest의 프롬프트 계약을 함께 v4로 전환한다.
 - 구조화 결과 스키마도 워크플로 버전별로 선택한다. 레거시 스키마를 신규 필드 의미로 묵시적으로 해석하지 않는다.
 - 신규 저장 세대는 `manifest` schema 4, `state` schema 2, `inventory` schema 2, `issue ledger` schema 2와 `steps` schema 2를 하나의 `duoforge-run-v2` 계약으로 묶는다. 어느 한 파일만 다른 세대이면 공급자 호출 전에 실패 폐쇄한다.
 - 기존 `workflow-v1` 저장 세대와 초기 `workflow-v2` manifest schema 3 세대는 각자의 state/inventory/ledger/steps 버전 조합으로만 읽고 신규 세대로 부분 승격하거나 재작성하지 않는다.
@@ -1446,7 +1452,7 @@ claude -p `
 {
   "schemaVersion": 2,
   "workflowVersion": "workflow-v2",
-  "promptContractVersion": "duoforge-stage-v3",
+  "promptContractVersion": "duoforge-stage-v4",
   "runId": "run-20260727-001",
   "mode": "dual-document",
   "inputs": {
@@ -1476,6 +1482,8 @@ claude -p `
 - 각 단계의 입력 해시, 출력 경로와 완료 상태를 기록한다.
 - 단계는 `STARTED → OUTPUT_CAPTURED → VALIDATED → COMMITTED`로 전이하며 `stepKey`, `inputHash`, `artifactHash`, `attemptId`를 기록한다.
 - 단계의 `attemptCount`는 현재 입력 세대에서 사용한 시도 수, `totalAttemptCount`는 모든 입력 세대에 걸친 실제 공급자 호출 누계다. 사용자 결정·제약·추가 자료로 입력 세대가 바뀌면 `attemptCount`를 0으로 초기화하고 입력 세대를 증가시키되 `totalAttemptCount`는 감사 기록으로 보존한다. 이 필드가 없는 기존 저장 실행은 읽기 경계에서 기존 `attemptCount` 값으로만 정규화하며 호환 실행을 즉시 재작성하지 않는다.
+- `DF-RUN-TIME-LIMIT` 저장 실행은 `RESUMABLE_ERROR`, 단일 `FAILED` 단계와 `lastError.code` 조합으로도 읽기 경계에서 시간 제한 실패로 식별한다. `runtimeExtensionMinutes`와 `runtimeExtensionGrantCount`가 없는 저장 실행은 미연장으로 해석하되 호환 읽기만으로 원본을 다시 쓰지 않는다.
+- 총 실행시간 연장은 `runtimeExtensionMinutes=60`, `runtimeExtensionGrantCount=1`을 별도 저장하고 `runtimeSeconds`를 초기화하거나 줄이지 않는다. 이미 수동 추가 시도를 준비한 단계가 시간 한도에 막혀도 연장 횟수만 소비하며 `manualRetryCount`를 다시 증가시키지 않는다.
 - `resume`은 마지막 완료 단계 다음부터 시작한다. 답하지 않은 질문이 남아 있으면 명시적 라이브 재개도 공급자 호출 전에 차단하고, 현재 관문의 질문을 모두 답한 뒤에만 검토를 시작한다.
 - 성공한 단계의 출력이 존재하고 해시가 맞으면 다시 호출하지 않는다.
 - 출력이 없거나 해시·스키마가 손상되면 원인을 분리해 기록하고 해당 단계와 의존 단계만 감사 이력으로 보존한 뒤 재실행 대상으로 만든다. 쟁점 원장과 단계 산출물의 참조 무결성 충돌은 산출물 손상으로 오인해 무효화하지 않고 `DF-ISSUE-REFERENCE-INTEGRITY`로 실패 폐쇄한다.
@@ -1579,6 +1587,8 @@ claude -p `
 }
 ```
 
+`maxWallClockMinutes=90`은 실행의 기본 감사 상한으로 보존한다. 정확한 시간 제한 복구 승인이 한 번 기록된 실행만 별도 상태의 60분을 더해 유효 총 상한을 150분으로 계산한다.
+
 ## 19. 비기능 요구사항
 
 ### 19.1 안전과 보안
@@ -1616,6 +1626,7 @@ claude -p `
 - 모델 호출 전에 예상 최대 호출 수를 표시한다.
 - 실행 계획의 예상 최대 호출 수에는 기본 호출, 허용된 재시도와 형식 복구 호출을 모두 포함한다.
 - 최대 라운드 및 재시도 상한을 코드 수준에서 강제한다.
+- 누적 총 실행시간 한도는 단계 상태를 `STARTED`로 바꾸고 `attemptCount`·`totalAttemptCount`를 증가시키기 전에 검사한다. 한도 차단만 발생한 경우 `STAGE_STARTED`, `PROVIDER_CALL_STARTED`와 두 계수는 모두 증가하지 않는다.
 - 계획기는 입력 배치, 최초 분석, 교차 비평, 반박, 수정·최종화와 단계별 1회 재시도를 모두 포함한 공급자별 최악 호출 수를 계산한다.
 - 예상 실행 계획이 공급자별 호출 수, 호출 입력량, 문맥 사용률 또는 전체 실행 시간 상한을 넘으면 첫 모델 호출 전에 범위를 줄이도록 요청한다. 사용자가 범위를 줄이지 않으면 예측 커버리지를 보여주고 `COMPLETED_PARTIAL` 결과에 명시적으로 동의한 경우에만 부분 분석을 시작한다.
 - 의미 배치의 봉투 오버헤드는 `CORE`와 분리해 예약하고, 완성된 단계 프롬프트가 호출당 상한 안에 있는지 실행 생성 시점과 소비 시점에 모두 검증한다.
@@ -1776,6 +1787,8 @@ claude -p `
 38. `72×20`, `80×24`, `100×30`, `120×32`의 질문·메뉴·CLI 보고서·LIVE·오류 대표 화면은 색상을 제거해도 섹션과 상태가 구분되고, 모든 긴 필드·목록·명령의 이어진 줄이 소속 본문 시작 열에 맞으며 최대 폭이 `width - 1`을 넘지 않는다.
 39. 포기한 일반 작업은 정확한 `RESTORE`에서만 `PAUSED_USER`로 복원되고, 실패 상태에서 포기한 작업은 원래 실패 상태로 돌아가 재시도 제한을 우회하지 않는다. 취소·오타·리디렉션·비대화형 무확인은 상태·이벤트·파일과 공급자 호출을 만들지 않는다.
 40. `FAILED_STAGE`와 `SOURCE_DRIFT`가 전용 실패 목록에 표시된다. 재시도 가능한 단일 실패는 정확한 `RETRY`에서만 추가 1회를 준비하고 기존 시도 수·진단·완료 산출물을 보존하며, 별도 `LIVE` 전까지 공급자 호출은 0건이다.
+41. 합성 `RESUMABLE_ERROR + DF-RUN-TIME-LIMIT` 저장 실행은 실패 목록과 60분 연장 동선에 나타난다. 정확한 첫 `RETRY`만 기본 90분과 누적 사용시간을 보존한 채 유효 상한 150분을 만들고, 취소·오타·비대화형 무확인·두 번째 연장과 다른 오류는 연장 상태를 만들지 않는다.
+42. 90분 또는 승인 뒤 150분 한도에 도달한 단계는 주입 공급자 invoker, 단계 시작 이벤트와 두 시도 계수를 증가시키지 않는다. 연장 뒤 별도 `LIVE` 경계를 통과해 주입 invoker에 진입할 때만 해당 호출의 두 계수가 한 번 증가한다.
 
 ### 22.4 P0 안전 출시 게이트
 
