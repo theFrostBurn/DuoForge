@@ -13,6 +13,7 @@ function Invoke-DuoForgeCliCoreInternal {
         [scriptblock]$DeleteInvoker,
         [scriptblock]$RetryInvoker,
         [scriptblock]$RepairInvoker,
+        [scriptblock]$PromptRepairInvoker,
         [scriptblock]$InteractiveHostProbe,
         [scriptblock]$InteractiveHomeInvoker,
         [scriptblock]$ConfirmationKeyReader,
@@ -355,6 +356,32 @@ function Invoke-DuoForgeCliCoreInternal {
             Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '쟁점 참조 복구를 준비했습니다.' -Message '아직 AI를 호출하지 않았습니다.' -NextAction '내용을 확인한 뒤 resume --live에서 별도의 LIVE 확인을 진행해 주세요.' -Layout $layout) -Layout $layout
             return $result
         }
+        'repair-prompt' {
+            $null = Assert-DuoForgeCliOptionsInternal -Parsed $parsed -AllowedNames @('run', 'workspace')
+            $runId = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'run' -Default '')
+            if ([string]::IsNullOrWhiteSpace($runId)) { throw (New-DuoForgeException -Code 'DF-CLI-RUN' -Message 'repair-prompt에는 --run <실행 ID>가 필요합니다.') }
+            $workspace = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')
+            $run = Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace
+            $eligibility = Get-DuoForgePromptRepairEligibilityInternal -RunDirectory ([string]$run.runDirectory)
+            if (-not [bool]$eligibility.eligible) { throw (New-DuoForgeException -Code 'DF-PROMPT-REPAIR-UNAVAILABLE' -Message ([string]$eligibility.reason)) }
+            if (-not (& $isInteractive)) {
+                throw (New-DuoForgeException -Code 'DF-PROMPT-REPAIR-CONFIRM' -Message '입력 크기 복구는 대화형 화면에서 정확한 REPAIR 확인이 필요합니다.')
+            }
+            $layout = Get-DuoForgeDisplayLayoutInternal
+            $rows = [System.Collections.Generic.List[object]]::new()
+            foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '최종 확인 입력을 한 번 조정할 수 있게 준비합니다.' -Message '모든 선행 결과의 무결성은 확인하되, 대상 최신 문서와 관련 기록만 다음 요청에 넣습니다. 이 확인만으로 AI를 호출하지 않으며 실제 계속하기에는 별도의 LIVE 확인이 필요합니다.' -NextAction '계속하려면 확인어 REPAIR를 입력해 주세요.' -Layout $layout)) { $rows.Add($row) }
+            foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '실패한 작업' -Value (Get-DuoForgeDisplayCheckpointLabelInternal -StepKey ([string]$eligibility.step.stepKey) -RunDirectory ([string]$run.runDirectory)) -Layout $layout -KeyWidth 14)) { $rows.Add($row) }
+            foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '조정 후 크기' -Value ("{0:N0} / {1:N0} 바이트" -f [long]$eligibility.promptBytes, [long]$eligibility.maximumInputBytes) -Layout $layout -KeyWidth 14 -Role 'meta')) { $rows.Add($row) }
+            Write-DuoForgeDisplayRowsInternal -Rows @($rows) -Layout $layout
+            $confirmation = Read-DuoForgeExactConfirmationInternal -Token 'REPAIR' -Prompt '입력 크기 복구를 준비하려면 REPAIR를 입력하세요' -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -InputReader $InputReader -KeyReader $ConfirmationKeyReader -FrameWriter $ConfirmationFrameWriter -CapabilityProbe $ConfirmationCapabilityProbe
+            if ([string]$confirmation.action -ne 'submit') {
+                Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '입력 크기 복구를 준비하지 않았습니다.' -Message '작업 상태와 저장 파일을 변경하지 않았고 AI도 호출하지 않았습니다.' -Layout $layout) -Layout $layout
+                return
+            }
+            $result = if ($null -ne $PromptRepairInvoker) { & $PromptRepairInvoker $runId $workspace } else { Enable-DuoForgePromptRepairInternal -RunId $runId -ResultsRoot $workspace }
+            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '입력 크기 복구를 준비했습니다.' -Message '아직 AI를 호출하지 않았습니다.' -NextAction '내용을 확인한 뒤 resume --live에서 별도의 LIVE 확인을 진행해 주세요.' -Layout $layout) -Layout $layout
+            return $result
+        }
         'delete' {
             $null = Assert-DuoForgeCliOptionsInternal -Parsed $parsed -AllowedNames @('run', 'workspace', 'confirm-delete')
             $runId = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'run' -Default '')
@@ -386,23 +413,28 @@ function Invoke-DuoForgeCliCoreInternal {
             $workspace = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')
             $run = Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace
             $budget = Get-DuoForgeRemainingCallBudget -RunDirectory ([string]$run.runDirectory)
+            $continuation = Get-DuoForgeContinuationEligibilityInternal -RunDirectory ([string]$run.runDirectory)
             if (-not [bool](Get-DuoForgeCliOption -Parsed $parsed -Name 'live' -Default $false)) {
                 $layout = Get-DuoForgeDisplayLayoutInternal
                 $displayRows = [System.Collections.Generic.List[object]]::new()
-                foreach ($row in @(New-DuoForgePageHeaderRowsInternal -Title '작업 재개 안내' -Tag (Get-DuoForgeDisplayStateLabelInternal -Status ([string]$run.state.status)) -Layout $layout)) { $displayRows.Add($row) }
+                foreach ($row in @(New-DuoForgePageHeaderRowsInternal -Title '작업 재개 안내' -Tag (Get-DuoForgeDisplayStateLabelInternal -Status ([string]$run.state.status) -FailureCode ([string]$continuation.failureCode)) -Layout $layout)) { $displayRows.Add($row) }
                 foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '현재 상태' -Body '' -Layout $layout -First)) { $displayRows.Add($row) }
                 $nextAction = '상태를 확인한 뒤 계속할 수 있습니다.'
                 if ([string]$run.state.status -eq 'AWAITING_EVIDENCE') { $nextAction = '요청된 Markdown 자료를 evidence 명령으로 추가한 뒤 계속해 주세요.' }
                 elseif ([string]$run.state.status -eq 'PAUSED_QUOTA') { $nextAction = '사용 한도가 회복되고 구독 로그인이 유효한 뒤 계속해 주세요. API 과금 방식으로 자동 전환하지 않습니다.' }
                 elseif ([string]$run.state.status -eq 'BLOCKED_PREFLIGHT') { $nextAction = 'doctor와 Codex·Claude 구독 로그인을 다시 확인한 뒤 계속해 주세요.' }
                 elseif ([string]$run.state.status -eq 'PAUSED_USER') { $nextAction = '마지막 완료 지점부터 계속할 수 있습니다.' }
-                foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind info -Title (Get-DuoForgeDisplayStateLabelInternal -Status ([string]$run.state.status)) -NextAction $nextAction -Layout $layout)) { $displayRows.Add($row) }
+                elseif (-not [bool]$continuation.eligible -and [string]$continuation.recoveryKind -eq 'prompt-size-repair') { $nextAction = 'repair-prompt 명령에서 입력 크기 조정을 준비한 뒤 다시 확인해 주세요.' }
+                foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind info -Title (Get-DuoForgeDisplayStateLabelInternal -Status ([string]$run.state.status) -FailureCode ([string]$continuation.failureCode)) -NextAction $nextAction -Layout $layout)) { $displayRows.Add($row) }
                 foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '계속하면 실행되는 AI 작업' -Body '' -Layout $layout)) { $displayRows.Add($row) }
                 foreach ($row in @(New-DuoForgeFieldRowsInternal -Label 'Codex' -Value (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Codex' -ProviderBudget $budget.providers.codex) -Layout $layout -KeyWidth 8 -PreserveParagraphs)) { $displayRows.Add($row) }
                 foreach ($row in @(New-DuoForgeFieldRowsInternal -Label 'Claude' -Value (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Claude' -ProviderBudget $budget.providers.claude) -Layout $layout -KeyWidth 8 -PreserveParagraphs)) { $displayRows.Add($row) }
                 foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '아직 AI 작업을 시작하지 않았습니다.' -NextAction '문서를 전송하고 AI 작업을 시작하려면 --live를 추가해 다시 실행해 주세요.' -Layout $layout)) { $displayRows.Add($row) }
                 Write-DuoForgeDisplayRowsInternal -Rows @($displayRows) -Layout $layout
                 return
+            }
+            if (-not [bool]$continuation.eligible) {
+                throw (New-DuoForgeException -Code 'DF-RUN-RECOVERY-REQUIRED' -Message ([string]$continuation.reason))
             }
             if ([string]$run.state.status -eq 'AWAITING_EVIDENCE') {
                 throw (New-DuoForgeException -Code 'DF-EVIDENCE-REQUIRED' -Message '요청된 자료를 먼저 추가해야 AI 작업을 계속할 수 있습니다.')

@@ -628,7 +628,8 @@ function New-DuoForgeContextBatchPlanInternal {
     $totalBytes = 0L
     foreach ($source in $sources) { $totalBytes += [long]$source.bytes }
     $maxInputBytes = [long]$Config.limits.maxInputBytesPerCall
-    $directThreshold = [long][Math]::Floor($maxInputBytes * 0.55)
+    # 원문만으로 호출 한도의 30%를 넘으면 이후 계보·결정·지시문을 위한 공간을 예약한다.
+    $directThreshold = [long][Math]::Floor($maxInputBytes * 0.30)
     $targetCoreBytes = [long][Math]::Max(4096, [Math]::Floor($maxInputBytes * 0.20))
     $maximumPackBytes = [long][Math]::Max(16384, [Math]::Floor($maxInputBytes * 0.62))
     $bridgeBytesPerSide = [long][Math]::Max(512, [Math]::Min(2048, [Math]::Floor($maxInputBytes * 0.02)))

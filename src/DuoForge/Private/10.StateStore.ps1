@@ -520,7 +520,9 @@ function Assert-DuoForgeStoredContextPlanContractInternal {
         $originalSnapshots = @($Inventory.snapshots | Where-Object { [string]$_.snapshotName -match '^S\d{6}\.md$' })
         $originalBytes = 0L
         foreach ($snapshot in $originalSnapshots) { $originalBytes += [long]$snapshot.bytes }
-        $shouldBeEnabled = $recordedMaximum -gt 0 -and $originalBytes -gt [long][Math]::Floor($recordedMaximum * 0.55)
+        $promptTemplateVersion = [string](Get-DuoForgeObjectValue -Object $Manifest -Name 'promptTemplateVersion' -Default '')
+        $directThresholdRatio = if ($promptTemplateVersion -eq 'duoforge-stage-v5') { 0.30 } else { 0.55 }
+        $shouldBeEnabled = $recordedMaximum -gt 0 -and $originalBytes -gt [long][Math]::Floor($recordedMaximum * $directThresholdRatio)
         if ($shouldBeEnabled -or $recordedMaximum -le 0 -or
             [int]$plan.totalFiles -ne $originalSnapshots.Count -or [long]$plan.totalBytes -ne $originalBytes -or
             [int]$plan.requiredBatchCount -ne 0 -or [long]$plan.selectedBytes -ne $originalBytes -or [long]$plan.coreBytes -ne $originalBytes -or
@@ -999,9 +1001,12 @@ function Assert-DuoForgeRunStorageContractInternal {
     $statePromptContract = [string](Get-DuoForgeObjectValue -Object $state -Name 'promptContractVersion' -Default '')
     if ($stateSchema -ne 2 -or
         [string](Get-DuoForgeObjectValue -Object $state -Name 'workflowVersion' -Default '') -ne 'workflow-v2' -or
-        $manifestPromptContract -notin @('duoforge-stage-v3', 'duoforge-stage-v4') -or
+        $manifestPromptContract -notin @('duoforge-stage-v3', 'duoforge-stage-v4', 'duoforge-stage-v5') -or
         $statePromptContract -cne $manifestPromptContract) {
         & $fail 'state와 manifest의 workflow-v2 프롬프트 계약 세대가 일치하지 않습니다.'
+    }
+    if ($manifestPromptContract -eq 'duoforge-stage-v5' -and [string](Get-DuoForgeObjectValue -Object $manifest -Name 'artifactProjectionPolicy' -Default '') -ne 'stage-relevance-v1') {
+        & $fail 'duoforge-stage-v5 manifest의 단계 관련성 투영 정책이 올바르지 않습니다.'
     }
     if ($inventorySchema -ne 2 -or [string](Get-DuoForgeObjectValue -Object $inventory -Name 'workflowVersion' -Default '') -ne 'workflow-v2') { & $fail 'inventory 계약이 workflow-v2/schemaVersion 2가 아닙니다.' }
     if ($ledgerSchema -ne 2 -or [string](Get-DuoForgeObjectValue -Object $ledger -Name 'workflowVersion' -Default '') -ne 'workflow-v2' -or [int](Get-DuoForgeObjectValue -Object $ledger -Name 'issueSchemaVersion' -Default 0) -ne 2) { & $fail 'ledger 계약이 workflow-v2/schemaVersion 2/issueSchemaVersion 2가 아닙니다.' }
@@ -1104,7 +1109,7 @@ function New-DuoForgeRunInternal {
         $state = [ordered]@{
             schemaVersion = 2
             workflowVersion = 'workflow-v2'
-            promptContractVersion = 'duoforge-stage-v4'
+            promptContractVersion = 'duoforge-stage-v5'
             runId = $runId
             mode = $request.mode
             documentType = $request.documentType
@@ -1124,6 +1129,8 @@ function New-DuoForgeRunInternal {
             runtimeExtensionGrantCount = 0
             schemaRepairGrantCount = 0
             schemaRepairPreparedAt = $null
+            promptRepairGrantCount = 0
+            promptRepairPreparedAt = $null
             createdAt = $now
             updatedAt = $now
         }
@@ -1177,8 +1184,9 @@ function New-DuoForgeRunInternal {
             pauseAfterRound = [bool](Get-DuoForgeObjectValue -Object $request -Name 'pauseAfterRound' -Default $false)
             allowPartial = [bool](Get-DuoForgeObjectValue -Object $request -Name 'allowPartial' -Default $false)
             subscriptionOnly = $true
-            promptTemplateVersion = 'duoforge-stage-v4'
+            promptTemplateVersion = 'duoforge-stage-v5'
             artifactVisibilityPolicy = 'transitive-dependencies-v1'
+            artifactProjectionPolicy = 'stage-relevance-v1'
             providers = [ordered]@{
                 codex = [ordered]@{ version = $ValidationResult.doctor.providers.codex.version; authType = $ValidationResult.doctor.providers.codex.authType }
                 claude = [ordered]@{ version = $ValidationResult.doctor.providers.claude.version; authType = $ValidationResult.doctor.providers.claude.authType }

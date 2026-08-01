@@ -211,9 +211,12 @@ function Get-DuoForgeProgressRecordTargetLabelInternal {
 
 function Get-DuoForgeProgressStateLabelInternal {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$Status)
+    param(
+        [Parameter(Mandatory)][string]$Status,
+        [AllowEmptyString()][string]$FailureCode = ''
+    )
 
-    return Get-DuoForgeDisplayStateLabelInternal -Status $Status
+    return Get-DuoForgeDisplayStateLabelInternal -Status $Status -FailureCode $FailureCode
 }
 
 function Get-DuoForgeProgressRetryLabelInternal {
@@ -454,6 +457,11 @@ function Get-DuoForgeProgressSnapshotInternal {
     $latest = @($recentCommitted | Select-Object -Last 1)
 
     $activeSteps = @($graph.steps | Where-Object { [string]$_.status -eq 'STARTED' })
+    $failedSteps = @($graph.steps | Where-Object { [string]$_.status -eq 'FAILED' })
+    $failedStep = if ($failedSteps.Count -gt 0) { $failedSteps[0] } else { $null }
+    $failedError = if ($null -ne $failedStep) { Get-DuoForgeObjectValue -Object $failedStep -Name 'lastError' } else { $null }
+    $failureCode = [string](Get-DuoForgeObjectValue -Object $failedError -Name 'code' -Default '')
+    $continuation = Get-DuoForgeContinuationEligibilityInternal -RunDirectory $RunDirectory
     $committed = @($graph.steps | Where-Object { [string]$_.status -eq 'COMMITTED' }).Count
     $ledger = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'issues.json')
     return [ordered]@{
@@ -463,7 +471,11 @@ function Get-DuoForgeProgressSnapshotInternal {
         mode = [string]$state.mode
         modeLabel = Get-DuoForgeProgressModeLabelInternal -Mode ([string]$state.mode)
         status = [string]$state.status
-        statusLabel = Get-DuoForgeProgressStateLabelInternal -Status ([string]$state.status)
+        statusLabel = Get-DuoForgeProgressStateLabelInternal -Status ([string]$state.status) -FailureCode $failureCode
+        failureCode = $failureCode
+        failureRetryable = if ($null -ne $failedError) { [bool](Get-DuoForgeObjectValue -Object $failedError -Name 'retryable' -Default $false) } else { $null }
+        failureRetryMode = if ($null -ne $failedStep) { [string](Get-DuoForgeObjectValue -Object $failedStep -Name 'retryMode' -Default '') } else { '' }
+        continuationAllowed = [bool]$continuation.eligible
         round = [int]$state.round
         maxRounds = [int]$state.maxRounds
         steps = @($graph.steps)

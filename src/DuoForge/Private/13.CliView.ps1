@@ -30,6 +30,7 @@ function Write-DuoForgeHelp {
         'duoforge restore --run <실행 ID> [--workspace <폴더>] [--confirm-restore]',
         'duoforge retry-failed --run <실행 ID> [--workspace <폴더>] [--confirm-retry]',
         'duoforge repair-schema --run <실행 ID> [--workspace <폴더>]',
+        'duoforge repair-prompt --run <실행 ID> [--workspace <폴더>]',
         'duoforge delete --run <실행 ID> [--workspace <폴더>] [--confirm-delete]'
     ) -Layout $layout)
     & $append @(New-DuoForgeSectionRowsInternal -Title '분석 깊이' -Body '' -Layout $layout)

@@ -71,7 +71,7 @@ $events = @($eventText -split "`r?`n" | Where-Object { -not [string]::IsNullOrWh
 
 Assert-LiveInvariant ([string]$manifest.mode -ceq $Mode) 'MODE_MISMATCH'
 Assert-LiveInvariant ([string]$manifest.workflowVersion -ceq 'workflow-v2') 'WORKFLOW_VERSION'
-Assert-LiveInvariant ([string]$manifest.promptTemplateVersion -ceq 'duoforge-stage-v4') 'PROMPT_CONTRACT'
+Assert-LiveInvariant ([string]$manifest.promptTemplateVersion -ceq 'duoforge-stage-v5') 'PROMPT_CONTRACT'
 $manifestText = $manifest | ConvertTo-Json -Depth 100 -Compress
 Assert-LiveInvariant ($manifestText -notmatch '(?i)codexDocument|claudeDocument') 'LEGACY_DOCUMENT_FIELDS'
 Assert-LiveInvariant ($null -eq $inventory.roles.PSObject.Properties['codex']) 'LEGACY_CODEX_ROLE'

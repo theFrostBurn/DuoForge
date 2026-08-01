@@ -104,6 +104,9 @@ function Get-DuoForgeDisplayStateLabelInternal {
     if ($Status -eq 'RESUMABLE_ERROR' -and $FailureCode -ceq 'DF-RUN-TIME-LIMIT') {
         return '총 실행시간 한도 도달 · 연장 준비 필요'
     }
+    if ($Status -eq 'RESUMABLE_ERROR' -and $FailureCode -ceq 'DF-PROMPT-SIZE-LIMIT') {
+        return '입력 크기 조정 필요'
+    }
 
     switch ($Status) {
         'CREATED' { '작업 생성' }

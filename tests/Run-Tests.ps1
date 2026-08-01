@@ -1,7 +1,7 @@
 #requires -Version 7.0
 
 [CmdletBinding()]
-param()
+param([string]$NameFilter = '')
 
 $ErrorActionPreference = 'Stop'
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -80,6 +80,7 @@ function Assert-RegularArtifactHistoryFile {
 
 function Test-Case {
     param([string]$Name, [scriptblock]$Body)
+    if (-not [string]::IsNullOrWhiteSpace($NameFilter) -and $Name -notlike "*$NameFilter*") { return }
     try {
         & $Body
         $script:Passed++
@@ -1672,13 +1673,13 @@ try {
         Assert-Equal $run.manifest.schemaVersion 4
         Assert-Equal $run.manifest.workflowVersion 'workflow-v2'
         Assert-Equal $run.manifest.storageContractVersion 'duoforge-run-v2'
-        Assert-Equal $run.manifest.promptTemplateVersion 'duoforge-stage-v4'
+        Assert-Equal $run.manifest.promptTemplateVersion 'duoforge-stage-v5'
         $inventory = Get-Content -LiteralPath (Join-Path $run.runDirectory 'inputs\inventory.json') -Raw | ConvertFrom-Json -Depth 50
         $state = Get-Content -LiteralPath (Join-Path $run.runDirectory 'state.json') -Raw | ConvertFrom-Json -Depth 50
         $ledger = Get-Content -LiteralPath (Join-Path $run.runDirectory 'issues.json') -Raw | ConvertFrom-Json -Depth 50
         Assert-Equal $state.schemaVersion 2
         Assert-Equal $state.workflowVersion 'workflow-v2'
-        Assert-Equal $state.promptContractVersion 'duoforge-stage-v4'
+        Assert-Equal $state.promptContractVersion 'duoforge-stage-v5'
         Assert-Equal $inventory.schemaVersion 2
         Assert-Equal $inventory.workflowVersion 'workflow-v2'
         Assert-Equal $ledger.schemaVersion 2
@@ -1925,6 +1926,121 @@ try {
             }
         }
         finally { [System.IO.File]::WriteAllBytes($planPath, $planFileBytes) }
+    }
+
+    Test-Case '기존 v4 비활성 schema 2 계획은 55퍼센트 직접 입력 경계를 보존한다' {
+        $legacyText = "# 기존 v4 직접 입력`n`n" + ('v' * 24000)
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'context-storage-v4-direct\input\brief.md') -Text $legacyText
+        $workspace = Join-Path $tempRoot 'context-storage-v4-direct-results'
+        $config = New-TestConfig -ResultsRoot $workspace
+        $config.limits.maxInputBytesPerCall = 65536
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config $config
+        Assert-True ([bool]$validation.valid) ($validation.errors | ConvertTo-Json -Depth 20 -Compress)
+        Assert-True ([bool]$validation.contextPlan.enabled) '신규 v5 기준에서는 30퍼센트를 넘는 입력이 문맥 배치여야 합니다.'
+        $run = New-DuoForgeRun -ValidationResult $validation
+
+        $planPath = Join-Path $run.runDirectory 'inputs\context-plan.json'
+        $manifestPath = Join-Path $run.runDirectory 'manifest.json'
+        $statePath = Join-Path $run.runDirectory 'state.json'
+        $plan = Get-Content -LiteralPath $planPath -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+        $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+        Assert-True ([long]$plan.totalBytes -gt [long][Math]::Floor([long]$plan.maxInputBytesPerCall * 0.30))
+        Assert-True ([long]$plan.totalBytes -le [long][Math]::Floor([long]$plan.maxInputBytesPerCall * 0.55))
+
+        $plan.enabled = $false
+        $plan.batches = @()
+        $plan.selectedBatchCount = 0
+        $plan.requiredBatchCount = 0
+        $plan.selectedBytes = [long]$plan.totalBytes
+        $plan.coreBytes = [long]$plan.totalBytes
+        $plan.overlapBytes = 0L
+        $plan.transmittedBytes = 0L
+        $plan.requiresPartialConsent = $false
+        $plan.completionStatus = 'COMPLETED'
+        $plan.actualFileCoveragePercent = 100.0
+        $plan.actualByteCoveragePercent = 100.0
+        $plan.sourceBlueprints = @()
+        $plan.candidateBlueprints = @()
+        $plan.selectedCandidateIds = @()
+        $plan.sources = @()
+        $plan.sourceCoverage = @()
+        $plan.documentCoverage = @()
+        $plan.omittedSectionIds = @()
+        $plan.omittedBytes = 0L
+        $manifest.promptTemplateVersion = 'duoforge-stage-v4'
+        $manifest.Remove('artifactProjectionPolicy')
+        $manifest.contextPlan = $plan
+        $manifest.executionPlan = & $module {
+            param($mode, $maxRounds, $firstSynthesizer)
+            Get-DuoForgeExecutionPlanInternal -Mode $mode -MaxRounds $maxRounds -FirstSynthesizer $firstSynthesizer -ContextBatchCount 0 -WorkflowVersion workflow-v2
+        } ([string]$manifest.mode) ([int]$manifest.maxRounds) ([string]$manifest.firstSynthesizer)
+        $state.promptContractVersion = 'duoforge-stage-v4'
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $planPath $plan
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $manifestPath $manifest
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $statePath $state
+
+        $contract = & $module { param($directory) Assert-DuoForgeRunStorageContractInternal -RunDirectory $directory } $run.runDirectory
+        Assert-True ([bool]$contract)
+    }
+
+    Test-Case '결정과 근거 예약 상한은 v5에만 적용하고 기존 v4 프롬프트를 보존한다' {
+        $input = New-MarkdownFile -Path (Join-Path $tempRoot 'prompt-decision-v4\input\brief.md')
+        $workspace = Join-Path $tempRoot 'prompt-decision-v4-results'
+        $config = New-TestConfig -ResultsRoot $workspace
+        $config.limits.maxInputBytesPerCall = 65536
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config $config
+        Assert-True ([bool]$validation.valid) ($validation.errors | ConvertTo-Json -Depth 20 -Compress)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $manifestPath = Join-Path $run.runDirectory 'manifest.json'
+        $statePath = Join-Path $run.runDirectory 'state.json'
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+        $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json -AsHashtable -Depth 100
+        $manifest.promptTemplateVersion = 'duoforge-stage-v4'
+        $manifest.Remove('artifactProjectionPolicy')
+        $state.promptContractVersion = 'duoforge-stage-v4'
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $manifestPath $manifest
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $statePath $state
+
+        & $module {
+            param($directory, $runId)
+            $largeConstraint = '레거시결정' * 380
+            for ($index = 1; $index -le 5; $index++) {
+                Add-DuoForgeJsonLine -Path (Join-Path $directory 'decisions\user-answers.jsonl') -Value ([ordered]@{
+                    schemaVersion = 1
+                    decisionId = 'legacy-constraint-{0}' -f $index
+                    runId = $runId
+                    issueId = 'LEGACY-{0:D3}' -f $index
+                    action = 'CONSTRAINT'
+                    rawText = $largeConstraint
+                    normalizedConstraint = $largeConstraint
+                    affectedTarget = 'merged'
+                    appliesToProviders = @('codex', 'claude')
+                    recordedAt = '2026-07-01T00:00:{0:D2}Z' -f $index
+                })
+            }
+        } $run.runDirectory $run.runId
+
+        $graph = & $module { param($directory) Initialize-DuoForgeStageGraph -RunDirectory $directory } $run.runDirectory
+        $step = @($graph.steps)[0]
+        $v4Prompt = & $module { param($directory, $value, $current) New-DuoForgeStagePrompt -RunDirectory $directory -Graph $value -Step $current } $run.runDirectory $graph $step
+        $v4Payload = Get-TestPromptPayload -PromptText $v4Prompt.text
+        $decisionJson = ConvertTo-Json -InputObject @($v4Payload.userDecisions, $v4Payload.userEvidence) -Depth 100 -Compress
+        $decisionBytes = [System.Text.UTF8Encoding]::new($false).GetByteCount($decisionJson)
+        Assert-True ($decisionBytes -gt [long][Math]::Floor(65536 * 0.125))
+        Assert-True ([long]$v4Prompt.bytes -le 65536)
+        Assert-Equal ([string]$v4Payload.contractVersion) 'duoforge-stage-v4'
+
+        $manifest.promptTemplateVersion = 'duoforge-stage-v5'
+        $manifest.artifactProjectionPolicy = 'stage-relevance-v1'
+        $state.promptContractVersion = 'duoforge-stage-v5'
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $manifestPath $manifest
+        & $module { param($path, $value) Write-DuoForgeJsonAtomic -Path $path -Value $value } $statePath $state
+        Assert-ThrowsCode {
+            & $module { param($directory, $value, $current) New-DuoForgeStagePrompt -RunDirectory $directory -Graph $value -Step $current } $run.runDirectory $graph $step
+        } 'DF-PROMPT-DECISION-LIMIT'
     }
 
     Test-Case '활성 schema 1인 초기 workflow-v2 저장 실행은 재분할 없이 재개된다' {
@@ -2559,7 +2675,7 @@ try {
         Assert-False (Test-Path -LiteralPath (Join-Path $run.runDirectory 'diagnostics.jsonl'))
         Assert-Equal $run.manifest.schemaVersion 4
         Assert-Equal $run.manifest.workflowVersion 'workflow-v2'
-        Assert-Equal $run.manifest.promptTemplateVersion 'duoforge-stage-v4'
+        Assert-Equal $run.manifest.promptTemplateVersion 'duoforge-stage-v5'
         Assert-Equal $run.manifest.artifactVisibilityPolicy 'transitive-dependencies-v1'
         Assert-Equal $run.manifest.providerSelections.codex.model 'gpt-5.6-sol'
         Assert-Equal $run.manifest.providerSelections.codex.reasoningEffort 'high'
@@ -3553,7 +3669,7 @@ try {
         Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-codex-document-a-revision']) -join ',')) $dualResponses
         Assert-Equal ((@(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r01-claude-document-b-revision']) -join ',')) $dualResponses
         $revisionPayload = Get-TestPromptPayload -PromptText $dualPrompts['r01-codex-document-a-revision']
-        Assert-Equal $revisionPayload.contractVersion 'duoforge-stage-v4'
+        Assert-Equal $revisionPayload.contractVersion 'duoforge-stage-v5'
         Assert-Equal $revisionPayload.newIssueKeyPrefix 'CODEX-R01-DOCUMENT-REVISION-A-G01-'
         Assert-Equal @($revisionPayload.adoptableIssues).Count 0
         $dualRound2Codex = @(Get-TestPromptPriorArtifactStepKeys -PromptText $dualPrompts['r02-codex-document-review'])
@@ -3561,6 +3677,166 @@ try {
         Assert-Equal (($dualRound2Codex -join ',')) (($dualRound2Claude -join ','))
         Assert-False ('r02-claude-document-review' -in $dualRound2Codex)
         Assert-False ('r02-codex-document-review' -in $dualRound2Claude)
+    }
+
+    Test-Case '최종 확인은 전이 계보를 검증하되 대상 최신 문서와 관련 기록만 전송한다' {
+        $documentA = New-MarkdownFile -Path (Join-Path $tempRoot 'validation-projection\A\source.md') -Text "# 문서 A`n`n원본 A"
+        $documentB = New-MarkdownFile -Path (Join-Path $tempRoot 'validation-projection\B\source.md') -Text "# 문서 B`n`n원본 B"
+        $workspace = Join-Path $tempRoot 'validation-projection-results'
+        $config = New-TestConfig -ResultsRoot $workspace
+        $config.limits.maxInputBytesPerCall = 65536
+        $request = New-TestStartRequest -Mode dual-document -DocumentA $documentA -DocumentB $documentB -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config $config
+        Assert-True ([bool]$validation.valid) ($validation.errors | ConvertTo-Json -Depth 20 -Compress)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        Assert-Equal $run.manifest.promptTemplateVersion 'duoforge-stage-v5'
+        Assert-Equal $run.manifest.artifactProjectionPolicy 'stage-relevance-v1'
+
+        $captured = @{}
+        $result = & $module {
+            param($directory, $prompts)
+            $callback = {
+                param($step, $prompt)
+                $prompts[[string]$step.stepKey] = $prompt
+                $fake = New-DuoForgeFakeStageResult -Step $step
+                if ([string]$step.stage -eq 'document-revision') {
+                    $target = [string]$step.targetDocumentId
+                    $fake.document = "LATEST-$target-DOCUMENT-CANARY`n" + ($target * 8000)
+                    $fake.summary = "LATEST-$target-SUMMARY-CANARY"
+                }
+                elseif ([string]$step.stage -notin @('document-validation')) {
+                    $fake.summary = 'OLD-HISTORY-SUMMARY-CANARY-' + ('x' * 3000)
+                }
+                return $fake
+            }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $callback
+        } $run.runDirectory $captured
+
+        Assert-Equal $result.status 'COMPLETED'
+        foreach ($target in @('a', 'b')) {
+            $key = if ($target -eq 'a') { 'r02-codex-document-a-validation' } else { 'r02-claude-document-b-validation' }
+            $prompt = $captured[$key]
+            Assert-True ([long]$prompt.bytes -le 65536)
+            $payload = Get-TestPromptPayload -PromptText ([string]$prompt.text)
+            Assert-Equal $payload.contractVersion 'duoforge-stage-v5'
+            Assert-Equal $payload.artifactProjection.policy 'stage-relevance-v1'
+            Assert-Equal $payload.artifactProjection.targetDocumentId $target.ToUpperInvariant()
+            Assert-ContainsText ([string]$prompt.text) ("LATEST-{0}-DOCUMENT-CANARY" -f $target.ToUpperInvariant())
+            $other = if ($target -eq 'a') { 'B' } else { 'A' }
+            Assert-NotContainsText ([string]$prompt.text) ("LATEST-$other-DOCUMENT-CANARY")
+            Assert-NotContainsText ([string]$prompt.text) 'OLD-HISTORY-SUMMARY-CANARY'
+            Assert-Equal @($prompt.validatedArtifactStepKeys).Count 12
+            Assert-Equal @($prompt.artifactStepKeys).Count 12
+        }
+    }
+
+    Test-Case '입력 크기 실패는 일반 재개를 막고 REPAIR 뒤 공급자 0회로 v5 재개만 준비한다' {
+        $documentA = New-MarkdownFile -Path (Join-Path $tempRoot 'prompt-repair\A\source.md') -Text "# 문서 A`n`n복구 A"
+        $documentB = New-MarkdownFile -Path (Join-Path $tempRoot 'prompt-repair\B\source.md') -Text "# 문서 B`n`n복구 B"
+        $workspace = Join-Path $tempRoot 'prompt-repair-results'
+        $config = New-TestConfig -ResultsRoot $workspace
+        $config.limits.maxInputBytesPerCall = 65536
+        $request = New-TestStartRequest -Mode dual-document -DocumentA $documentA -DocumentB $documentB -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config $config
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $null = & $module {
+            param($directory)
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker { param($step) New-DuoForgeFakeStageResult -Step $step }
+        } $run.runDirectory
+
+        & $module {
+            param($directory)
+            $manifestPath = Join-Path $directory 'manifest.json'
+            $statePath = Join-Path $directory 'state.json'
+            $stepsPath = Join-Path $directory 'steps.json'
+            $manifest = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $manifestPath)
+            $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $statePath)
+            $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $stepsPath)
+            $step = @($graph.steps | Where-Object { [string]$_.stepKey -eq 'r02-codex-document-a-validation' })[0]
+            $manifest.promptTemplateVersion = 'duoforge-stage-v4'
+            $manifest.Remove('artifactProjectionPolicy')
+            $state.promptContractVersion = 'duoforge-stage-v4'
+            $state.promptRepairGrantCount = 0
+            $state.promptRepairPreparedAt = $null
+            $state.status = 'RESUMABLE_ERROR'
+            $step.status = 'FAILED'
+            $step.attemptCount = 0
+            $step.totalAttemptCount = 0
+            $step.retryMode = $null
+            $step.artifactPath = $null
+            $step.artifactHash = $null
+            $step.lastError = [ordered]@{ code = 'DF-PROMPT-SIZE-LIMIT'; retryable = $false; diagnosticId = 'diag-safe-test' }
+            Write-DuoForgeJsonAtomic -Path $manifestPath -Value $manifest
+            Write-DuoForgeJsonAtomic -Path $statePath -Value $state
+            Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph
+        } $run.runDirectory
+
+        $beforeEvents = @(Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl')).Count
+        $eligibility = & $module {
+            param($directory)
+            [ordered]@{
+                continuation = Get-DuoForgeContinuationEligibilityInternal -RunDirectory $directory
+                repair = Get-DuoForgePromptRepairEligibilityInternal -RunDirectory $directory
+            }
+        } $run.runDirectory
+        Assert-False ([bool]$eligibility.continuation.eligible)
+        Assert-Equal $eligibility.continuation.failureCode 'DF-PROMPT-SIZE-LIMIT'
+        Assert-Equal $eligibility.continuation.recoveryKind 'prompt-size-repair'
+        Assert-True ([bool]$eligibility.repair.eligible) ([string]$eligibility.repair.reason)
+        Assert-True ([long]$eligibility.repair.promptBytes -le [long]$eligibility.repair.maximumInputBytes)
+        $blockedMenu = & $module {
+            param($id, $directory)
+            $capture = [ordered]@{ items = @() }
+            $menuInvoker = {
+                param($items, $title, $initialSelectedIndex, $returnTarget)
+                $capture.items = @($items)
+                return [ordered]@{ action = 'back'; value = $null; source = 'line'; returnTarget = $returnTarget }
+            }.GetNewClosure()
+            Invoke-DuoForgeInteractiveRun -RunRecord ([ordered]@{ runId = $id; runDirectory = $directory }) -MenuInvoker $menuInvoker
+            [ordered]@{
+                values = @($capture.items | ForEach-Object { [string]$_.value })
+                label = Get-DuoForgeDisplayStateLabelInternal -Status 'RESUMABLE_ERROR' -FailureCode 'DF-PROMPT-SIZE-LIMIT'
+            }
+        } $run.runId $run.runDirectory
+        Assert-False ('R' -in @($blockedMenu.values))
+        Assert-True ('repair-prompt' -in @($blockedMenu.values))
+        Assert-Equal $blockedMenu.label '입력 크기 조정 필요'
+        $confirmationCounts = & $module {
+            param($id, $root)
+            $runObject = ConvertTo-DuoForgeHashtable -InputObject (Get-DuoForgeRunInternal -RunId $id -ResultsRoot $root)
+            $cancelCount = [ref]0
+            $cancelled = Invoke-DuoForgeInteractivePromptRepairInternal -Run $runObject -InputReader { 'B' } -RepairInvoker { $cancelCount.Value++; [ordered]@{ providerCalls = 0 } }
+            $repairCount = [ref]0
+            $confirmed = Invoke-DuoForgeInteractivePromptRepairInternal -Run $runObject -InputReader { 'REPAIR' } -RepairInvoker { $repairCount.Value++; [ordered]@{ providerCalls = 0 } }
+            [ordered]@{ cancel = $cancelCount.Value; repair = $repairCount.Value; cancelledResult = $cancelled.result; confirmedCalls = $confirmed.result.providerCalls }
+        } $run.runId $workspace
+        Assert-Equal $confirmationCounts.cancel 0
+        Assert-Equal $confirmationCounts.repair 1
+        Assert-True ($null -eq $confirmationCounts.cancelledResult)
+        Assert-Equal $confirmationCounts.confirmedCalls 0
+        Assert-ThrowsCode { & $module { param($id, $root) Invoke-DuoForgeResumeLiveInternal -RunId $id -ResultsRoot $root -LiveConsent $true } $run.runId $workspace } 'DF-RUN-RECOVERY-REQUIRED'
+
+        $prepared = & $module { param($id, $root) Enable-DuoForgePromptRepairInternal -RunId $id -ResultsRoot $root } $run.runId $workspace
+        Assert-Equal $prepared.providerCalls 0
+        Assert-Equal $prepared.recoveryKind 'prompt-size-repair'
+        Assert-True ([long]$prepared.promptBytes -le [long]$prepared.maximumInputBytes)
+        $preparedState = Get-Content -LiteralPath (Join-Path $run.runDirectory 'state.json') -Raw | ConvertFrom-Json -Depth 100
+        $preparedManifest = Get-Content -LiteralPath (Join-Path $run.runDirectory 'manifest.json') -Raw | ConvertFrom-Json -Depth 100
+        $preparedGraph = Get-Content -LiteralPath (Join-Path $run.runDirectory 'steps.json') -Raw | ConvertFrom-Json -Depth 100
+        $preparedStep = @($preparedGraph.steps | Where-Object { [string]$_.stepKey -eq 'r02-codex-document-a-validation' })[0]
+        Assert-Equal $preparedState.promptContractVersion 'duoforge-stage-v5'
+        Assert-Equal $preparedState.promptRepairGrantCount 1
+        Assert-Equal $preparedManifest.promptTemplateVersion 'duoforge-stage-v5'
+        Assert-Equal $preparedManifest.artifactProjectionPolicy 'stage-relevance-v1'
+        Assert-Equal $preparedStep.status 'PENDING'
+        Assert-Equal $preparedStep.attemptCount 0
+        Assert-True ([int]$preparedStep.inputGeneration -gt 1)
+        $events = @(Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ForEach-Object { $_ | ConvertFrom-Json -Depth 100 })
+        $repairEvents = @($events | Where-Object { [string]$_.type -eq 'PROMPT_REPAIR_PREPARED' })
+        Assert-Equal $repairEvents.Count 1
+        Assert-Equal $repairEvents[0].data.providerCalls 0
+        Assert-Equal @($events).Count ($beforeEvents + 1)
+        Assert-ThrowsCode { & $module { param($id, $root) Enable-DuoForgePromptRepairInternal -RunId $id -ResultsRoot $root } $run.runId $workspace } 'DF-PROMPT-REPAIR-UNAVAILABLE'
     }
 
     Test-Case '실패 후 재개는 완료된 상대 단계를 다시 호출하지 않는다' {

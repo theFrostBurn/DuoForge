@@ -3,7 +3,7 @@
 | 항목 | 내용 |
 |---|---|
 | 제품명 | DuoForge |
-| 문서 버전 | 1.10 |
+| 문서 버전 | 1.11 |
 | 문서 상태 | 문서 모드 확장 Beta 구현 기준선 |
 | 작성일 | 2026-08-01 |
 | 대상 릴리스 | v1 MVP |
@@ -1374,6 +1374,7 @@ claude -p `
 | FR-COM-088 | `FAILED_STAGE`와 `SOURCE_DRIFT`는 홈의 전용 실패 목록에서 조회할 수 있다. 재시도 가능한 단일 `FAILED_STAGE`는 메뉴 또는 `retry-failed` CLI의 정확한 `RETRY` 확인으로 현재 입력 세대에서 추가 1회만 준비하며, 확인 전 이탈은 변경·호출 0건이고 확인 뒤에도 별도 `LIVE` 전까지 공급자 호출 0건이다. | P0 |
 | FR-COM-089 | 마지막 단계 오류가 정확히 `DF-RUN-TIME-LIMIT`인 실행은 메뉴 또는 대화형 `retry-failed` CLI의 정확한 `RETRY` 확인 뒤 실행당 한 번만 총 실행시간을 60분 연장한다. 기본 90분과 누적 `runtimeSeconds`는 보존하고 유효 상한만 150분으로 계산하며, 확인 전 이탈과 두 번째 연장은 상태·단계·이벤트·호출을 만들지 않는다. 연장 뒤에도 실제 공급자 호출에는 별도의 정확한 `LIVE` 확인이 필요하고 다른 오류의 재시도 계약은 바꾸지 않는다. | P0 |
 | FR-COM-090 | 복구 가능한 단일 `DF-STAGE-REFERENCE` 또는 안전하게 호환 분류된 기존 참조형 `DF-STAGE-SCHEMA`는 메뉴나 `repair-schema` CLI의 정확한 `REPAIR` 확인으로 실행당 한 번만 공급자 0-call 복구를 준비한다. 준비 시 `inputGeneration`을 증가시키고 현재 세대 `attemptCount`만 0으로 초기화하며 `totalAttemptCount`, `manualRetryCount`, 누적 실행시간과 시간 연장 기록, 완료 산출물은 보존한다. 취소·오타·비대화형 무확인·두 번째 복구는 변경과 호출 0건이며 실제 호출에는 다시 정확한 `LIVE` 확인이 필요하다. | P0 |
+| FR-COM-091 | 신규 `duoforge-stage-v5`는 원문 30%, 최종 확인의 단계 관련성 투영 50%, 사용자 결정·근거 메타데이터 12.5%의 독립 입력 예산과 최종 완성 프롬프트 상한을 공급자 호출 전에 검사한다. 문서별 최종 확인은 모든 보이는 선행 산출물 해시를 검증하되 대상 최신 문서와 대상 관련 기록만 전송한다. v4의 호출 전 단일 `DF-PROMPT-SIZE-LIMIT` 실패는 일반 재개를 차단하고 메뉴 또는 `repair-prompt`의 정확한 `REPAIR`에서 실행당 한 번만 v5로 0-call 복구 준비하며, 실제 호출에는 별도 `LIVE` 확인이 필요하다. | P0 |
 
 ### 16.2 모드별 요구사항
 
@@ -1418,8 +1419,8 @@ claude -p `
 - `workflow-v2`는 `inputs.documentA/documentB`, `roles.documents.A/B`, `targetDocumentId`, `performedBy`와 신규 단계 계약을 사용한다.
 - 레거시 필드는 읽기 경계에서만 정규형으로 변환하며 저장된 매니페스트, 단계 결과, 쟁점 원장과 완료 산출물을 재작성하지 않는다.
 - 단계 그래프 생성, 추가 라운드, 사용자 결정 변경에 따른 무효화와 선택 재실행은 `workflowVersion`으로 분기한다.
-- 기존 `duoforge-stage-v2`와 `duoforge-stage-v3` 프롬프트 계약 실행은 저장된 계약 세대를 유지해 재개하며 기존 실행을 일괄 승격하지 않는다.
-- 신규 실행은 쟁점 참조 카탈로그가 포함된 `duoforge-stage-v4`를 사용한다. 기존 `duoforge-stage-v3` 실행은 묵시적으로 승격하지 않으며, 복구 가능한 참조 실패에 대한 정확한 `REPAIR` 트랜잭션에서만 state와 manifest의 프롬프트 계약을 함께 v4로 전환한다.
+- 기존 `duoforge-stage-v2`, `duoforge-stage-v3`와 `duoforge-stage-v4` 프롬프트 계약 실행은 저장된 계약 세대를 유지해 재개하며 기존 실행을 일괄 승격하지 않는다.
+- 신규 실행은 쟁점 참조 카탈로그와 최종 확인 단계 관련성 투영이 포함된 `duoforge-stage-v5`를 사용한다. 기존 `duoforge-stage-v3` 실행은 복구 가능한 참조 실패의 정확한 `REPAIR` 트랜잭션에서만 v4로 전환하고, AI 호출 전 최종 확인 입력 크기 실패가 난 v4 실행은 별도 정확한 `REPAIR` 트랜잭션에서만 state와 manifest를 함께 v5로 전환한다.
 - 구조화 결과 스키마도 워크플로 버전별로 선택한다. 레거시 스키마를 신규 필드 의미로 묵시적으로 해석하지 않는다.
 - 신규 저장 세대는 `manifest` schema 4, `state` schema 2, `inventory` schema 2, `issue ledger` schema 2와 `steps` schema 2를 하나의 `duoforge-run-v2` 계약으로 묶는다. 어느 한 파일만 다른 세대이면 공급자 호출 전에 실패 폐쇄한다.
 - 기존 `workflow-v1` 저장 세대와 초기 `workflow-v2` manifest schema 3 세대는 각자의 state/inventory/ledger/steps 버전 조합으로만 읽고 신규 세대로 부분 승격하거나 재작성하지 않는다.
@@ -1452,7 +1453,7 @@ claude -p `
 {
   "schemaVersion": 2,
   "workflowVersion": "workflow-v2",
-  "promptContractVersion": "duoforge-stage-v4",
+  "promptContractVersion": "duoforge-stage-v5",
   "runId": "run-20260727-001",
   "mode": "dual-document",
   "inputs": {
@@ -1485,6 +1486,7 @@ claude -p `
 - `DF-RUN-TIME-LIMIT` 저장 실행은 `RESUMABLE_ERROR`, 단일 `FAILED` 단계와 `lastError.code` 조합으로도 읽기 경계에서 시간 제한 실패로 식별한다. `runtimeExtensionMinutes`와 `runtimeExtensionGrantCount`가 없는 저장 실행은 미연장으로 해석하되 호환 읽기만으로 원본을 다시 쓰지 않는다.
 - 총 실행시간 연장은 `runtimeExtensionMinutes=60`, `runtimeExtensionGrantCount=1`을 별도 저장하고 `runtimeSeconds`를 초기화하거나 줄이지 않는다. 이미 수동 추가 시도를 준비한 단계가 시간 한도에 막혀도 연장 횟수만 소비하며 `manualRetryCount`를 다시 증가시키지 않는다.
 - `resume`은 마지막 완료 단계 다음부터 시작한다. 답하지 않은 질문이 남아 있으면 명시적 라이브 재개도 공급자 호출 전에 차단하고, 현재 관문의 질문을 모두 답한 뒤에만 검토를 시작한다.
+- `FAILED` 단계가 남아 있으면 `RESUMABLE_ERROR`라는 이름만으로 일반 재개를 허용하지 않는다. 특히 AI 호출 전 `DF-PROMPT-SIZE-LIMIT`는 `입력 크기 조정 필요`로 표시하고, 정확한 `REPAIR`로 v5 투영 입력이 호출 상한 안에 들어오는지 읽기 전용 검사한 뒤에만 1회 복구를 준비한다.
 - 성공한 단계의 출력이 존재하고 해시가 맞으면 다시 호출하지 않는다.
 - 출력이 없거나 해시·스키마가 손상되면 원인을 분리해 기록하고 해당 단계와 의존 단계만 감사 이력으로 보존한 뒤 재실행 대상으로 만든다. 쟁점 원장과 단계 산출물의 참조 무결성 충돌은 산출물 손상으로 오인해 무효화하지 않고 `DF-ISSUE-REFERENCE-INTEGRITY`로 실패 폐쇄한다.
 - 실행 중 원본이 바뀌어도 기존 실행은 시작 시점 스냅샷으로 분석을 재개할 수 있지만, 모드 4 종료 무결성 검사에서 차이가 확인되면 `SOURCE_DRIFT`로 표시하고 현재 원본에 대한 완료 결과로 취급하지 않는다.

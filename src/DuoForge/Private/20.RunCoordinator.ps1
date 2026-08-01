@@ -45,7 +45,7 @@ function Get-DuoForgeRemainingCallBudget {
         foreach ($step in $providerSteps) { $attempted += [int](Get-DuoForgeObjectValue -Object $step -Name 'totalAttemptCount' -Default ([int]$step.attemptCount)) }
         $baseCallsRemaining = @($remainingSteps | Where-Object { [int]$_.attemptCount -eq 0 }).Count
         $retryBudgetRemaining = @($remainingSteps | Where-Object { [int]$_.attemptCount -lt 2 }).Count
-        $blockedSteps = @($remainingSteps | Where-Object { [string]$_.status -eq 'FAILED' -and [string]$_.retryMode -in @('RETRY_EXHAUSTED', 'REFERENCE_REPAIR_REQUIRED') })
+        $blockedSteps = @($remainingSteps | Where-Object { [string]$_.status -eq 'FAILED' })
         $runnableSteps = @($remainingSteps | Where-Object { $_ -notin $blockedSteps })
         $scheduledCallsRemaining = $runnableSteps.Count
         $failureRetryCallsRemaining = @($runnableSteps | Where-Object { [int]$_.attemptCount -eq 0 }).Count
@@ -92,6 +92,10 @@ function Invoke-DuoForgeResumeLiveInternal {
     $null = Assert-DuoForgeProviderSelectionsInternal -Selections (Get-DuoForgeObjectValue -Object $run.manifest -Name 'providerSelections')
     if ([string]$run.state.status -in @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED')) {
         return [ordered]@{ status = [string]$run.state.status; invoked = 0 }
+    }
+    $continuation = Get-DuoForgeContinuationEligibilityInternal -RunDirectory $directory
+    if (-not [bool]$continuation.eligible) {
+        throw (New-DuoForgeException -Code 'DF-RUN-RECOVERY-REQUIRED' -Message ([string]$continuation.reason))
     }
     $pendingPath = Join-Path $directory 'decisions\pending.json'
     $pendingQuestions = @()

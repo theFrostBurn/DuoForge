@@ -93,6 +93,98 @@ function Get-DuoForgeSchemaRepairEligibilityInternal {
     return [ordered]@{ eligible = $true; reason = ''; step = $step; failures = @($classification.failures); legacy = [bool]$classification.legacy; runtimeBudget = $runtimeBudget }
 }
 
+function Get-DuoForgePromptRepairEligibilityInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$RunDirectory)
+
+    $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'state.json'))
+    $manifest = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json'))
+    $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'steps.json'))
+    $failedSteps = @($graph.steps | Where-Object { [string]$_.status -eq 'FAILED' })
+    if ([string]$state.status -notin @('RESUMABLE_ERROR', 'FAILED_STAGE') -or $failedSteps.Count -ne 1) {
+        return [ordered]@{ eligible = $false; reason = '입력 크기 오류가 난 단일 실패 단계에서만 복구를 준비할 수 있습니다.'; step = $null }
+    }
+    $step = $failedSteps[0]
+    $lastError = Get-DuoForgeObjectValue -Object $step -Name 'lastError'
+    if ([string](Get-DuoForgeObjectValue -Object $lastError -Name 'code' -Default '') -cne 'DF-PROMPT-SIZE-LIMIT' -or
+        [string]$step.stage -notin @('final-validation', 'document-validation') -or
+        [int](Get-DuoForgeObjectValue -Object $step -Name 'attemptCount' -Default 0) -ne 0) {
+        return [ordered]@{ eligible = $false; reason = '이 실패는 AI 호출 전에 발생한 최종 확인 입력 크기 오류가 아닙니다.'; step = $step }
+    }
+    if ([string]$manifest.workflowVersion -ne 'workflow-v2' -or
+        [string]$manifest.promptTemplateVersion -ne 'duoforge-stage-v4' -or
+        [string]$state.promptContractVersion -ne 'duoforge-stage-v4') {
+        return [ordered]@{ eligible = $false; reason = '이 실행의 입력 계약은 안전한 크기 복구 대상이 아닙니다.'; step = $step }
+    }
+    if ([int](Get-DuoForgeObjectValue -Object $state -Name 'promptRepairGrantCount' -Default 0) -ne 0) {
+        return [ordered]@{ eligible = $false; reason = '이 실행의 입력 크기 복구 1회를 이미 사용했습니다.'; step = $step }
+    }
+    $pendingPath = Join-Path $RunDirectory 'decisions\pending.json'
+    if ((Test-Path -LiteralPath $pendingPath -PathType Leaf) -and @((Read-DuoForgeJson -Path $pendingPath).questions).Count -gt 0) {
+        return [ordered]@{ eligible = $false; reason = '답하지 않은 질문이 있어 입력 크기 복구를 준비할 수 없습니다.'; step = $step }
+    }
+    $callBudget = Get-DuoForgeRemainingCallBudget -RunDirectory $RunDirectory
+    $providerBudget = Get-DuoForgeObjectValue -Object $callBudget.providers -Name ([string]$step.provider)
+    if ($null -eq $providerBudget -or [int](Get-DuoForgeObjectValue -Object $providerBudget -Name 'maximumAdditionalCalls' -Default 0) -lt 1) {
+        return [ordered]@{ eligible = $false; reason = '이 AI에 허용된 전체 요청 횟수가 남아 있지 않습니다.'; step = $step }
+    }
+    $runtimeBudget = Get-DuoForgeRuntimeBudgetInternal -RunDirectory $RunDirectory
+    if ([bool]$runtimeBudget.exhausted) {
+        return [ordered]@{ eligible = $false; reason = '남은 총 실행시간이 없어 먼저 시간 한도를 확인해야 합니다.'; step = $step }
+    }
+    try {
+        $prompt = New-DuoForgeStagePrompt -RunDirectory $RunDirectory -Graph $graph -Step $step -PromptTemplateVersionOverride 'duoforge-stage-v5'
+    }
+    catch {
+        return [ordered]@{
+            eligible = $false
+            reason = '대상별 입력 축소를 적용해도 현재 호출 한도 안에 안전하게 들어오지 않습니다.'
+            step = $step
+            failureCode = if ($_.Exception.Data.Contains('DuoForgeCode')) { [string]$_.Exception.Data['DuoForgeCode'] } else { 'DF-PROMPT-REPAIR-PREFLIGHT' }
+        }
+    }
+    return [ordered]@{
+        eligible = $true
+        reason = ''
+        step = $step
+        promptBytes = [long]$prompt.bytes
+        maximumInputBytes = [long]$prompt.maximumInputBytes
+        runtimeBudget = $runtimeBudget
+    }
+}
+
+function Get-DuoForgeContinuationEligibilityInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$RunDirectory)
+
+    $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'state.json'))
+    if ([string]$state.status -in @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED', 'SOURCE_DRIFT', 'CANCELLED')) {
+        return [ordered]@{ eligible = $false; reason = '이미 종료된 작업입니다.'; failureCode = ''; recoveryKind = '' }
+    }
+    $stepsPath = Join-Path $RunDirectory 'steps.json'
+    if (-not (Test-Path -LiteralPath $stepsPath -PathType Leaf)) {
+        return [ordered]@{ eligible = $true; reason = ''; failureCode = ''; recoveryKind = '' }
+    }
+    $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $stepsPath)
+    $failedSteps = @($graph.steps | Where-Object { [string]$_.status -eq 'FAILED' })
+    if ($failedSteps.Count -eq 0) {
+        return [ordered]@{ eligible = $true; reason = ''; failureCode = ''; recoveryKind = '' }
+    }
+    $step = $failedSteps[0]
+    $lastError = Get-DuoForgeObjectValue -Object $step -Name 'lastError'
+    $failureCode = [string](Get-DuoForgeObjectValue -Object $lastError -Name 'code' -Default '')
+    $recoveryKind = if ($failureCode -eq 'DF-PROMPT-SIZE-LIMIT') { 'prompt-size-repair' }
+        elseif ([bool](Get-DuoForgeSafeSchemaReferenceFailureInternal -Step $step).eligible) { 'schema-reference-repair' }
+        else { 'failed-stage-retry' }
+    return [ordered]@{
+        eligible = $false
+        reason = '실패 단계의 복구를 먼저 준비해야 합니다.'
+        failureCode = $failureCode
+        recoveryKind = $recoveryKind
+        step = $step
+    }
+}
+
 function Get-DuoForgeFailedStageRetryEligibilityInternal {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$RunDirectory)
@@ -221,6 +313,99 @@ function Enable-DuoForgeSchemaRepairInternal {
                 totalAttemptCount = $totalAttemptCount
                 manualRetryCount = $manualRetryCount
                 schemaRepairGrantCount = 1
+                providerCalls = 0
+                runDirectory = $runDirectory
+            }
+        }
+    }
+}
+
+function Enable-DuoForgePromptRepairInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RunId,
+        [string]$ResultsRoot
+    )
+
+    $run = Get-DuoForgeRunInternal -RunId $RunId -ResultsRoot $ResultsRoot
+    $runDirectory = [string]$run.runDirectory
+    return Invoke-WithDuoForgeRunLock -RunDirectory $runDirectory -ScriptBlock {
+        $null = Assert-DuoForgeRunStorageContractInternal -RunDirectory $runDirectory
+        $eligibility = Get-DuoForgePromptRepairEligibilityInternal -RunDirectory $runDirectory
+        if (-not [bool]$eligibility.eligible) {
+            throw (New-DuoForgeException -Code 'DF-PROMPT-REPAIR-UNAVAILABLE' -Message ([string]$eligibility.reason))
+        }
+        return Invoke-WithDuoForgeRunMutationTransactionInternal -RunDirectory $runDirectory -RelativePaths @('manifest.json', 'state.json', 'steps.json', 'events.jsonl') -ScriptBlock {
+            $manifestPath = Join-Path $runDirectory 'manifest.json'
+            $statePath = Join-Path $runDirectory 'state.json'
+            $stepsPath = Join-Path $runDirectory 'steps.json'
+            $manifest = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $manifestPath)
+            $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $statePath)
+            $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $stepsPath)
+            $step = @($graph.steps | Where-Object { [string]$_.status -eq 'FAILED' })[0]
+            $lastError = Get-DuoForgeObjectValue -Object $step -Name 'lastError'
+            $previousCode = [string](Get-DuoForgeObjectValue -Object $lastError -Name 'code' -Default '')
+            $preparedAt = Get-DuoForgeUtcNow
+            $previousGeneration = [Math]::Max(1, [int](Get-DuoForgeObjectValue -Object $step -Name 'inputGeneration' -Default 1))
+            $nextGeneration = $previousGeneration + 1
+            $totalAttemptCount = [int](Get-DuoForgeObjectValue -Object $step -Name 'totalAttemptCount' -Default ([int](Get-DuoForgeObjectValue -Object $step -Name 'attemptCount' -Default 0)))
+            $history = [System.Collections.Generic.List[object]]::new()
+            foreach ($entry in @(Get-DuoForgeObjectValue -Object $step -Name 'history' -Default @())) { $history.Add($entry) }
+            $history.Add([ordered]@{
+                at = $preparedAt
+                event = 'PROMPT_REPAIR_PREPARED'
+                previousCode = $previousCode
+                previousInputGeneration = $previousGeneration
+                inputGeneration = $nextGeneration
+                totalAttemptCount = $totalAttemptCount
+                promptBytes = [long]$eligibility.promptBytes
+                maximumInputBytes = [long]$eligibility.maximumInputBytes
+            })
+
+            $step.history = @($history)
+            $step.status = 'PENDING'
+            $step.inputGeneration = $nextGeneration
+            $step.attemptCount = 0
+            $step.retryMode = $null
+            $step.inputHash = $null
+            $step.lastPromptKind = $null
+            $step.lastError = $null
+            $state.status = 'RESUMABLE_ERROR'
+            $state.promptRepairGrantCount = 1
+            $state.promptRepairPreparedAt = $preparedAt
+            $state.promptContractVersion = 'duoforge-stage-v5'
+            $state.updatedAt = $preparedAt
+            $manifest.promptTemplateVersion = 'duoforge-stage-v5'
+            $manifest.artifactProjectionPolicy = 'stage-relevance-v1'
+            $manifest.updatedAt = $preparedAt
+
+            Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph
+            Write-DuoForgeJsonAtomic -Path $statePath -Value $state
+            Write-DuoForgeJsonAtomic -Path $manifestPath -Value $manifest
+            $preparedPrompt = New-DuoForgeStagePrompt -RunDirectory $runDirectory -Graph $graph -Step $step
+            Add-DuoForgeRunEvent -RunDirectory $runDirectory -Type 'PROMPT_REPAIR_PREPARED' -Status 'RESUMABLE_ERROR' -Data ([ordered]@{
+                stepKey = [string]$step.stepKey
+                previousCode = $previousCode
+                previousInputGeneration = $previousGeneration
+                inputGeneration = $nextGeneration
+                totalAttemptCount = $totalAttemptCount
+                promptBytes = [long]$preparedPrompt.bytes
+                maximumInputBytes = [long]$preparedPrompt.maximumInputBytes
+                promptRepairGrantCount = 1
+                providerCalls = 0
+            })
+            $null = Assert-DuoForgeRunStorageContractInternal -RunDirectory $runDirectory
+            return [ordered]@{
+                runId = $RunId
+                status = 'RESUMABLE_ERROR'
+                recoveryKind = 'prompt-size-repair'
+                stepKey = [string]$step.stepKey
+                inputGeneration = $nextGeneration
+                attemptCount = 0
+                totalAttemptCount = $totalAttemptCount
+                promptBytes = [long]$preparedPrompt.bytes
+                maximumInputBytes = [long]$preparedPrompt.maximumInputBytes
+                promptRepairGrantCount = 1
                 providerCalls = 0
                 runDirectory = $runDirectory
             }

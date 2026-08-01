@@ -685,7 +685,7 @@ function Invoke-DuoForgeStageEngine {
                     })
                     $adoptableIssueTargets = $null
                     $adoptableIssueProviders = $null
-                    if ($workflowVersion -eq 'workflow-v2' -and [string]$manifest.promptTemplateVersion -eq 'duoforge-stage-v4') {
+                    if ($workflowVersion -eq 'workflow-v2' -and [string]$manifest.promptTemplateVersion -in @('duoforge-stage-v4', 'duoforge-stage-v5')) {
                         $adoptableIssueTargets = [ordered]@{}
                         $adoptableIssueProviders = [ordered]@{}
                         foreach ($catalogIssue in @($basePrompt.adoptableIssues)) {
