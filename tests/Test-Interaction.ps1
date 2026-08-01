@@ -466,9 +466,9 @@ Test-Case 'ROUND 확인의 Esc/B/Q/Ctrl+C/오타는 라운드 추가와 영구 �
     }
 }
 
-Test-Case '세 APPLY 확인의 Esc/B/Q/Ctrl+C/오타는 답변·제약 기록과 단계 reset을 만들지 않는다' {
+Test-Case '두 APPLY 확인의 Esc/B/Q/Ctrl+C/오타는 답변·제약 기록과 단계 reset을 만들지 않는다' {
     $fixture = New-DuoForgeInteractionTestRun -Name 'apply-abort'
-    foreach ($boundary in @('answer', 'common', 'supplement')) {
+    foreach ($boundary in @('answer', 'common')) {
         foreach ($case in @(Get-DuoForgeInteractionAbortCases)) {
             $before = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
             $control = [ordered]@{ decision = 0; constraint = 0 }
@@ -540,10 +540,9 @@ Test-Case '정확한 PARTIAL/ROUND/APPLY/DEFER만 각 주입 invoker를 한 번 
     $roundKeys = New-DuoForgeInteractionTestKeyReader -Keys @(New-DuoForgeInteractionTestTokenKeys -Token 'ROUND')
     $answerKeys = New-DuoForgeInteractionTestKeyReader -Keys @(New-DuoForgeInteractionTestTokenKeys -Token 'APPLY')
     $commonKeys = New-DuoForgeInteractionTestKeyReader -Keys @(New-DuoForgeInteractionTestTokenKeys -Token 'APPLY')
-    $supplementKeys = New-DuoForgeInteractionTestKeyReader -Keys @(New-DuoForgeInteractionTestTokenKeys -Token 'APPLY')
     $deferKeys = New-DuoForgeInteractionTestKeyReader -Keys @(New-DuoForgeInteractionTestTokenKeys -Token 'DEFER')
     $result = & $module {
-        param($runValue, $state, $partialReader, $roundReader, $answerReader, $commonReader, $supplementReader, $deferReader, $workspace)
+        param($runValue, $state, $partialReader, $roundReader, $answerReader, $commonReader, $deferReader, $workspace)
         $validation = [ordered]@{
             valid = $false
             request = [ordered]@{ allowPartial = $false }
@@ -578,22 +577,20 @@ Test-Case '정확한 PARTIAL/ROUND/APPLY/DEFER만 각 주입 invoker를 한 번 
         $round = Invoke-DuoForgeInteractiveRoundConfirmationInternal -Run $runValue -RoundInvoker $roundInvoker -ConfirmationKeyReader $roundReader -ConfirmationCapabilityProbe { $true } -ConfirmationFrameWriter { param($lines) } 6>$null
         $answer = Invoke-DuoForgeInteractiveApplyBoundaryInternal -Boundary answer -Run $runValue -IssueId 'D-001' -Text 'B' -DecisionInvoker $decisionInvoker -ConstraintInvoker $constraintInvoker -ConfirmationKeyReader $answerReader -ConfirmationCapabilityProbe { $true } -ConfirmationFrameWriter { param($lines) } 6>$null
         $common = Invoke-DuoForgeInteractiveApplyBoundaryInternal -Boundary common -Run $runValue -IssueId 'D-001' -Text 'Q' -DecisionInvoker $decisionInvoker -ConstraintInvoker $constraintInvoker -ConfirmationKeyReader $commonReader -ConfirmationCapabilityProbe { $true } -ConfirmationFrameWriter { param($lines) } 6>$null
-        $supplement = Invoke-DuoForgeInteractiveApplyBoundaryInternal -Boundary supplement -Run $runValue -IssueId 'D-001' -Text '보충 조건' -DecisionInvoker $decisionInvoker -ConstraintInvoker $constraintInvoker -ConfirmationKeyReader $supplementReader -ConfirmationCapabilityProbe { $true } -ConfirmationFrameWriter { param($lines) } 6>$null
         (& { Invoke-DuoForgeCliCoreInternal -Arguments @('defer', '--run', 'synthetic-run', '--issue', 'D-001', '--workspace', $workspace) -DecisionInvoker $deferInvoker -InteractiveHostProbe { $true } -ConfirmationKeyReader $deferReader -ConfirmationCapabilityProbe { $true } -ConfirmationFrameWriter { param($lines) } } 6>&1 | Out-String) | Out-Null
-        return [ordered]@{ partial = $partial.interaction; round = $round; answer = $answer; common = $common; supplement = $supplement }
-    } $fixture.run $control $partialKeys.reader $roundKeys.reader $answerKeys.reader $commonKeys.reader $supplementKeys.reader $deferKeys.reader $tempRoot
+        return [ordered]@{ partial = $partial.interaction; round = $round; answer = $answer; common = $common }
+    } $fixture.run $control $partialKeys.reader $roundKeys.reader $answerKeys.reader $commonKeys.reader $deferKeys.reader $tempRoot
     $after = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
-    foreach ($name in @('partial', 'round', 'answer', 'common', 'supplement')) { Assert-Equal $result[$name].action 'submit' "$name 정확 확인이 submit이 아닙니다." }
+    foreach ($name in @('partial', 'round', 'answer', 'common')) { Assert-Equal $result[$name].action 'submit' "$name 정확 확인이 submit이 아닙니다." }
     Assert-Equal $control.partial 1
     Assert-True ([bool]$control.allowPartial)
     Assert-Equal $control.round 1
     Assert-Equal $control.decision 1
-    Assert-Equal $control.constraint 2
+    Assert-Equal $control.constraint 1
     Assert-Equal $control.defer 1
     Assert-Equal $control.texts[0] 'B' '자유 입력 B가 답변 데이터로 보존되지 않았습니다.'
     Assert-Equal $control.texts[1] 'Q' '자유 입력 Q가 공통 전제 데이터로 보존되지 않았습니다.'
-    Assert-Equal $control.texts[2] '보충 조건'
-    foreach ($readerState in @($partialKeys.state, $roundKeys.state, $answerKeys.state, $commonKeys.state, $supplementKeys.state, $deferKeys.state)) { Assert-Equal $readerState.remaining 0 }
+    foreach ($readerState in @($partialKeys.state, $roundKeys.state, $answerKeys.state, $commonKeys.state, $deferKeys.state)) { Assert-Equal $readerState.remaining 0 }
     Assert-Equal $after $before '주입 성공 경계에서 실제 run 파일이나 단계 상태가 변경되었습니다.'
 }
 
@@ -619,7 +616,7 @@ Test-Case 'PARTIAL/ROUND/APPLY/DEFER 줄 입력 폴백은 ReturnTarget과 mutati
                         return (Confirm-DuoForgeInteractivePartialAnalysisInternal -Validation $validation -ReturnTarget parent -CancelReturnTarget home -InterruptReturnTarget home -InputReader $reader -ValidationInvoker $mutationInvoker 6>$null).interaction
                     }
                     'round' { return Invoke-DuoForgeInteractiveRoundConfirmationInternal -Run $runValue -InputReader $reader -RoundInvoker $mutationInvoker 6>$null }
-                    'apply' { return Invoke-DuoForgeInteractiveApplyBoundaryInternal -Boundary supplement -Run $runValue -IssueId 'D-001' -Text 'B' -InputReader $reader -ConstraintInvoker $mutationInvoker 6>$null }
+                    'apply' { return Invoke-DuoForgeInteractiveApplyBoundaryInternal -Boundary common -Run $runValue -IssueId 'D-001' -Text 'B' -InputReader $reader -ConstraintInvoker $mutationInvoker 6>$null }
                     'defer' { return Read-DuoForgeExactConfirmationInternal -Token 'DEFER' -Prompt '확인' -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -InputReader $reader 6>$null }
                 }
             } $fixture.run $boundary $control $lineInput.reader $tempRoot

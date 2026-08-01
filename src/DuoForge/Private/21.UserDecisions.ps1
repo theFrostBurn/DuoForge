@@ -210,7 +210,12 @@ function Set-DuoForgeUserDecisionInternal {
             $hasChoice = -not [string]::IsNullOrWhiteSpace($Choice)
             $hasCustomText = -not [string]::IsNullOrWhiteSpace($CustomText)
             if ($hasChoice -eq $hasCustomText) { throw (New-DuoForgeException -Code 'DF-DECISION-CHOICE' -Message 'answer에는 객관식 선택 또는 주관식 답변 중 하나만 필요합니다.') }
-            $options = if ($question.Count -eq 1) { @($question[0].options) } else { @($previousDecision.questionOptions) }
+            $options = if ($question.Count -eq 1) {
+                @(Get-DuoForgeQuestionOptionsForInteractionInternal -Options @($question[0].options))
+            }
+            else {
+                @(Get-DuoForgeQuestionOptionsForInteractionInternal -Options @($previousDecision.questionOptions))
+            }
             if ($options.Count -eq 0) { throw (New-DuoForgeException -Code 'DF-DECISION-NO-OPTIONS' -Message '기존 결정의 선택지 기록이 없어 변경할 수 없습니다.') }
             if ($hasCustomText) {
                 $normalizedCustomText = ($CustomText -replace '\s+', ' ').Trim()

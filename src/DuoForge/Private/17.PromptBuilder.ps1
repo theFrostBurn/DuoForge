@@ -347,6 +347,9 @@ $issueReferenceContract
 - userDecisions가 있으면 이를 구속력 있는 사용자 결정으로 반영하세요. 안전하거나 논리적으로 불가능하면 조용히 무시하지 말고 새 Critical 쟁점을 제기하세요.
 - userEvidence가 있으면 연결된 근거 스냅샷을 해당 쟁점의 새 근거로 평가하고, issueId 또는 externalKeys 중 하나를 issueResponses.issueKey에 사용해 충분성 여부와 반영 결과를 기록하세요.
 - openQuestions를 만들 때는 reasonNow, plainExplanation, codexOpinion, claudeOpinion, impactIfDeferred, estimatedCost, reversibility, confidence, safeDefault, experimentPossible을 가능한 한 구체적으로 채우세요.
+- openQuestions.options에는 사용자가 실제로 선택할 수 있고 서로 겹치지 않는 행동 두 개 또는 세 개만 넣으세요. 필드 설명, 자리 표시, 권장안 유무 같은 메타 문장은 선택지로 넣지 마세요.
+- openQuestions.recommendedOption은 options의 실제 문구 하나 또는 그 순서에 해당하는 A/B/C 코드와 정확히 일치해야 합니다.
+- openQuestions.safeDefault에는 네 번째 선택지가 아니라 사용자가 아직 답하지 않았을 때 지킬 안전한 동작을 설명하세요.
 
 <DUOFORGE_UNTRUSTED_DATA_JSON>
 $payloadJson

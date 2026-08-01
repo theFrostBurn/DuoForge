@@ -633,7 +633,9 @@ function Get-DuoForgeInteractiveQuestionPresentationInternal {
     $acceptedEditorial = @()
     if ($hasAcceptedEditorial) { $acceptedEditorial = @($latestEditorial[0]) }
     $options = [System.Collections.Generic.List[object]]::new()
-    $rawOptions = @(Get-DuoForgeObjectValue -Object $Question -Name 'options' -Default @())
+    # 신규 단계 결과는 저장 전에 엄격히 검증한다. 이 필터는 검증 강화 전에 저장된
+    # 질문에서 스키마 설명/자리 표시 문구가 실제 답변으로 노출되는 것만 방어한다.
+    $rawOptions = @(Get-DuoForgeQuestionOptionsForInteractionInternal -Options @(Get-DuoForgeObjectValue -Object $Question -Name 'options' -Default @()))
     $genericApprovalPair = $rawOptions.Count -eq 2 -and [string]$rawOptions[0] -match '^\s*A\s*[:：.)-]\s*제안 내용을 반영' -and [string]$rawOptions[1] -match '^\s*B\s*[:：.)-]\s*현재 요구를 유지'
     for ($index = 0; $index -lt $rawOptions.Count; $index++) {
         $letter = [string][char]([int][char]'A' + $index)
@@ -906,7 +908,7 @@ function Get-DuoForgeInteractiveQuestionMenuItemsInternal {
         })
     }
     $items.Add([ordered]@{ value = 'custom'; label = '선택지에 없는 내 의견 직접 입력'; detail = '주관식 답변으로 확정하거나 여러 질문에 공통으로 적용할 전제를 추가합니다.'; shortcuts = @('O'); enabled = $true })
-    $items.Add([ordered]@{ value = 'other'; label = '전체 내용과 다른 방법 보기'; detail = '잘린 질문 내용 전체 보기, 추가 토론, 보충 조건과 의견 비교를 선택할 수 있습니다.'; shortcuts = @('M'); enabled = $true })
+    $items.Add([ordered]@{ value = 'other'; label = '자세히 보기·추가 검토'; detail = '질문 전체 보기, 추가 토론, AI 상세 설명과 의견 비교를 선택합니다.'; shortcuts = @('M'); enabled = $true })
     $items.Add([ordered]@{ value = 'back'; label = '이전으로'; shortcuts = @('B'); enabled = $true })
     return @($items)
 }
@@ -918,7 +920,6 @@ function Get-DuoForgeInteractiveQuestionAlternativeMenuItemsInternal {
     $items = [System.Collections.Generic.List[object]]::new()
     $items.Add([ordered]@{ value = 'detail'; label = '질문 내용 전체 보기'; detail = '저장된 안전한 질문·쟁점·AI 검토·선택 결과를 줄임 없이 보여줍니다.'; shortcuts = @('V'); enabled = $true })
     if ($MaximumRounds -lt 3) { $items.Add([ordered]@{ value = 'round'; label = '한 토론 회차 더 진행'; shortcuts = @('R'); enabled = $true }) }
-    $items.Add([ordered]@{ value = 'constraint'; label = '현재 답변과 함께 적용할 보충 조건 입력'; detail = '현재 질문의 답을 대신하지 않고 마지막 문서·검증 단계에 조건을 추가합니다.'; shortcuts = @('F'); enabled = $true })
     $items.Add([ordered]@{ value = 'explain'; label = '관점과 수준을 선택해 상세 설명'; shortcuts = @('E'); enabled = $true })
     $items.Add([ordered]@{ value = 'compare'; label = '양쪽 의견과 장단점 비교'; shortcuts = @('C'); enabled = $true })
     $items.Add([ordered]@{ value = 'back'; label = '결정 화면으로 돌아가기'; shortcuts = @('B'); enabled = $true })
@@ -1204,7 +1205,7 @@ function Invoke-DuoForgeInteractiveCustomDecisionInternal {
 function Invoke-DuoForgeInteractiveApplyBoundaryInternal {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][ValidateSet('answer', 'common', 'supplement')][string]$Boundary,
+        [Parameter(Mandatory)][ValidateSet('answer', 'common')][string]$Boundary,
         [Parameter(Mandatory)][System.Collections.IDictionary]$Run,
         [Parameter(Mandatory)][string]$IssueId,
         [AllowEmptyString()][Parameter(Mandatory)][string]$Text,
@@ -1220,7 +1221,6 @@ function Invoke-DuoForgeInteractiveApplyBoundaryInternal {
     $prompt = switch ($Boundary) {
         'answer' { '이 내용으로 확정하려면 APPLY를 입력하세요' }
         'common' { '이 공통 전제를 적용하려면 APPLY를 입력하세요' }
-        default { '이 구조화 미리보기대로 적용하려면 APPLY를 입력하세요' }
     }
     $confirmation = Read-DuoForgeExactConfirmationInternal -Token 'APPLY' -Prompt $prompt -ReturnTarget parent -CancelReturnTarget work-menu -InterruptReturnTarget work-menu -InputReader $InputReader -KeyReader $ConfirmationKeyReader -FrameWriter $ConfirmationFrameWriter -CapabilityProbe $ConfirmationCapabilityProbe
     if ([string]$confirmation.action -ne 'submit') { return $confirmation }
@@ -1367,7 +1367,7 @@ function Invoke-DuoForgeInteractiveQuestion {
         if ($choice -eq 'other') {
             while ($true) {
                 $alternativeItems = @(Get-DuoForgeInteractiveQuestionAlternativeMenuItemsInternal -MaximumRounds ([int]$Run.manifest.maxRounds))
-                $alternativeInteraction = Invoke-DuoForgeMenuInteractionInternal -Items $alternativeItems -Title '다른 방법을 선택해 주세요.' -ReturnTarget parent -CancelReturnTarget work-menu -InterruptReturnTarget work-menu -InputReader $InputReader -MenuInvoker $MenuInvoker
+                $alternativeInteraction = Invoke-DuoForgeMenuInteractionInternal -Items $alternativeItems -Title '자세히 보기·추가 검토 항목을 선택해 주세요.' -ReturnTarget parent -CancelReturnTarget work-menu -InterruptReturnTarget work-menu -InputReader $InputReader -MenuInvoker $MenuInvoker
                 if ([string]$alternativeInteraction.action -eq 'back') { break }
                 if ([string]$alternativeInteraction.action -ne 'submit') { return $alternativeInteraction }
                 $choice = [string]$alternativeInteraction.value
@@ -1385,30 +1385,6 @@ function Invoke-DuoForgeInteractiveQuestion {
             $detailInteraction = Invoke-DuoForgeInteractiveQuestionDetailInternal -Question $question -Presentation $presentation -Issue $(if ($issue.Count -gt 0) { $issue[0] } else { $null }) -InputReader $InputReader -MenuInvoker $MenuInvoker
             if ([string]$detailInteraction.action -in @('cancel', 'interrupt', 'unavailable')) { return $detailInteraction }
             continue
-        }
-        if ($choice -eq 'constraint') {
-            $constraintTextInteraction = Read-DuoForgeFreeTextInteractionInternal -Prompt '두 AI에 적용할 추가 조건' -ReturnTarget parent -InterruptReturnTarget work-menu -InputReader $InputReader
-            if ([string]$constraintTextInteraction.action -ne 'submit') { return $constraintTextInteraction }
-            $constraintText = [string]$constraintTextInteraction.value
-            $resultsRoot = [System.IO.Path]::GetDirectoryName([string]$Run.runDirectory)
-            $preview = New-DuoForgeDecisionConstraintPreviewInternal -RunId ([string]$Run.state.runId) -IssueId ([string]$question.issueKey) -Text $constraintText -ResultsRoot $resultsRoot
-            $previewRows = [System.Collections.Generic.List[object]]::new()
-            foreach ($row in @(New-DuoForgePageHeaderRowsInternal -Title '보충 조건 적용 전 확인' -Tag 'APPLY 확인' -Layout $layout)) { $previewRows.Add($row) }
-            foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '입력 내용 확인' -Body '' -Layout $layout -First)) { $previewRows.Add($row) }
-            foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '정리된 조건' -Value ([string]$preview.normalizedConstraint) -Layout $layout -KeyWidth 16 -PreserveParagraphs)) { $previewRows.Add($row) }
-            foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '영향 대상' -Value ([string]$preview.affectedTarget) -Layout $layout -KeyWidth 16)) { $previewRows.Add($row) }
-            foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '적용 방식' -Value ([string]$preview.application) -Layout $layout -KeyWidth 16 -PreserveParagraphs)) { $previewRows.Add($row) }
-            foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '이 조건은 이후 두 AI 검토에 함께 적용됩니다.' -NextAction '위 미리보기대로 기록하려면 정확히 APPLY를 입력해 주세요.' -Layout $layout)) { $previewRows.Add($row) }
-            Write-DuoForgeDisplayRowsInternal -Rows @($previewRows) -Layout $layout
-            $confirmation = Invoke-DuoForgeInteractiveApplyBoundaryInternal -Boundary supplement -Run $Run -IssueId ([string]$question.issueKey) -Text ([string]$constraintText) -InputReader $InputReader -DecisionInvoker $DecisionInvoker -ConstraintInvoker $ConstraintInvoker -ConfirmationKeyReader $ConfirmationKeyReader -ConfirmationFrameWriter $ConfirmationFrameWriter -ConfirmationCapabilityProbe $ConfirmationCapabilityProbe
-            if ([string]$confirmation.action -ne 'submit') {
-                if ([string]$confirmation.action -in @('cancel', 'interrupt', 'unavailable')) { return $confirmation }
-                if ([string]$confirmation.action -eq 'back' -and [string]$confirmation.returnTarget -eq 'parent') { $showAlternativeMenu = $true }
-                continue
-            }
-            $applied = $confirmation.result
-            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '제약 조건을 기록했습니다.' -Message ("관련 AI 작업 {0}개를 다시 진행합니다." -f @($applied.resetSteps).Count) -Layout $layout) -Layout $layout
-            return
         }
         if ($choice -eq 'explain') {
             $request = Read-DuoForgeInteractiveExplanationRequest -InputReader $InputReader -MenuInvoker $MenuInvoker

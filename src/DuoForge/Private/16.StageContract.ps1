@@ -24,6 +24,48 @@ function Get-DuoForgeObjectValue {
     return $property.Value
 }
 
+function Test-DuoForgeQuestionOptionMetadataInternal {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Option)
+
+    $text = $Option.Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) { return $false }
+    return $text -match '(?i)\bplaceholder\b|자리\s*표시|옵션\s*나열용|실제\s*선택지는|recommendedOption\s*(?:없음|null|none|n/?a)'
+}
+
+function Get-DuoForgeQuestionOptionsForInteractionInternal {
+    [CmdletBinding()]
+    param([AllowEmptyCollection()][object[]]$Options = @())
+
+    return @($Options | ForEach-Object { ([string]$_).Trim() } | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_) -and -not (Test-DuoForgeQuestionOptionMetadataInternal -Option $_)
+    })
+}
+
+function Test-DuoForgeQuestionRecommendationInternal {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()][string]$RecommendedOption,
+        [AllowEmptyCollection()][object[]]$Options = @()
+    )
+
+    $recommended = $RecommendedOption.Trim()
+    if ([string]::IsNullOrWhiteSpace($recommended)) { return $false }
+    for ($index = 0; $index -lt $Options.Count; $index++) {
+        $letter = [string][char]([int][char]'A' + $index)
+        $option = ([string]$Options[$index]).Trim()
+        $prefixPattern = '^\s*' + [regex]::Escape($letter) + '\s*[:：.)-]\s*'
+        $optionWithoutPrefix = [regex]::Replace($option, $prefixPattern, '', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase).Trim()
+        $recommendedWithoutPrefix = [regex]::Replace($recommended, $prefixPattern, '', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase).Trim()
+        if (
+            [string]::Equals($recommended, $letter, [StringComparison]::OrdinalIgnoreCase) -or
+            [string]::Equals($recommended, $option, [StringComparison]::OrdinalIgnoreCase) -or
+            [string]::Equals($recommendedWithoutPrefix, $optionWithoutPrefix, [StringComparison]::OrdinalIgnoreCase)
+        ) { return $true }
+    }
+    return $false
+}
+
 function Get-DuoForgeIssueFingerprintInternal {
     [CmdletBinding()]
     param(
@@ -346,7 +388,32 @@ function Test-DuoForgeStageResultInternal {
             if ([string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $question -Name $name))) { $errors.Add("openQuestions.$name 값이 비어 있습니다.") }
         }
         $options = @(Get-DuoForgeObjectValue -Object $question -Name 'options' -Default @())
-        if ($options.Count -lt 2) { $errors.Add('openQuestions.options에는 두 개 이상의 선택지가 필요합니다.') }
+        if ($options.Count -lt 2 -or $options.Count -gt 3) { $errors.Add('openQuestions.options에는 실제 선택지 두 개 또는 세 개가 필요합니다.') }
+        $normalizedOptions = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        for ($optionIndex = 0; $optionIndex -lt $options.Count; $optionIndex++) {
+            if ($options[$optionIndex] -isnot [string]) {
+                $errors.Add('openQuestions.options의 각 선택지는 문자열이어야 합니다.')
+                continue
+            }
+            $optionText = ([string]$options[$optionIndex]).Trim()
+            if ([string]::IsNullOrWhiteSpace($optionText)) {
+                $errors.Add('openQuestions.options에는 비어 있지 않은 선택지만 사용할 수 있습니다.')
+                continue
+            }
+            if (Test-DuoForgeQuestionOptionMetadataInternal -Option $optionText) {
+                $errors.Add('openQuestions.options에는 스키마 설명이나 자리 표시 문구를 사용할 수 없습니다.')
+            }
+            $letter = [string][char]([int][char]'A' + $optionIndex)
+            $prefixPattern = '^\s*' + [regex]::Escape($letter) + '\s*[:：.)-]\s*'
+            $normalizedOption = ([regex]::Replace($optionText, $prefixPattern, '', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase) -replace '\s+', ' ').Trim()
+            if (-not $normalizedOptions.Add($normalizedOption)) {
+                $errors.Add('openQuestions.options에는 서로 다른 선택지만 사용할 수 있습니다.')
+            }
+        }
+        $recommendedOption = [string](Get-DuoForgeObjectValue -Object $question -Name 'recommendedOption' -Default '')
+        if (-not (Test-DuoForgeQuestionRecommendationInternal -RecommendedOption $recommendedOption -Options $options)) {
+            $errors.Add('openQuestions.recommendedOption은 options의 실제 선택지 또는 해당 A/B/C 코드와 일치해야 합니다.')
+        }
         $reversibility = [string](Get-DuoForgeObjectValue -Object $question -Name 'reversibility' -Default '')
         if (-not [string]::IsNullOrWhiteSpace($reversibility) -and $reversibility -notin @('easy', 'moderate', 'hard', 'unknown')) { $errors.Add('openQuestions.reversibility 값이 잘못되었습니다.') }
         $confidence = [string](Get-DuoForgeObjectValue -Object $question -Name 'confidence' -Default '')
