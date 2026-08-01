@@ -989,6 +989,10 @@ function New-DuoForgeInteractiveQuestionCardRowsInternal {
         # 메뉴에 다시 나오는 권장 방향은 실제 본문이 모두 보인 뒤 공간이 남을 때만 카드에도 표시한다.
         $expandedCoreIssue = [string](Get-DuoForgeObjectValue -Object $Presentation -Name 'coreIssueFull' -Default ([string]$Presentation.coreIssue))
         $expandedProposal = [string](Get-DuoForgeObjectValue -Object $Presentation -Name 'proposalFull' -Default ([string]$Presentation.proposalSummary))
+        $expandedRecommendation = [string]$Presentation.recommendedLabel
+        $recommendationLineCount = [Math]::Max(1, @(
+            Split-DuoForgeDisplayTextInternal -Text $expandedRecommendation -Width ([Math]::Max(1, [int]$layout.lineWidth - 2))
+        ).Count)
         $fullLineCounts = [ordered]@{
             current = @(Split-DuoForgeDisplayTextInternal -Text ([string]$Presentation.currentState) -Width ([Math]::Max(1, [int]$layout.lineWidth - 2))).Count
             core = @(Split-DuoForgeDisplayTextInternal -Text $expandedCoreIssue -Width ([Math]::Max(1, [int]$layout.lineWidth - 2))).Count
@@ -1012,7 +1016,8 @@ function New-DuoForgeInteractiveQuestionCardRowsInternal {
             }
             if (-not $allocatedAny) { break }
         }
-        $includeRecommendation = $remainingBodyLines -ge 3
+        $recommendationRequiredRows = 2 + $recommendationLineCount
+        $includeRecommendation = $remainingBodyLines -ge $recommendationRequiredRows
 
         if ($budget -ge $expandedMinimumRows) {
             & $append @(New-DuoForgeSectionRowsInternal -Title '현재 상태' -Body ([string]$Presentation.currentState) -Layout $layout -First -Compact -MaximumBodyLines ([int]$lineBudget.current))
@@ -1021,7 +1026,7 @@ function New-DuoForgeInteractiveQuestionCardRowsInternal {
             & $append @(New-DuoForgeSectionRowsInternal -Title '제안 방향' -Body $expandedProposal -Layout $layout -MaximumBodyLines ([int]$lineBudget.proposal))
             & $append @(New-DuoForgeSectionRowsInternal -Title '사용자에게 필요한 결정' -Body ([string]$Presentation.requestPrompt) -Layout $layout -MaximumBodyLines ([int]$lineBudget.request) -BodyRole 'warning')
             if ($includeRecommendation) {
-                & $append @(New-DuoForgeSectionRowsInternal -Title '권장 방향' -Body ([string]$Presentation.recommendedLabel) -Layout $layout -MaximumBodyLines 1 -BodyRole 'success')
+                & $append @(New-DuoForgeSectionRowsInternal -Title '권장 방향' -Body $expandedRecommendation -Layout $layout -MaximumBodyLines $recommendationLineCount -BodyRole 'success')
             }
         }
         else {
@@ -1029,7 +1034,7 @@ function New-DuoForgeInteractiveQuestionCardRowsInternal {
             & $append @(& $newQuestionSection '확인할 핵심 내용' ([string]$Presentation.compactCoreIssue) 2)
             & $append @(& $newQuestionSection 'AI 검토와 문서 처리' ([string]$Presentation.reviewFlow) 1)
             & $append @(& $newQuestionSection '사용자에게 필요한 결정' ([string]$Presentation.requestPrompt) 1 'warning')
-            & $append @(& $newQuestionSection '권장 방향' ([string]$Presentation.recommendedLabel) 1 'success')
+            & $append @(& $newQuestionSection '권장 방향' $expandedRecommendation $recommendationLineCount 'success')
         }
     }
     return @($rows)

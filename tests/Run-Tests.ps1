@@ -5800,6 +5800,66 @@ try {
         }
     }
 
+    Test-Case 'D-081형 긴 권장 방향은 카드에서 전부 보이거나 섹션 전체를 생략한다' {
+        $surface = & $module {
+            $question = [ordered]@{
+                issueKey = 'D-081'
+                title = '신비 선포와 묵상을 소리 내어 바치는가'
+                question = "각 단을 시작하는 '신비 선포 및 묵상'을 하나의 무음 스텝으로 처리할지, 발화하는 선포와 무음 묵상 두 스텝으로 분리할지, 아니면 전체를 발화 구간으로 볼지 정해 주세요."
+                options = @(
+                    '하나의 무음 스텝으로 둔다 — voiceExpected=false로 표시해 안내 힌트를 억제하고 장기 무전이 계측에서 제외하며, 전이는 다음 스텝(주님의 기도)의 시작 단서로만 판정한다. (이번 개정이 적용한 안전 기본값) 권장끝표식',
+                    '선포는 발화, 묵상은 무음인 두 스텝으로 분리한다 — 선포 문안에 인식 단서를 넣고 묵상 스텝만 무음 처리한다.',
+                    '전체를 발화 구간으로 둔다 — 선포와 묵상을 모두 소리 내어 읽는 것으로 보고 다른 기도문과 동일하게 처리한다.'
+                )
+                recommendedOption = 'A'
+                safeDefault = 'A'
+                reasonNow = '실제 기도 방식에 따라 처리 방식이 달라집니다.'
+                plainExplanation = '각 단을 시작할 때 선포를 하고 잠시 묵상합니다. 이때 소리를 내지 않으면 앱 입장에서는 장기 무전이로 보입니다.'
+                codexOpinion = ''
+                claudeOpinion = '무음 처리 경계를 명시해야 합니다.'
+                impactIfDeferred = '무전이 안내와 계측이 왜곡됩니다.'
+                reversibility = 'moderate'
+                confidence = 'medium'
+            }
+            $issue = [ordered]@{
+                issueId = 'D-081'; raisedBy = 'claude'; category = '기도 흐름'; severity = 'major'; targetDocumentId = 'A'
+                claim = '신비 선포와 묵상의 발화 여부가 확정되지 않았습니다.'
+                proposal = 'PrayerStep과 콘텐츠 스키마에 voiceExpected 플래그를 추가하고 세 곳에 연결한다: (a) 무전이 안내 힌트 억제, (b) NFR-08의 장기 무전이 계측에서 제외, (c) 전이는 다음 스텝의 시작 단서로만 판정. 이번 개정에서 안전 기본값으로 반영했으며 실제 기도 방식 확인 후 두 스텝으로 분리할 수 있도록 열린 항목으로 남겼다.'
+                resolutionStatus = 'AWAITING_USER'; blocking = $true; reviewerVerdicts = @(); editorialDecisions = @()
+            }
+            $presentation = Get-DuoForgeInteractiveQuestionPresentationInternal -Question $question -Issue $issue
+            $items = @(ConvertTo-DuoForgeMenuItemsInternal -Items @(Get-DuoForgeInteractiveQuestionMenuItemsInternal -Presentation $presentation -MaximumRounds 2))
+            $frames = foreach ($size in @(@(120, 32), @(160, 40), @(180, 40))) {
+                $width = [int]$size[0]
+                $height = [int]$size[1]
+                $card = @(New-DuoForgeInteractiveQuestionCardRowsInternal -Question $question -Presentation $presentation -Width $width -Height $height | ForEach-Object { [string]$_.text })
+                $menu = @(New-DuoForgeMenuFrameInternal -Items $items -Title '선택 요청: 번호로 선택하거나 O로 내 의견을 입력해 주세요.' -SelectedIndex 0 -Width $width -Height $height -ContextTransition)
+                $recommendationIndex = [Array]::IndexOf([object[]]$card, '── 권장 방향')
+                [ordered]@{
+                    width = $width
+                    height = $height
+                    card = $card
+                    menu = $menu
+                    recommendationIndex = $recommendationIndex
+                    recommendationText = if ($recommendationIndex -ge 0) { @($card[$recommendationIndex..($card.Count - 1)]) -join ' ' } else { '' }
+                }
+            }
+            return @($frames)
+        }
+
+        foreach ($frame in @($surface)) {
+            $menuText = $frame.menu -join ' '
+            Assert-ContainsText $menuText '권장끝표식' "$($frame.width)x$($frame.height) 선택 항목에서 권장 방향 끝이 잘렸습니다."
+            if ([int]$frame.recommendationIndex -ge 0) {
+                Assert-ContainsText ([string]$frame.recommendationText) '권장끝표식' "$($frame.width)x$($frame.height) 카드의 권장 방향 끝이 잘렸습니다."
+                Assert-NotContainsText ([string]$frame.recommendationText) '…' "$($frame.width)x$($frame.height) 카드의 권장 방향에 말줄임표가 남았습니다."
+            }
+            if ([int]$frame.width -ge 160) {
+                Assert-True ([int]$frame.recommendationIndex -ge 0) "$($frame.width)x$($frame.height)에서 들어갈 수 있는 권장 방향이 생략됐습니다."
+            }
+        }
+    }
+
     Test-Case '추가 자료 요청은 목록을 요약하고 선택한 쟁점과 필요한 자료를 끝까지 보여준다' {
         $surface = & $module {
             $issue = [ordered]@{
