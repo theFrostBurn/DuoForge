@@ -450,7 +450,7 @@ function Assert-DuoForgeStoredContextPlanContractInternal {
         [Parameter(Mandatory)][string]$RunDirectory,
         [Parameter(Mandatory)][System.Collections.IDictionary]$Manifest,
         [Parameter(Mandatory)][System.Collections.IDictionary]$Inventory,
-        [Parameter(Mandatory)][ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion
+        [Parameter(Mandatory)][ValidateSet('workflow-v1', 'workflow-v2', 'workflow-v3')][string]$WorkflowVersion
     )
 
     $fail = {
@@ -491,7 +491,7 @@ function Assert-DuoForgeStoredContextPlanContractInternal {
         return [ordered]@{ schemaVersion = 1; batchCount = $batches.Count; plan = $plan }
     }
     if ($schemaVersion -ne 2) { & $fail "지원하지 않는 context-plan schemaVersion입니다: $schemaVersion" }
-    if ($WorkflowVersion -ne 'workflow-v2') { & $fail 'context-plan schema 2는 workflow-v2에서만 사용할 수 있습니다.' }
+    if ($WorkflowVersion -notin @('workflow-v2', 'workflow-v3')) { & $fail 'context-plan schema 2는 workflow-v2/v3에서만 사용할 수 있습니다.' }
     if ([string](Get-DuoForgeObjectValue -Object $plan -Name 'segmentationPolicy' -Default '') -ne 'semantic-markdown-v1' -or
         [string](Get-DuoForgeObjectValue -Object $plan -Name 'envelopePolicy' -Default '') -ne 'document-map-extractive-bridge-v1') { & $fail 'schema 2 분할 또는 봉투 정책이 다릅니다.' }
 
@@ -837,6 +837,9 @@ function Assert-DuoForgeGeneratedContextPromptContractInternal {
         [Parameter(Mandatory)][System.Collections.IDictionary]$ContextPlan
     )
 
+    if ((Get-DuoForgeWorkflowVersionInternal -Manifest $Manifest) -eq 'workflow-v3') {
+        return [ordered]@{ promptCount = 0; maximumPromptBytes = 0L }
+    }
     if ([int](Get-DuoForgeObjectValue -Object $ContextPlan -Name 'schemaVersion' -Default 1) -ne 2 -or
         -not [bool](Get-DuoForgeObjectValue -Object $ContextPlan -Name 'enabled' -Default $false)) {
         return [ordered]@{ promptCount = 0; maximumPromptBytes = 0L }
@@ -868,7 +871,7 @@ function Test-DuoForgeStoredStageGraphContractInternal {
         [Parameter(Mandatory)][string]$RunDirectory,
         [Parameter(Mandatory)][System.Collections.IDictionary]$Manifest,
         [Parameter(Mandatory)][System.Collections.IDictionary]$Steps,
-        [Parameter(Mandatory)][ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion
+        [Parameter(Mandatory)][ValidateSet('workflow-v1', 'workflow-v2', 'workflow-v3')][string]$WorkflowVersion
     )
 
     $mode = [string](Get-DuoForgeObjectValue -Object $Manifest -Name 'mode' -Default '')
@@ -880,6 +883,10 @@ function Test-DuoForgeStoredStageGraphContractInternal {
     $contextBatchDocumentIds = @(Get-DuoForgeContextBatchDocumentIdsInternal -RunDirectory $RunDirectory)
     try {
         $expected = New-DuoForgeStageGraph -Mode $mode -MaxRounds $maxRounds -FirstSynthesizer $firstSynthesizer -ContextBatchCount $contextBatchCount -ContextBatchDocumentIds $contextBatchDocumentIds -WorkflowVersion $WorkflowVersion
+        if ($WorkflowVersion -eq 'workflow-v3' -and @($Steps.steps | Where-Object { [string]$_.stage -eq 'final-revision' }).Count -eq 1) {
+            $syntheticBlockingResult = [ordered]@{ finalApproved = $false; issues = @([ordered]@{ severity = 'critical'; blockingProposal = $true }) }
+            $expected = Add-DuoForgeThinFinalRevisionStepInternal -Graph $expected -ValidationResult $syntheticBlockingResult
+        }
     }
     catch {
         return [ordered]@{ valid = $false; detail = "manifest로 예상 단계 그래프를 만들 수 없습니다: $($_.Exception.Message)" }
@@ -918,9 +925,9 @@ function Test-DuoForgeStoredStageGraphContractInternal {
         if ($actualContextBatchId -cne $expectedContextBatchId) {
             return [ordered]@{ valid = $false; detail = "단계 contextBatchId가 예상 그래프와 다릅니다: $key" }
         }
-        if ($WorkflowVersion -eq 'workflow-v2') {
+        if ($WorkflowVersion -in @('workflow-v2', 'workflow-v3')) {
             if ([string](Get-DuoForgeObjectValue -Object $actual -Name 'performedBy' -Default '') -cne [string]$expectedStep.performedBy -or
-                [string](Get-DuoForgeObjectValue -Object $actual -Name 'targetDocumentId' -Default '') -cne [string]$expectedStep.targetDocumentId) {
+                ($WorkflowVersion -eq 'workflow-v2' -and [string](Get-DuoForgeObjectValue -Object $actual -Name 'targetDocumentId' -Default '') -cne [string]$expectedStep.targetDocumentId)) {
                 return [ordered]@{ valid = $false; detail = "단계 작업자 또는 대상 계보가 예상 그래프와 다릅니다: $key" }
             }
             $actualSourcesValue = $null
@@ -932,6 +939,13 @@ function Test-DuoForgeStoredStageGraphContractInternal {
             $expectedSources = @($expectedStep.sourceDocumentIds | ForEach-Object { [string]$_ } | Sort-Object)
             if (($actualSources -join "`n") -cne ($expectedSources -join "`n")) {
                 return [ordered]@{ valid = $false; detail = "단계 출처 계보가 예상 그래프와 다릅니다: $key" }
+            }
+            if ($WorkflowVersion -eq 'workflow-v3') {
+                $actualOutputs = @((Get-DuoForgeObjectValue -Object $actual -Name 'outputDocumentIds' -Default @()) | ForEach-Object { [string]$_ })
+                $expectedOutputs = @($expectedStep.outputDocumentIds | ForEach-Object { [string]$_ })
+                if (($actualOutputs -join "`n") -cne ($expectedOutputs -join "`n")) {
+                    return [ordered]@{ valid = $false; detail = "단계 출력 슬롯이 예상 그래프와 다릅니다: $key" }
+                }
             }
         }
     }
@@ -983,6 +997,18 @@ function Assert-DuoForgeRunStorageContractInternal {
             $stepsWorkflow = [string](Get-DuoForgeObjectValue -Object $steps -Name 'workflowVersion' -Default '')
             if ([int](Get-DuoForgeObjectValue -Object $steps -Name 'schemaVersion' -Default 0) -ne 1 -or (-not [string]::IsNullOrWhiteSpace($stepsWorkflow) -and $stepsWorkflow -ne 'workflow-v1')) { & $fail 'workflow-v1 steps 계약이 일치하지 않습니다.' }
         }
+        return $true
+    }
+
+    if ($workflowVersion -eq 'workflow-v3') {
+        if ($manifestSchema -ne 5 -or [string](Get-DuoForgeObjectValue -Object $manifest -Name 'storageContractVersion' -Default '') -ne 'duoforge-run-v3') { & $fail 'workflow-v3 manifest는 schemaVersion 5와 duoforge-run-v3 계약을 선언해야 합니다.' }
+        if ($stateSchema -ne 2 -or $inventorySchema -ne 2 -or $ledgerSchema -ne 2) { & $fail 'workflow-v3 state/inventory/ledger schemaVersion은 2여야 합니다.' }
+        foreach ($component in @($state, $inventory, $ledger)) {
+            if ([string](Get-DuoForgeObjectValue -Object $component -Name 'workflowVersion' -Default '') -ne 'workflow-v3') { & $fail 'workflow-v3 구성요소가 다른 workflowVersion을 선언합니다.' }
+        }
+        if ([string](Get-DuoForgeObjectValue -Object $manifest -Name 'promptTemplateVersion' -Default '') -ne 'duoforge-thin-stage-v1' -or [string](Get-DuoForgeObjectValue -Object $state -Name 'promptContractVersion' -Default '') -ne 'duoforge-thin-stage-v1') { & $fail 'workflow-v3 프롬프트 계약이 일치하지 않습니다.' }
+        if ([int](Get-DuoForgeObjectValue -Object $manifest -Name 'stageGraphSchemaVersion' -Default 0) -ne 3 -or [int](Get-DuoForgeObjectValue -Object $manifest -Name 'stageResultSchemaVersion' -Default 0) -ne 3) { & $fail 'workflow-v3 단계 계약 버전이 다릅니다.' }
+        if ($null -ne $steps -and ([int]$steps.schemaVersion -ne 3 -or [string]$steps.workflowVersion -ne 'workflow-v3')) { & $fail 'workflow-v3 steps 계약이 일치하지 않습니다.' }
         return $true
     }
 
@@ -1103,13 +1129,16 @@ function New-DuoForgeRunInternal {
 
         $now = Get-DuoForgeUtcNow
         $request = $ValidationResult.request
+        $workflowVersion = [string](Get-DuoForgeObjectValue -Object $request -Name 'workflowVersion' -Default 'workflow-v2')
+        $isThinCore = $workflowVersion -eq 'workflow-v3'
+        $promptContractVersion = if ($isThinCore) { 'duoforge-thin-stage-v1' } else { 'duoforge-stage-v5' }
         if ([int](Get-DuoForgeObjectValue -Object $ValidationResult.contextPlan -Name 'schemaVersion' -Default 0) -ne 2) {
             throw (New-DuoForgeException -Code 'DF-CONTEXT-PLAN-SCHEMA' -Message '신규 실행은 context-plan schemaVersion 2로만 만들 수 있습니다.')
         }
         $state = [ordered]@{
             schemaVersion = 2
-            workflowVersion = 'workflow-v2'
-            promptContractVersion = 'duoforge-stage-v5'
+            workflowVersion = $workflowVersion
+            promptContractVersion = $promptContractVersion
             runId = $runId
             mode = $request.mode
             documentType = $request.documentType
@@ -1131,11 +1160,14 @@ function New-DuoForgeRunInternal {
             schemaRepairPreparedAt = $null
             promptRepairGrantCount = 0
             promptRepairPreparedAt = $null
+            recoveryPreparationCount = 0
+            recoveryPreparedAt = $null
+            recoveryCause = $null
             createdAt = $now
             updatedAt = $now
         }
         Write-DuoForgeJsonAtomic -Path (Join-Path $runDirectory 'state.json') -Value $state
-        Write-DuoForgeJsonAtomic -Path (Join-Path $runDirectory 'issues.json') -Value ([ordered]@{ schemaVersion = 2; workflowVersion = 'workflow-v2'; issueSchemaVersion = 2; issues = @() })
+        Write-DuoForgeJsonAtomic -Path (Join-Path $runDirectory 'issues.json') -Value ([ordered]@{ schemaVersion = 2; workflowVersion = $workflowVersion; issueSchemaVersion = 2; issues = @() })
         Write-DuoForgeJsonAtomic -Path (Join-Path $runDirectory 'decisions\pending.json') -Value ([ordered]@{ schemaVersion = 1; questions = @() })
         Add-DuoForgeRunEvent -RunDirectory $runDirectory -Type 'RUN_CREATED' -Status 'CREATED' -Data ([ordered]@{ mode = $request.mode })
 
@@ -1144,7 +1176,7 @@ function New-DuoForgeRunInternal {
         $snapshotRecords = @(New-DuoForgeFileSnapshots -DestinationDirectory (Join-Path $runDirectory 'inputs\snapshots') -Files $sourceFiles)
         $inventory = [ordered]@{
             schemaVersion = 2
-            workflowVersion = 'workflow-v2'
+            workflowVersion = $workflowVersion
             generatedAt = Get-DuoForgeUtcNow
             mode = $request.mode
             sourceFiles = $sourceFiles
@@ -1163,14 +1195,14 @@ function New-DuoForgeRunInternal {
 
         $manifestInputs = New-DuoForgeManifestInputReferencesInternal -Mode ([string]$request.mode) -Roles $inventory.roles -SnapshotRecords $snapshotRecords
         $manifest = [ordered]@{
-            schemaVersion = 4
-            workflowVersion = 'workflow-v2'
-            storageContractVersion = 'duoforge-run-v2'
+            schemaVersion = if ($isThinCore) { 5 } else { 4 }
+            workflowVersion = $workflowVersion
+            storageContractVersion = if ($isThinCore) { 'duoforge-run-v3' } else { 'duoforge-run-v2' }
             stateSchemaVersion = 2
             inventorySchemaVersion = 2
             issueLedgerSchemaVersion = 2
-            stageGraphSchemaVersion = 2
-            stageResultSchemaVersion = 2
+            stageGraphSchemaVersion = if ($isThinCore) { 3 } else { 2 }
+            stageResultSchemaVersion = if ($isThinCore) { 3 } else { 2 }
             runId = $runId
             name = if ([string]::IsNullOrWhiteSpace([string]$request.name)) { [System.IO.Path]::GetFileNameWithoutExtension([string]$sourceFiles[0].path) } else { $request.name }
             mode = $request.mode
@@ -1184,9 +1216,9 @@ function New-DuoForgeRunInternal {
             pauseAfterRound = [bool](Get-DuoForgeObjectValue -Object $request -Name 'pauseAfterRound' -Default $false)
             allowPartial = [bool](Get-DuoForgeObjectValue -Object $request -Name 'allowPartial' -Default $false)
             subscriptionOnly = $true
-            promptTemplateVersion = 'duoforge-stage-v5'
+            promptTemplateVersion = $promptContractVersion
             artifactVisibilityPolicy = 'transitive-dependencies-v1'
-            artifactProjectionPolicy = 'stage-relevance-v1'
+            artifactProjectionPolicy = if ($isThinCore) { 'thin-primary-metadata-v1' } else { 'stage-relevance-v1' }
             providers = [ordered]@{
                 codex = [ordered]@{ version = $ValidationResult.doctor.providers.codex.version; authType = $ValidationResult.doctor.providers.codex.authType }
                 claude = [ordered]@{ version = $ValidationResult.doctor.providers.claude.version; authType = $ValidationResult.doctor.providers.claude.authType }
@@ -1215,7 +1247,8 @@ function New-DuoForgeRunInternal {
     catch {
         if (-not $_.Exception.Data.Contains('DuoForgeDiagnosticId')) {
             $code = if ($_.Exception.Data.Contains('DuoForgeCode')) { [string]$_.Exception.Data['DuoForgeCode'] } else { 'DF-RUN-CREATE' }
-            $runContext = [ordered]@{ runId = $runId; workflowVersion = 'workflow-v2'; status = 'CREATED'; lastCompletedStage = '' }
+            $failedWorkflowVersion = [string](Get-DuoForgeObjectValue -Object (Get-DuoForgeObjectValue -Object $ValidationResult -Name 'request' -Default ([ordered]@{})) -Name 'workflowVersion' -Default 'workflow-v2')
+            $runContext = [ordered]@{ runId = $runId; workflowVersion = $failedWorkflowVersion; status = 'CREATED'; lastCompletedStage = '' }
             $doctor = Get-DuoForgeObjectValue -Object $ValidationResult -Name 'doctor'
             $providers = Get-DuoForgeObjectValue -Object $doctor -Name 'providers'
             $codexProvider = Get-DuoForgeObjectValue -Object $providers -Name 'codex'

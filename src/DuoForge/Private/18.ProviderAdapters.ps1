@@ -48,11 +48,13 @@ function Get-DuoForgeStageScopedProviderSchemaInternal {
         [Parameter(Mandatory)]$Schema,
         [Parameter(Mandatory)][System.Collections.IDictionary]$Step,
         [ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion = 'workflow-v1',
-        [AllowEmptyString()][string]$PromptTemplateVersion = ''
+        [AllowEmptyString()][string]$PromptTemplateVersion = '',
+        [bool]$EnforceIssueKeyPrefix = $true,
+        [AllowNull()][System.Collections.IDictionary]$ContextEvidenceContract
     )
 
     $scoped = ConvertTo-DuoForgeHashtable -InputObject $Schema
-    if ($WorkflowVersion -ne 'workflow-v2' -or $PromptTemplateVersion -ne 'duoforge-stage-v5') { return $scoped }
+    if ($WorkflowVersion -ne 'workflow-v2') { return $scoped }
 
     $properties = $scoped.properties
     $properties.stage.enum = @([string]$Step.stage)
@@ -70,14 +72,20 @@ function Get-DuoForgeStageScopedProviderSchemaInternal {
     }
 
     $sourceDocumentIds = @((Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @()) | ForEach-Object { [string]$_ } | Sort-Object -Unique)
-    $properties.sourceDocumentIds.items.enum = @($sourceDocumentIds)
+    if ($sourceDocumentIds.Count -gt 0) {
+        $properties.sourceDocumentIds.items.enum = @($sourceDocumentIds)
+    }
+    else {
+        $null = $properties.sourceDocumentIds.items.Remove('enum')
+    }
     $properties.sourceDocumentIds['minItems'] = $sourceDocumentIds.Count
     $properties.sourceDocumentIds['maxItems'] = $sourceDocumentIds.Count
 
-    $lineagePolicy = Get-DuoForgeStageLineagePolicyInternal `
+    $contractProfile = Get-DuoForgeStageResultContractProfileInternal `
         -Stage ([string]$Step.stage) `
         -TargetDocumentId $targetDocumentId `
         -SourceDocumentIds $sourceDocumentIds
+    $lineagePolicy = $contractProfile.lineage
     if (-not [bool]$lineagePolicy.issueResponsesAllowed) { $properties.issueResponses['maxItems'] = 0 }
     if (-not [bool]$lineagePolicy.adoptionsAllowed) { $properties.adoptions['maxItems'] = 0 }
 
@@ -92,15 +100,35 @@ function Get-DuoForgeStageScopedProviderSchemaInternal {
     if ($evidenceSources.Count -gt 0) {
         $properties.issues.items.properties.evidence.items.properties.sourceDocumentId.enum = @($evidenceSources)
     }
+    if ([bool]$lineagePolicy.adoptionsAllowed) {
+        $properties.adoptions.items.properties.sourceDocumentId.enum = @($lineagePolicy.adoptionSourceDocumentIds)
+        $properties.adoptions.items.properties.targetDocumentId.enum = @($lineagePolicy.adoptionTargetDocumentIds)
+    }
 
-    if ([string]$Step.stage -in @('independent-draft', 'independent-merge-draft', 'synthesis', 'owned-document-revision', 'document-revision')) {
+    if ($EnforceIssueKeyPrefix -and $PromptTemplateVersion -in @('duoforge-stage-v4', 'duoforge-stage-v5')) {
+        $issueKeyPrefix = Get-DuoForgeExpectedNewIssueKeyPrefixForStepInternal -Step $Step
+        $properties.issues.items.properties.issueKey.pattern = '^' + [regex]::Escape($issueKeyPrefix) + '\d{3,}$'
+    }
+
+    if ([bool]$contractProfile.contextEvidenceRequired -and $null -ne $ContextEvidenceContract) {
+        $evidenceSchema = $properties.issues.items.properties.evidence
+        $evidenceSchema['minItems'] = 1
+        $evidenceSchema.items.properties.proposedByProvider.enum = @([string]$Step.provider)
+        foreach ($name in @('sourceDocumentId', 'path', 'location', 'excerptHash')) {
+            $expectedValue = [string](Get-DuoForgeObjectValue -Object $ContextEvidenceContract -Name $name -Default '')
+            $evidenceSchema.items.properties[$name].enum = @($expectedValue)
+        }
+    }
+
+    if ([bool]$contractProfile.documentRequired) {
         $properties.document.type = 'string'
         $properties.document['minLength'] = 1
+        $properties.document['pattern'] = '\S'
     }
     else {
         $properties.document.type = 'null'
     }
-    if ([string]$Step.stage -in @('final-validation', 'document-validation')) {
+    if ([bool]$contractProfile.finalApprovedRequired) {
         $properties.finalApproved.type = 'boolean'
     }
     else {
@@ -196,9 +224,25 @@ function Get-DuoForgeProviderCommandSpecInternal {
 
     $manifest = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json')
     $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
+    if ($workflowVersion -eq 'workflow-v3') {
+        $outputCount = @(Get-DuoForgeObjectValue -Object $Step -Name 'outputDocumentIds' -Default @()).Count
+        $definition = Get-DuoForgeThinStageContractDefinitionInternal -Stage ([string]$Step.stage) -OutputDocumentCount $outputCount
+        $schema = New-DuoForgeThinProviderSchemaInternal -Definition $definition
+        return Get-DuoForgeStructuredProviderCommandSpecInternal `
+            -Provider $Provider `
+            -RunDirectory $RunDirectory `
+            -OperationKey ([string]$Step.stepKey) `
+            -Prompt $Prompt `
+            -Schema $schema `
+            -SchemaFileName 'thin-stage-v1.schema.json'
+    }
     $schemaPath = Get-DuoForgeStageSchemaPath -WorkflowVersion $workflowVersion
     $schema = Read-DuoForgeJson -Path $schemaPath
-    $schema = Get-DuoForgeStageScopedProviderSchemaInternal -Schema $schema -Step $Step -WorkflowVersion $workflowVersion -PromptTemplateVersion ([string]$manifest.promptTemplateVersion)
+    $contextEvidenceContract = if ($workflowVersion -eq 'workflow-v2' -and [string]$Step.stage -eq 'context-batch-analysis') {
+        Get-DuoForgeContextEvidenceContractForStepInternal -RunDirectory $RunDirectory -Step $Step
+    }
+    else { $null }
+    $schema = Get-DuoForgeStageScopedProviderSchemaInternal -Schema $schema -Step $Step -WorkflowVersion $workflowVersion -PromptTemplateVersion ([string]$manifest.promptTemplateVersion) -EnforceIssueKeyPrefix (Test-DuoForgeStageIssueKeyPrefixContractInternal -Manifest $manifest -Step $Step) -ContextEvidenceContract $contextEvidenceContract
     return Get-DuoForgeStructuredProviderCommandSpecInternal `
         -Provider $Provider `
         -RunDirectory $RunDirectory `
@@ -229,9 +273,11 @@ function ConvertFrom-DuoForgeClaudeEnvelope {
     param(
         [Parameter(Mandatory)][AllowEmptyString()][string]$Json,
         [Parameter(Mandatory)][string]$ExpectedStage,
-        [ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion = 'workflow-v1',
+        [ValidateSet('workflow-v1', 'workflow-v2', 'workflow-v3')][string]$WorkflowVersion = 'workflow-v1',
         [AllowNull()][string]$ExpectedTargetDocumentId,
-        [AllowEmptyCollection()][string[]]$ExpectedSourceDocumentIds = @()
+        [AllowEmptyCollection()][string[]]$ExpectedSourceDocumentIds = @(),
+        [AllowEmptyString()][string]$ExpectedPerformedBy = '',
+        [AllowEmptyString()][string]$ExpectedIssueKeyPrefix = ''
     )
 
     try { $envelope = ConvertTo-DuoForgeHashtable -InputObject ($Json | ConvertFrom-Json -Depth 100) }
@@ -247,7 +293,10 @@ function ConvertFrom-DuoForgeClaudeEnvelope {
         throw (New-DuoForgeException -Code 'DF-CLAUDE-STRUCTURED-OUTPUT' -Message 'Claude 결과에 검증된 structured_output이 없습니다.')
     }
     $raw = $structured | ConvertTo-Json -Depth 100 -Compress
-    return ConvertFrom-DuoForgeProviderResult -RawJson $raw -ExpectedStage $ExpectedStage -ExpectedProvider 'claude' -WorkflowVersion $WorkflowVersion -ExpectedTargetDocumentId $ExpectedTargetDocumentId -ExpectedSourceDocumentIds $ExpectedSourceDocumentIds
+    if ($WorkflowVersion -eq 'workflow-v3') {
+        return ConvertFrom-DuoForgeThinProviderResultInternal -RawJson $raw -Stage $ExpectedStage
+    }
+    return ConvertFrom-DuoForgeProviderResult -RawJson $raw -ExpectedStage $ExpectedStage -ExpectedProvider 'claude' -WorkflowVersion $WorkflowVersion -ExpectedTargetDocumentId $ExpectedTargetDocumentId -ExpectedSourceDocumentIds $ExpectedSourceDocumentIds -ExpectedPerformedBy $ExpectedPerformedBy -ExpectedIssueKeyPrefix $ExpectedIssueKeyPrefix
 }
 
 function Get-DuoForgeProviderFailureClassificationInternal {
@@ -357,6 +406,11 @@ function Invoke-DuoForgeLiveProviderStage {
     }
     $expectedTargetDocumentId = Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId'
     $expectedSourceDocumentIds = @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @())
+    $expectedPerformedBy = [string](Get-DuoForgeObjectValue -Object $Step -Name 'performedBy' -Default ([string]$Step.provider))
+    $expectedIssueKeyPrefix = if (Test-DuoForgeStageIssueKeyPrefixContractInternal -Manifest $manifest -Step $Step) {
+        Get-DuoForgeExpectedNewIssueKeyPrefixForStepInternal -Step $Step
+    }
+    else { '' }
     $spec = Get-DuoForgeProviderCommandSpecInternal -Provider ([string]$Step.provider) -RunDirectory $RunDirectory -Step $Step -Prompt $Prompt
     Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'PROVIDER_CALL_STARTED' -Status 'RUNNING' -Data ([ordered]@{
         workflowVersion = $workflowVersion
@@ -410,10 +464,15 @@ function Invoke-DuoForgeLiveProviderStage {
                 throw (New-DuoForgeException -Code 'DF-CODEX-LAST-MESSAGE' -Message 'Codex 최종 구조화 출력 파일이 없습니다.')
             }
             $rawJson = [System.IO.File]::ReadAllText([string]$spec.outputPath, [System.Text.UTF8Encoding]::new($false, $true))
-            $converted = ConvertFrom-DuoForgeProviderResult -RawJson $rawJson -ExpectedStage ([string]$Step.stage) -ExpectedProvider 'codex' -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId $expectedTargetDocumentId -ExpectedSourceDocumentIds $expectedSourceDocumentIds
+            $converted = if ($workflowVersion -eq 'workflow-v3') {
+                ConvertFrom-DuoForgeThinProviderResultInternal -RawJson $rawJson -Stage ([string]$Step.stage)
+            }
+            else {
+                ConvertFrom-DuoForgeProviderResult -RawJson $rawJson -ExpectedStage ([string]$Step.stage) -ExpectedProvider 'codex' -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId $expectedTargetDocumentId -ExpectedSourceDocumentIds $expectedSourceDocumentIds -ExpectedPerformedBy $expectedPerformedBy -ExpectedIssueKeyPrefix $expectedIssueKeyPrefix
+            }
         }
         else {
-            $converted = ConvertFrom-DuoForgeClaudeEnvelope -Json ([string]$processResult.stdout) -ExpectedStage ([string]$Step.stage) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId $expectedTargetDocumentId -ExpectedSourceDocumentIds $expectedSourceDocumentIds
+            $converted = ConvertFrom-DuoForgeClaudeEnvelope -Json ([string]$processResult.stdout) -ExpectedStage ([string]$Step.stage) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId $expectedTargetDocumentId -ExpectedSourceDocumentIds $expectedSourceDocumentIds -ExpectedPerformedBy $expectedPerformedBy -ExpectedIssueKeyPrefix $expectedIssueKeyPrefix
         }
 
         Add-DuoForgeRunEvent -RunDirectory $RunDirectory -Type 'PROVIDER_CALL_COMPLETED' -Status 'RUNNING' -Data ([ordered]@{
@@ -472,6 +531,14 @@ function New-DuoForgeProviderTickCallbackInternal {
 function New-DuoForgeFakeStageResult {
     [CmdletBinding()]
     param([Parameter(Mandatory)][System.Collections.IDictionary]$Step)
+
+    if ($Step.Contains('outputDocumentIds')) {
+        if ([string]$Step.stage -eq 'final-validation') { return [ordered]@{ primary = [ordered]@{ approved = $true }; metadata = [ordered]@{ summary = '가짜 최종 승인' } } }
+        return [ordered]@{
+            primary = [ordered]@{ documents = @($Step.outputDocumentIds | ForEach-Object { "# 가짜 $($Step.provider) 문서`n`n단계: $($Step.stage)" }) }
+            metadata = [ordered]@{ summary = "가짜 공급자 결과: $($Step.stepKey)" }
+        }
+    }
 
     $document = $null
     if ([string]$Step.stage -in @('independent-draft', 'independent-merge-draft', 'synthesis', 'owned-document-revision', 'document-revision')) {

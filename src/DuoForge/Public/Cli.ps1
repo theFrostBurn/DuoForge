@@ -13,7 +13,9 @@ function Invoke-DuoForgeCliCoreInternal {
         [scriptblock]$DeleteInvoker,
         [scriptblock]$RetryInvoker,
         [scriptblock]$RepairInvoker,
+        [scriptblock]$ProjectContractRepairInvoker,
         [scriptblock]$PromptRepairInvoker,
+        [scriptblock]$RecoveryInvoker,
         [scriptblock]$InteractiveHostProbe,
         [scriptblock]$InteractiveHomeInvoker,
         [scriptblock]$ConfirmationKeyReader,
@@ -283,11 +285,11 @@ function Invoke-DuoForgeCliCoreInternal {
             $restoredStatus = [string](Get-DuoForgeObjectValue -Object $result -Name 'status' -Default '')
             $restoredFailure = $restoredStatus -in @('FAILED_STAGE', 'SOURCE_DRIFT')
             $successMessage = if ($restoredFailure) { '원래 실패 상태로 돌아갔습니다. AI 작업은 시작하지 않았습니다.' } else { '사용자 요청으로 멈춘 상태로 돌아갔습니다. AI 작업은 시작하지 않았습니다.' }
-            $nextAction = if ($restoredFailure) { '실패한 작업 기록을 확인하고, 가능한 경우 retry-failed 명령으로 추가 시도를 준비해 주세요.' } else { '내용을 확인한 뒤 resume 명령으로 직접 이어가 주세요.' }
+            $nextAction = if ($restoredFailure) { '실패한 작업 기록을 확인하고 recover 명령으로 복구를 준비해 주세요.' } else { '내용을 확인한 뒤 resume 명령으로 직접 이어가 주세요.' }
             Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '작업을 복원했습니다.' -Message $successMessage -NextAction $nextAction -Layout $layout) -Layout $layout
             return $result
         }
-        'retry-failed' {
+        '__compat-v2-retry-failed' {
             $null = Assert-DuoForgeCliOptionsInternal -Parsed $parsed -AllowedNames @('run', 'workspace', 'confirm-retry')
             $runId = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'run' -Default '')
             if ([string]::IsNullOrWhiteSpace($runId)) { throw (New-DuoForgeException -Code 'DF-CLI-RUN' -Message 'retry-failed에는 --run <실행 ID>가 필요합니다.') }
@@ -330,7 +332,7 @@ function Invoke-DuoForgeCliCoreInternal {
             Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title $successTitle -Message '아직 AI를 호출하지 않았습니다.' -NextAction '내용을 확인한 뒤 resume --live에서 별도의 LIVE 확인을 진행해 주세요.' -Layout $layout) -Layout $layout
             return $result
         }
-        'repair-schema' {
+        '__compat-v2-repair-schema' {
             $null = Assert-DuoForgeCliOptionsInternal -Parsed $parsed -AllowedNames @('run', 'workspace')
             $runId = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'run' -Default '')
             if ([string]::IsNullOrWhiteSpace($runId)) { throw (New-DuoForgeException -Code 'DF-CLI-RUN' -Message 'repair-schema에는 --run <실행 ID>가 필요합니다.') }
@@ -356,7 +358,53 @@ function Invoke-DuoForgeCliCoreInternal {
             Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '쟁점 참조 복구를 준비했습니다.' -Message '아직 AI를 호출하지 않았습니다.' -NextAction '내용을 확인한 뒤 resume --live에서 별도의 LIVE 확인을 진행해 주세요.' -Layout $layout) -Layout $layout
             return $result
         }
-        'repair-prompt' {
+        'recover' {
+            $null = Assert-DuoForgeCliOptionsInternal -Parsed $parsed -AllowedNames @('run', 'workspace')
+            $runId = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'run' -Default '')
+            if ([string]::IsNullOrWhiteSpace($runId)) { throw (New-DuoForgeException -Code 'DF-CLI-RUN' -Message 'recover에는 --run <실행 ID>가 필요합니다.') }
+            $workspace = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')
+            $run = Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace
+            $eligibility = Get-DuoForgeUnifiedRecoveryEligibilityInternal -RunDirectory ([string]$run.runDirectory)
+            if (-not [bool]$eligibility.eligible) { throw (New-DuoForgeException -Code 'DF-RUN-RECOVERY-NOT-ELIGIBLE' -Message ([string]$eligibility.reason)) }
+            if (-not (& $isInteractive)) { throw (New-DuoForgeException -Code 'DF-RUN-RECOVERY-CONFIRM' -Message '복구 준비는 대화형 화면에서 정확한 RECOVER 확인이 필요합니다.') }
+            $layout = Get-DuoForgeDisplayLayoutInternal
+            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '이 작업의 복구를 준비합니다.' -Message '내부 원인에 맞는 저장 상태만 원자적으로 준비하며 이 확인만으로 AI를 호출하지 않습니다.' -NextAction '계속하려면 확인어 RECOVER를 입력해 주세요.' -Layout $layout) -Layout $layout
+            $confirmation = Read-DuoForgeExactConfirmationInternal -Token 'RECOVER' -Prompt '복구를 준비하려면 RECOVER를 입력하세요' -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -InputReader $InputReader -KeyReader $ConfirmationKeyReader -FrameWriter $ConfirmationFrameWriter -CapabilityProbe $ConfirmationCapabilityProbe
+            if ([string]$confirmation.action -ne 'submit') {
+                Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '복구를 준비하지 않았습니다.' -Message '작업 상태와 저장 파일을 변경하지 않았고 AI도 호출하지 않았습니다.' -Layout $layout) -Layout $layout
+                return
+            }
+            $result = if ($null -ne $RecoveryInvoker) { & $RecoveryInvoker $runId $workspace } else { Enable-DuoForgeUnifiedRecoveryInternal -RunId $runId -ResultsRoot $workspace }
+            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '복구를 준비했습니다.' -Message '아직 AI를 호출하지 않았습니다.' -NextAction '내용을 확인한 뒤 resume --live에서 별도의 LIVE 확인을 진행해 주세요.' -Layout $layout) -Layout $layout
+            return $result
+        }
+        '__compat-v2-repair-contract' {
+            $null = Assert-DuoForgeCliOptionsInternal -Parsed $parsed -AllowedNames @('run', 'workspace')
+            $runId = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'run' -Default '')
+            if ([string]::IsNullOrWhiteSpace($runId)) { throw (New-DuoForgeException -Code 'DF-CLI-RUN' -Message 'repair-contract에는 --run <실행 ID>가 필요합니다.') }
+            $workspace = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'workspace' -Default '')
+            $run = Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $workspace
+            $eligibility = Get-DuoForgeProjectContractRepairEligibilityInternal -RunDirectory ([string]$run.runDirectory)
+            if (-not [bool]$eligibility.eligible) { throw (New-DuoForgeException -Code 'DF-PROJECT-CONTRACT-REPAIR-UNAVAILABLE' -Message ([string]$eligibility.reason)) }
+            if (-not (& $isInteractive)) {
+                throw (New-DuoForgeException -Code 'DF-PROJECT-CONTRACT-REPAIR-CONFIRM' -Message '프로젝트 오류 복구는 대화형 화면에서 정확한 REPAIR 확인이 필요합니다.')
+            }
+            $layout = Get-DuoForgeDisplayLayoutInternal
+            $rows = [System.Collections.Generic.List[object]]::new()
+            foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '프로젝트 계약 오류를 안전하게 복구할 수 있게 준비합니다.' -Message '실패 단계에 새 입력 세대를 열고 현재 세대의 시도 횟수만 초기화합니다. 누적 기록은 보존하며 이 확인만으로 AI를 호출하지 않습니다.' -NextAction '계속하려면 확인어 REPAIR를 입력해 주세요.' -Layout $layout)) { $rows.Add($row) }
+            foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '실패한 작업' -Value (Get-DuoForgeDisplayCheckpointLabelInternal -StepKey ([string]$eligibility.step.stepKey) -RunDirectory ([string]$run.runDirectory)) -Layout $layout -KeyWidth 14)) { $rows.Add($row) }
+            foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '오류 분류' -Value '프로젝트 계약 오류' -Layout $layout -KeyWidth 14 -Role 'error')) { $rows.Add($row) }
+            Write-DuoForgeDisplayRowsInternal -Rows @($rows) -Layout $layout
+            $confirmation = Read-DuoForgeExactConfirmationInternal -Token 'REPAIR' -Prompt '프로젝트 오류 복구를 준비하려면 REPAIR를 입력하세요' -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -InputReader $InputReader -KeyReader $ConfirmationKeyReader -FrameWriter $ConfirmationFrameWriter -CapabilityProbe $ConfirmationCapabilityProbe
+            if ([string]$confirmation.action -ne 'submit') {
+                Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '프로젝트 오류 복구를 준비하지 않았습니다.' -Message '작업 상태와 저장 파일을 변경하지 않았고 AI도 호출하지 않았습니다.' -Layout $layout) -Layout $layout
+                return
+            }
+            $result = if ($null -ne $ProjectContractRepairInvoker) { & $ProjectContractRepairInvoker $runId $workspace } else { Enable-DuoForgeProjectContractRepairInternal -RunId $runId -ResultsRoot $workspace }
+            Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '프로젝트 오류 복구를 준비했습니다.' -Message '아직 AI를 호출하지 않았습니다.' -NextAction '내용을 확인한 뒤 resume --live에서 별도의 LIVE 확인을 진행해 주세요.' -Layout $layout) -Layout $layout
+            return $result
+        }
+        '__compat-v2-repair-prompt' {
             $null = Assert-DuoForgeCliOptionsInternal -Parsed $parsed -AllowedNames @('run', 'workspace')
             $runId = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'run' -Default '')
             if ([string]::IsNullOrWhiteSpace($runId)) { throw (New-DuoForgeException -Code 'DF-CLI-RUN' -Message 'repair-prompt에는 --run <실행 ID>가 필요합니다.') }
@@ -424,7 +472,7 @@ function Invoke-DuoForgeCliCoreInternal {
                 elseif ([string]$run.state.status -eq 'PAUSED_QUOTA') { $nextAction = '사용 한도가 회복되고 구독 로그인이 유효한 뒤 계속해 주세요. API 과금 방식으로 자동 전환하지 않습니다.' }
                 elseif ([string]$run.state.status -eq 'BLOCKED_PREFLIGHT') { $nextAction = 'doctor와 Codex·Claude 구독 로그인을 다시 확인한 뒤 계속해 주세요.' }
                 elseif ([string]$run.state.status -eq 'PAUSED_USER') { $nextAction = '마지막 완료 지점부터 계속할 수 있습니다.' }
-                elseif (-not [bool]$continuation.eligible -and [string]$continuation.recoveryKind -eq 'prompt-size-repair') { $nextAction = 'repair-prompt 명령에서 입력 크기 조정을 준비한 뒤 다시 확인해 주세요.' }
+                elseif (-not [bool]$continuation.eligible -and [string]$continuation.recoveryKind -in @('project-contract-repair', 'prompt-size-repair')) { $nextAction = 'recover 명령에서 복구를 준비한 뒤 다시 확인해 주세요.' }
                 foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind info -Title (Get-DuoForgeDisplayStateLabelInternal -Status ([string]$run.state.status) -FailureCode ([string]$continuation.failureCode)) -NextAction $nextAction -Layout $layout)) { $displayRows.Add($row) }
                 foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '계속하면 실행되는 AI 작업' -Body '' -Layout $layout)) { $displayRows.Add($row) }
                 foreach ($row in @(New-DuoForgeFieldRowsInternal -Label 'Codex' -Value (Format-DuoForgeRemainingCallBudgetLineInternal -ProviderLabel 'Codex' -ProviderBudget $budget.providers.codex) -Layout $layout -KeyWidth 8 -PreserveParagraphs)) { $displayRows.Add($row) }
@@ -469,7 +517,7 @@ function Invoke-DuoForgeCliCoreInternal {
                 'first-synthesizer', 'pause-after-round', 'allow-partial', 'name', 'plan-only'
             )
             $mode = [string]$parsed.positionals[1]
-            $rounds = ConvertTo-DuoForgeIntOption -Value (Get-DuoForgeCliOption -Parsed $parsed -Name 'max-rounds' -Default 2) -Name 'max-rounds' -Default 2
+            $rounds = ConvertTo-DuoForgeIntOption -Value (Get-DuoForgeCliOption -Parsed $parsed -Name 'max-rounds' -Default 1) -Name 'max-rounds' -Default 1
             $providerSelections = [ordered]@{
                 codex = [ordered]@{
                     model = [string](Get-DuoForgeCliOption -Parsed $parsed -Name 'codex-model' -Default '')

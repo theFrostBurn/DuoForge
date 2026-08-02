@@ -217,7 +217,7 @@ function Invoke-DuoForgeInteractiveNew {
         if ($null -eq $brief) { return }
         $selections = Complete-DuoForgeInteractiveProviderSelectionsInternal -InputReader $InputReader -MenuInvoker $MenuInvoker
         if ($null -eq $selections) { Write-DuoForgeTextInternal '모델 선택을 취소했습니다.'; return }
-        $request = New-DuoForgeStartRequestInternal -Mode 'shared-document' -Brief $brief -DocumentType 'custom' -MaxRounds 2 `
+        $request = New-DuoForgeStartRequestInternal -Mode 'shared-document' -Brief $brief -DocumentType 'custom' -MaxRounds 1 `
             -CodexModel ([string]$selections.codex.model) -CodexReasoningEffort ([string]$selections.codex.reasoningEffort) `
             -ClaudeModel ([string]$selections.claude.model) -ClaudeReasoningEffort ([string]$selections.claude.reasoningEffort)
     }
@@ -228,7 +228,7 @@ function Invoke-DuoForgeInteractiveNew {
         if ($null -eq $documentB) { return }
         $selections = Complete-DuoForgeInteractiveProviderSelectionsInternal -InputReader $InputReader -MenuInvoker $MenuInvoker
         if ($null -eq $selections) { Write-DuoForgeTextInternal '모델 선택을 취소했습니다.'; return }
-        $request = New-DuoForgeStartRequestInternal -Mode ([string]$selectedOption.mode) -DocumentA $documentA -DocumentB $documentB -DocumentType 'custom' -MaxRounds 2 `
+        $request = New-DuoForgeStartRequestInternal -Mode ([string]$selectedOption.mode) -DocumentA $documentA -DocumentB $documentB -DocumentType 'custom' -MaxRounds 1 `
             -CodexModel ([string]$selections.codex.model) -CodexReasoningEffort ([string]$selections.codex.reasoningEffort) `
             -ClaudeModel ([string]$selections.claude.model) -ClaudeReasoningEffort ([string]$selections.claude.reasoningEffort)
     }
@@ -1853,6 +1853,61 @@ function Invoke-DuoForgeInteractiveSchemaRepairInternal {
     return [ordered]@{ interaction = $confirmation; result = $result }
 }
 
+function Invoke-DuoForgeInteractiveProjectContractRepairInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Run,
+        [scriptblock]$InputReader,
+        [scriptblock]$RepairInvoker,
+        [scriptblock]$ConfirmationKeyReader,
+        [scriptblock]$ConfirmationFrameWriter,
+        [scriptblock]$ConfirmationCapabilityProbe
+    )
+
+    $eligibility = Get-DuoForgeProjectContractRepairEligibilityInternal -RunDirectory ([string]$Run.runDirectory)
+    if (-not [bool]$eligibility.eligible) {
+        throw (New-DuoForgeException -Code 'DF-PROJECT-CONTRACT-REPAIR-UNAVAILABLE' -Message ([string]$eligibility.reason))
+    }
+    $layout = Get-DuoForgeDisplayLayoutInternal
+    $rows = [System.Collections.Generic.List[object]]::new()
+    foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '프로젝트 계약 오류를 안전하게 복구할 수 있게 준비합니다.' -Message '실패 단계에 새 입력 세대를 열고 현재 세대의 시도 횟수만 초기화합니다. 누적 기록은 보존하며 이 확인만으로 AI를 호출하지 않습니다.' -NextAction '계속하려면 확인어 REPAIR를 입력해 주세요.' -Layout $layout)) { $rows.Add($row) }
+    foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '실패한 작업' -Value (Get-DuoForgeDisplayCheckpointLabelInternal -StepKey ([string]$eligibility.step.stepKey) -RunDirectory ([string]$Run.runDirectory)) -Layout $layout -KeyWidth 14)) { $rows.Add($row) }
+    foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '오류 분류' -Value '프로젝트 계약 오류' -Layout $layout -KeyWidth 14 -Role 'error')) { $rows.Add($row) }
+    Write-DuoForgeDisplayRowsInternal -Rows @($rows) -Layout $layout
+    $confirmation = Read-DuoForgeExactConfirmationInternal -Token 'REPAIR' -Prompt '프로젝트 오류 복구를 준비하려면 REPAIR를 입력하세요' -ReturnTarget work-menu -CancelReturnTarget work-menu -InterruptReturnTarget work-menu -InputReader $InputReader -KeyReader $ConfirmationKeyReader -FrameWriter $ConfirmationFrameWriter -CapabilityProbe $ConfirmationCapabilityProbe
+    if ([string]$confirmation.action -ne 'submit') {
+        Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '프로젝트 오류 복구를 준비하지 않았습니다.' -Message '작업 상태와 저장 파일을 변경하지 않았고 AI도 호출하지 않았습니다.' -Layout $layout) -Layout $layout
+        return [ordered]@{ interaction = $confirmation; result = $null }
+    }
+    $resultsRoot = [System.IO.Path]::GetDirectoryName([string]$Run.runDirectory)
+    $result = if ($null -ne $RepairInvoker) { & $RepairInvoker ([string]$Run.state.runId) $resultsRoot } else { Enable-DuoForgeProjectContractRepairInternal -RunId ([string]$Run.state.runId) -ResultsRoot $resultsRoot }
+    Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '프로젝트 오류 복구를 준비했습니다.' -Message '아직 AI를 호출하지 않았습니다.' -NextAction '홈의 진행 중인 작업에서 이 작업을 열고, 계속하려면 별도의 LIVE 확인을 진행해 주세요.' -Layout $layout) -Layout $layout
+    return [ordered]@{ interaction = $confirmation; result = $result }
+}
+
+function Invoke-DuoForgeInteractiveUnifiedRecoveryInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Run,
+        [scriptblock]$InputReader,
+        [scriptblock]$RecoveryInvoker
+    )
+
+    $eligibility = Get-DuoForgeUnifiedRecoveryEligibilityInternal -RunDirectory ([string]$Run.runDirectory)
+    if (-not [bool]$eligibility.eligible) { throw (New-DuoForgeException -Code 'DF-RUN-RECOVERY-NOT-ELIGIBLE' -Message ([string]$eligibility.reason)) }
+    $layout = Get-DuoForgeDisplayLayoutInternal
+    Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind warning -Title '이 작업의 복구를 준비합니다.' -Message '내부 원인에 맞는 저장 상태만 원자적으로 준비하며 이 확인만으로 AI를 호출하지 않습니다.' -NextAction '계속하려면 확인어 RECOVER를 입력해 주세요.' -Layout $layout) -Layout $layout
+    $confirmation = Read-DuoForgeExactConfirmationInternal -Token 'RECOVER' -Prompt '복구를 준비하려면 RECOVER를 입력하세요' -ReturnTarget work-menu -CancelReturnTarget work-menu -InterruptReturnTarget work-menu -InputReader $InputReader
+    if ([string]$confirmation.action -ne 'submit') {
+        Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind info -Title '복구를 준비하지 않았습니다.' -Message '작업 상태와 저장 파일을 변경하지 않았고 AI도 호출하지 않았습니다.' -Layout $layout) -Layout $layout
+        return [ordered]@{ result = $null; returnTarget = 'work-menu' }
+    }
+    $resultsRoot = [System.IO.Path]::GetDirectoryName([string]$Run.runDirectory)
+    $result = if ($null -ne $RecoveryInvoker) { & $RecoveryInvoker ([string]$Run.state.runId) $resultsRoot } else { Enable-DuoForgeUnifiedRecoveryInternal -RunId ([string]$Run.state.runId) -ResultsRoot $resultsRoot }
+    Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '복구를 준비했습니다.' -Message '아직 AI를 호출하지 않았습니다.' -NextAction '내용을 확인한 뒤 별도의 LIVE 확인으로 계속해 주세요.' -Layout $layout) -Layout $layout
+    return [ordered]@{ result = $result; returnTarget = 'home' }
+}
+
 function Invoke-DuoForgeInteractivePromptRepairInternal {
     [CmdletBinding()]
     param(
@@ -1896,7 +1951,9 @@ function Invoke-DuoForgeInteractiveRun {
         [scriptblock]$DeleteInvoker,
         [scriptblock]$RetryInvoker,
         [scriptblock]$RepairInvoker,
-        [scriptblock]$PromptRepairInvoker
+        [scriptblock]$ProjectContractRepairInvoker,
+        [scriptblock]$PromptRepairInvoker,
+        [scriptblock]$RecoveryInvoker
     )
 
     $resultsRoot = [System.IO.Path]::GetDirectoryName([string]$RunRecord.runDirectory)
@@ -1943,40 +2000,15 @@ function Invoke-DuoForgeInteractiveRun {
         if ([string]$run.state.status -notin @('PAUSED_USER') -and [string]$run.state.status -notin $terminalStates -and -not $runtimeLimitFailure -and [bool]$continuation.eligible) { $menuItems.Add([ordered]@{ value = 'P'; label = '현재 AI 작업이 끝난 뒤 멈추기'; shortcuts = @('P'); enabled = $true }) }
         $menuItems.Add([ordered]@{ value = 'I'; label = '확인할 내용 보기'; shortcuts = @('I'); enabled = $true })
         if (Test-Path -LiteralPath (Join-Path ([string]$run.runDirectory) 'final') -PathType Container) { $menuItems.Add([ordered]@{ value = 'O'; label = '결과 폴더 열기'; shortcuts = @('O'); enabled = $true }) }
-        if ([string]$run.state.status -eq 'FAILED_STAGE' -or $runtimeLimitFailure) {
-            $retryEligibility = Get-DuoForgeFailedStageRetryEligibilityInternal -RunDirectory ([string]$run.runDirectory)
-            $runtimeExtension = [string]$retryEligibility.recoveryKind -eq 'runtime-extension'
+        if ([string]$run.state.status -in @('FAILED_STAGE', 'RESUMABLE_ERROR') -or $runtimeLimitFailure) {
+            $recoveryEligibility = Get-DuoForgeUnifiedRecoveryEligibilityInternal -RunDirectory ([string]$run.runDirectory)
             $menuItems.Add([ordered]@{
-                value = 'retry-failed'
-                label = if ($runtimeExtension) { '총 실행시간 60분 연장 준비' } else { '실패 단계 한 번 더 시도 준비' }
-                detail = if ($runtimeExtension) { '기본 90분을 보존하고 유효 상한을 150분으로 한 번만 늘립니다. 실제 계속하기에는 별도의 LIVE 확인이 필요합니다.' } else { '이 동작은 AI를 호출하지 않으며, 실제 시도에는 별도의 LIVE 확인이 필요합니다.' }
+                value = 'recover'
+                label = '이 작업 복구 준비'
+                detail = '내부 원인에 맞는 저장 상태만 준비하며, 실제 계속하기에는 별도의 LIVE 확인이 필요합니다.'
                 shortcuts = @('T')
-                enabled = [bool]$retryEligibility.eligible
-                disabledReason = if ([bool]$retryEligibility.eligible) { '' } else { [string]$retryEligibility.reason }
-            })
-            if ([string]$run.state.status -eq 'FAILED_STAGE') {
-                $repairEligibility = Get-DuoForgeSchemaRepairEligibilityInternal -RunDirectory ([string]$run.runDirectory)
-                if (@($repairEligibility.failures).Count -gt 0) {
-                    $menuItems.Add([ordered]@{
-                        value = 'repair-schema'
-                        label = '쟁점 참조 복구 준비'
-                        detail = '새 쟁점 키 공간으로 한 번만 준비하며, 실제 계속하기에는 별도의 LIVE 확인이 필요합니다.'
-                        shortcuts = @('Y')
-                        enabled = [bool]$repairEligibility.eligible
-                        disabledReason = if ([bool]$repairEligibility.eligible) { '' } else { [string]$repairEligibility.reason }
-                    })
-                }
-            }
-        }
-        if ($failureCode -eq 'DF-PROMPT-SIZE-LIMIT') {
-            $promptRepairEligibility = Get-DuoForgePromptRepairEligibilityInternal -RunDirectory ([string]$run.runDirectory)
-            $menuItems.Add([ordered]@{
-                value = 'repair-prompt'
-                label = '입력 크기 조정 준비'
-                detail = '대상 최신 문서와 관련 기록만 전송하도록 한 번만 준비하며, 실제 계속하기에는 별도의 LIVE 확인이 필요합니다.'
-                shortcuts = @('Y')
-                enabled = [bool]$promptRepairEligibility.eligible
-                disabledReason = if ([bool]$promptRepairEligibility.eligible) { '' } else { [string]$promptRepairEligibility.reason }
+                enabled = [bool]$recoveryEligibility.eligible
+                disabledReason = if ([bool]$recoveryEligibility.eligible) { '' } else { [string]$recoveryEligibility.reason }
             })
         }
         if ([string]$run.state.status -eq 'CANCELLED') {
@@ -2011,19 +2043,9 @@ function Invoke-DuoForgeInteractiveRun {
             $finalDirectory = Join-Path ([string]$run.runDirectory) 'final'
             if (Test-Path -LiteralPath $finalDirectory -PathType Container) { Start-Process -FilePath 'explorer.exe' -ArgumentList @($finalDirectory); continue }
         }
-        if ($choice -ieq 'retry-failed' -and ([string]$run.state.status -eq 'FAILED_STAGE' -or $runtimeLimitFailure)) {
-            $outcome = Invoke-DuoForgeInteractiveFailedRetryInternal -Run $run -InputReader $InputReader -RetryInvoker $RetryInvoker
-            if ($null -ne $outcome.result) { return [ordered]@{ action = 'submit'; value = 'retry-failed'; source = 'menu'; returnTarget = 'home' } }
-            continue
-        }
-        if ($choice -ieq 'repair-schema' -and [string]$run.state.status -eq 'FAILED_STAGE') {
-            $outcome = Invoke-DuoForgeInteractiveSchemaRepairInternal -Run $run -InputReader $InputReader -RepairInvoker $RepairInvoker
-            if ($null -ne $outcome.result) { return [ordered]@{ action = 'submit'; value = 'repair-schema'; source = 'menu'; returnTarget = 'home' } }
-            continue
-        }
-        if ($choice -ieq 'repair-prompt' -and $failureCode -eq 'DF-PROMPT-SIZE-LIMIT') {
-            $outcome = Invoke-DuoForgeInteractivePromptRepairInternal -Run $run -InputReader $InputReader -RepairInvoker $PromptRepairInvoker
-            if ($null -ne $outcome.result) { return [ordered]@{ action = 'submit'; value = 'repair-prompt'; source = 'menu'; returnTarget = 'home' } }
+        if ($choice -ieq 'recover' -and ([string]$run.state.status -in @('FAILED_STAGE', 'RESUMABLE_ERROR') -or $runtimeLimitFailure)) {
+            $outcome = Invoke-DuoForgeInteractiveUnifiedRecoveryInternal -Run $run -InputReader $InputReader -RecoveryInvoker $RecoveryInvoker
+            if ($null -ne $outcome.result) { return [ordered]@{ action = 'submit'; value = 'recover'; source = 'menu'; returnTarget = 'home' } }
             continue
         }
         if ($choice -ieq 'abandon') {

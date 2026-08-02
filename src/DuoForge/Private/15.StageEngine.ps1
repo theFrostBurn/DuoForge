@@ -6,9 +6,10 @@ function New-DuoForgeStageRecord {
         [Parameter(Mandatory)][int]$Round,
         [Parameter(Mandatory)][string]$Stage,
         [string[]]$DependsOn = @(),
-        [ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion = 'workflow-v2',
+        [ValidateSet('workflow-v1', 'workflow-v2', 'workflow-v3')][string]$WorkflowVersion = 'workflow-v2',
         [ValidateSet('A', 'B', 'merged')][string]$TargetDocumentId,
-        [string[]]$SourceDocumentIds = @()
+        [string[]]$SourceDocumentIds = @(),
+        [string[]]$OutputDocumentIds = @()
     )
 
     $record = [ordered]@{
@@ -34,20 +35,94 @@ function New-DuoForgeStageRecord {
         $record.targetDocumentId = if ([string]::IsNullOrWhiteSpace($TargetDocumentId)) { $null } else { $TargetDocumentId }
         $record.sourceDocumentIds = @($SourceDocumentIds)
     }
+    elseif ($WorkflowVersion -eq 'workflow-v3') {
+        $record.performedBy = $Provider
+        $record.sourceDocumentIds = @($SourceDocumentIds)
+        $record.outputDocumentIds = @($OutputDocumentIds)
+    }
     return $record
+}
+
+function New-DuoForgeThinCoreStageGraphInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('shared-document', 'document-merge', 'dual-document')][string]$Mode,
+        [ValidateSet('alternate', 'codex', 'claude')][string]$FirstSynthesizer = 'alternate'
+    )
+
+    $sourceDocumentIds = if ($Mode -eq 'shared-document') { @('brief') } else { @('A', 'B') }
+    $outputDocumentIds = if ($Mode -eq 'dual-document') { @('A', 'B') } else { @('merged') }
+    $synthesizer = if ($FirstSynthesizer -eq 'claude') { 'claude' } else { 'codex' }
+    $validator = if ($synthesizer -eq 'codex') { 'claude' } else { 'codex' }
+    $steps = [System.Collections.Generic.List[object]]::new()
+    $independentKeys = @('codex', 'claude') | ForEach-Object { "r01-$_-independent-result" }
+    foreach ($provider in @('codex', 'claude')) {
+        $steps.Add((New-DuoForgeStageRecord -StepKey "r01-$provider-independent-result" -Provider $provider -Round 1 -Stage 'independent-result' -WorkflowVersion workflow-v3 -SourceDocumentIds $sourceDocumentIds -OutputDocumentIds $outputDocumentIds))
+    }
+    $integrationKey = "r01-$synthesizer-integration"
+    $steps.Add((New-DuoForgeStageRecord -StepKey $integrationKey -Provider $synthesizer -Round 1 -Stage 'integration' -DependsOn $independentKeys -WorkflowVersion workflow-v3 -SourceDocumentIds $sourceDocumentIds -OutputDocumentIds $outputDocumentIds))
+    $validationKey = "r01-$validator-final-validation"
+    $steps.Add((New-DuoForgeStageRecord -StepKey $validationKey -Provider $validator -Round 1 -Stage 'final-validation' -DependsOn @($integrationKey) -WorkflowVersion workflow-v3 -SourceDocumentIds $sourceDocumentIds -OutputDocumentIds @()))
+
+    return [ordered]@{
+        schemaVersion = 3
+        workflowVersion = 'workflow-v3'
+        executionProfile = 'thin-core-v1'
+        mode = $Mode
+        maxRounds = 1
+        steps = @($steps)
+        conditionalFinalRevision = [ordered]@{
+            provider = $synthesizer
+            stage = 'final-revision'
+            dependsOn = @($validationKey)
+            sourceDocumentIds = @($sourceDocumentIds)
+            outputDocumentIds = @($outputDocumentIds)
+            maximumAdds = 1
+        }
+    }
+}
+
+function Add-DuoForgeThinFinalRevisionStepInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Graph,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$ValidationResult
+    )
+
+    if ([string](Get-DuoForgeObjectValue -Object $Graph -Name 'workflowVersion' -Default '') -ne 'workflow-v3') { return $Graph }
+    if (-not (Test-DuoForgeThinFinalRevisionRequiredInternal -StoredValidationResult $ValidationResult)) { return $Graph }
+    if (@($Graph.steps | Where-Object { [string]$_.stage -eq 'final-revision' }).Count -gt 0) { return $Graph }
+    $conditional = Get-DuoForgeObjectValue -Object $Graph -Name 'conditionalFinalRevision'
+    if ($conditional -isnot [System.Collections.IDictionary]) { throw (New-DuoForgeException -Code 'DF-PROJECT-CONTRACT' -Message '조건부 최종 수정 계약이 없습니다.') }
+    $provider = [string]$conditional.provider
+    $key = "r01-$provider-final-revision"
+    $step = New-DuoForgeStageRecord -StepKey $key -Provider $provider -Round 1 -Stage 'final-revision' `
+        -DependsOn @($conditional.dependsOn) -WorkflowVersion workflow-v3 `
+        -SourceDocumentIds @($conditional.sourceDocumentIds) -OutputDocumentIds @($conditional.outputDocumentIds)
+    $Graph.steps = @($Graph.steps) + @($step)
+    return $Graph
 }
 
 function New-DuoForgeStageGraph {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][ValidateSet('shared-document', 'document-merge', 'dual-document')][string]$Mode,
-        [ValidateRange(2, 3)][int]$MaxRounds = 2,
+        [ValidateRange(1, 3)][int]$MaxRounds = 2,
         [ValidateSet('alternate', 'codex', 'claude')][string]$FirstSynthesizer = 'alternate',
         [ValidateRange(0, 100)][int]$ContextBatchCount = 0,
         [AllowEmptyCollection()][string[]]$ContextBatchDocumentIds = @(),
-        [ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion = 'workflow-v2'
+        [ValidateSet('workflow-v1', 'workflow-v2', 'workflow-v3')][string]$WorkflowVersion = 'workflow-v2'
     )
 
+    if ($WorkflowVersion -eq 'workflow-v3') {
+        if ($MaxRounds -ne 1) {
+            throw (New-DuoForgeException -Code 'DF-ROUNDS' -Message 'workflow-v3 얇은 자동 코어는 단일 실행 그래프만 사용합니다.')
+        }
+        return New-DuoForgeThinCoreStageGraphInternal -Mode $Mode -FirstSynthesizer $FirstSynthesizer
+    }
+    if ($MaxRounds -lt 2) {
+        throw (New-DuoForgeException -Code 'DF-ROUNDS' -Message 'workflow-v1/v2 라운드는 2 또는 3이어야 합니다.')
+    }
     if ($Mode -eq 'document-merge' -and $WorkflowVersion -ne 'workflow-v2') {
         throw (New-DuoForgeException -Code 'DF-WORKFLOW-MODE' -Message 'document-merge는 workflow-v2에서만 지원합니다.')
     }
@@ -280,6 +355,7 @@ function Repair-DuoForgeCorruptedStageArtifactsInternal {
 
     $invalidKeys = [System.Collections.Generic.List[string]]::new()
     $invalidReasons = [ordered]@{}
+    $manifest = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json'))
     $workflowVersion = [string](Get-DuoForgeObjectValue -Object $Graph -Name 'workflowVersion' -Default 'workflow-v1')
     foreach ($step in @($Graph.steps | Where-Object { [string]$_.status -eq 'COMMITTED' })) {
         $valid = $true
@@ -295,9 +371,16 @@ function Repair-DuoForgeCorruptedStageArtifactsInternal {
         else {
             try {
                 $wrapper = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $path)
-                $issueTargets = if ($workflowVersion -eq 'workflow-v2') { Get-DuoForgeIssueTargetMapsInternal -RunDirectory $RunDirectory -Graph $Graph -ExcludeStepKey ([string]$step.stepKey) } else { $null }
-                $contextEvidenceContract = Get-DuoForgeContextEvidenceContractForStepInternal -RunDirectory $RunDirectory -Step $step
-                $null = Test-DuoForgeStageResultInternal -Result $wrapper.result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -DefinitionIssueTargets $(if ($null -eq $issueTargets) { $null } else { $issueTargets.definitionTargets }) -ReferenceIssueTargets $(if ($null -eq $issueTargets) { $null } else { $issueTargets.referenceTargets }) -ReservedIssueFingerprints $(if ($null -eq $issueTargets) { $null } else { $issueTargets.reservedFingerprints }) -ContextEvidenceContract $contextEvidenceContract -ThrowOnIssueReferenceIntegrityError -ThrowOnError
+                if ($workflowVersion -eq 'workflow-v3') {
+                    if ([int](Get-DuoForgeObjectValue -Object $wrapper.result -Name 'schemaVersion' -Default 0) -ne 3 -or [string]$wrapper.result.stage -ne [string]$step.stage -or [string]$wrapper.result.provider -ne [string]$step.provider) {
+                        throw (New-DuoForgeException -Code 'DF-STAGE-SCHEMA' -Message '저장된 얇은 단계 결과 계약이 일치하지 않습니다.')
+                    }
+                }
+                else {
+                    $issueTargets = if ($workflowVersion -eq 'workflow-v2') { Get-DuoForgeIssueTargetMapsInternal -RunDirectory $RunDirectory -Graph $Graph -ExcludeStepKey ([string]$step.stepKey) } else { $null }
+                    $contextEvidenceContract = Get-DuoForgeContextEvidenceContractForStepInternal -RunDirectory $RunDirectory -Step $step
+                    $null = Test-DuoForgeStageResultInternal -Result $wrapper.result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -ExpectedPerformedBy ([string](Get-DuoForgeObjectValue -Object $step -Name 'performedBy' -Default ([string]$step.provider))) -ExpectedIssueKeyPrefix $(if (Test-DuoForgeStageIssueKeyPrefixContractInternal -Manifest $manifest -Step $step) { Get-DuoForgeExpectedNewIssueKeyPrefixForStepInternal -Step $step } else { '' }) -DefinitionIssueTargets $(if ($null -eq $issueTargets) { $null } else { $issueTargets.definitionTargets }) -ReferenceIssueTargets $(if ($null -eq $issueTargets) { $null } else { $issueTargets.referenceTargets }) -ReservedIssueFingerprints $(if ($null -eq $issueTargets) { $null } else { $issueTargets.reservedFingerprints }) -ContextEvidenceContract $contextEvidenceContract -ThrowOnIssueReferenceIntegrityError -ThrowOnError
+                }
             }
             catch {
                 if ($_.Exception.Data.Contains('DuoForgeCode') -and [string]$_.Exception.Data['DuoForgeCode'] -eq 'DF-ISSUE-REFERENCE-INTEGRITY') { throw }
@@ -473,6 +556,11 @@ function Resolve-DuoForgeStageFailureInternal {
         @([ordered]@{ code = 'DF-VAL-STRUCTURE'; path = '$'; count = 1; expected = @() })
     }
     else { @() }
+    $projectContractFixId = if ($ErrorRecord.Exception.Data.Contains('DuoForgeProjectContractFixId')) {
+        $candidateFixId = [string]$ErrorRecord.Exception.Data['DuoForgeProjectContractFixId']
+        if ($null -ne (Get-DuoForgeProjectContractFixDefinitionInternal -FixId $candidateFixId)) { $candidateFixId } else { '' }
+    }
+    else { '' }
     $Step.lastError = [ordered]@{
         category = $failureCategory
         code = $errorCode
@@ -486,6 +574,7 @@ function Resolve-DuoForgeStageFailureInternal {
         diagnosticsRelativePath = $correlation.diagnosticsRelativePath
         diagnosticWarningCode = $correlation.diagnosticWarningCode
     }
+    if (-not [string]::IsNullOrWhiteSpace($projectContractFixId)) { $Step.lastError.projectContractFixId = $projectContractFixId }
     Write-DuoForgeJsonAtomic -Path (Join-Path $RunDirectory 'steps.json') -Value $Graph
     $failureData = [ordered]@{
         workflowVersion = $WorkflowVersion
@@ -616,6 +705,11 @@ function Invoke-DuoForgeStageEngine {
                         Get-DuoForgeIssueTargetMapsInternal -RunDirectory $RunDirectory -Graph $graph -ExcludeStepKey ([string]$step.stepKey)
                     }
                     else { $null }
+                    if ($workflowVersion -eq 'workflow-v3') {
+                        $outputCount = @(Get-DuoForgeObjectValue -Object $step -Name 'outputDocumentIds' -Default @()).Count
+                        $thinDefinition = Get-DuoForgeThinStageContractDefinitionInternal -Stage ([string]$step.stage) -OutputDocumentCount $outputCount
+                        $null = Assert-DuoForgeThinContractEquivalenceInternal -Definition $thinDefinition
+                    }
                     $basePrompt = New-DuoForgeStagePrompt -RunDirectory $RunDirectory -Graph $graph -Step $step
                 }
                 catch {
@@ -668,7 +762,13 @@ function Invoke-DuoForgeStageEngine {
                     $step.lastPromptKind = [string]$prompt.kind
                     $callStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
                     try {
-                        $result = ConvertTo-DuoForgeHashtable -InputObject (& $ProviderInvoker $step $prompt $graph)
+                        $providerPayload = ConvertTo-DuoForgeHashtable -InputObject (& $ProviderInvoker $step $prompt $graph)
+                        if ($workflowVersion -eq 'workflow-v3') {
+                            $outputCount = @(Get-DuoForgeObjectValue -Object $step -Name 'outputDocumentIds' -Default @()).Count
+                            $definition = Get-DuoForgeThinStageContractDefinitionInternal -Stage ([string]$step.stage) -OutputDocumentCount $outputCount
+                            $result = Complete-DuoForgeThinStageResultInternal -ProviderPayload $providerPayload -Step $step -Definition $definition
+                        }
+                        else { $result = $providerPayload }
                     }
                     finally {
                         $callStopwatch.Stop()
@@ -695,8 +795,10 @@ function Invoke-DuoForgeStageEngine {
                             $adoptableIssueProviders[$catalogKey] = [string](Get-DuoForgeObjectValue -Object $catalogIssue -Name 'proposedByProvider' -Default '')
                         }
                     }
-                    $contextEvidenceContract = Get-DuoForgeContextEvidenceContractForStepInternal -RunDirectory $RunDirectory -Step $step
-                    $null = Test-DuoForgeStageResultInternal -Result $result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -DefinitionIssueTargets $(if ($null -eq $preflightIssueTargets) { $null } else { $preflightIssueTargets.definitionTargets }) -ReferenceIssueTargets $(if ($null -eq $preflightIssueTargets) { $null } else { $preflightIssueTargets.referenceTargets }) -ReservedIssueFingerprints $(if ($null -eq $preflightIssueTargets) { $null } else { $preflightIssueTargets.reservedFingerprints }) -AdoptableIssueTargets $adoptableIssueTargets -AdoptableIssueProviders $adoptableIssueProviders -ContextEvidenceContract $contextEvidenceContract -ThrowOnError
+                    if ($workflowVersion -ne 'workflow-v3') {
+                        $contextEvidenceContract = Get-DuoForgeContextEvidenceContractForStepInternal -RunDirectory $RunDirectory -Step $step
+                        $null = Test-DuoForgeStageResultInternal -Result $result -ExpectedStage ([string]$step.stage) -ExpectedProvider ([string]$step.provider) -WorkflowVersion $workflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $step -Name 'sourceDocumentIds' -Default @()) -ExpectedPerformedBy ([string](Get-DuoForgeObjectValue -Object $step -Name 'performedBy' -Default ([string]$step.provider))) -ExpectedIssueKeyPrefix $(if (Test-DuoForgeStageIssueKeyPrefixContractInternal -Manifest $manifest -Step $step) { Get-DuoForgeExpectedNewIssueKeyPrefixForStepInternal -Step $step } else { '' }) -DefinitionIssueTargets $(if ($null -eq $preflightIssueTargets) { $null } else { $preflightIssueTargets.definitionTargets }) -ReferenceIssueTargets $(if ($null -eq $preflightIssueTargets) { $null } else { $preflightIssueTargets.referenceTargets }) -ReservedIssueFingerprints $(if ($null -eq $preflightIssueTargets) { $null } else { $preflightIssueTargets.reservedFingerprints }) -AdoptableIssueTargets $adoptableIssueTargets -AdoptableIssueProviders $adoptableIssueProviders -ContextEvidenceContract $contextEvidenceContract -ThrowOnError
+                    }
                     $artifactDirectory = Join-Path $RunDirectory ("rounds\round-{0:D2}\raw-redacted" -f [int]$step.round)
                     [System.IO.Directory]::CreateDirectory($artifactDirectory) | Out-Null
                     $artifactPath = Join-Path $artifactDirectory ($step.stepKey + '.json')
@@ -715,6 +817,9 @@ function Invoke-DuoForgeStageEngine {
                     $step.retryMode = $null
                     $step.lastError = $null
                     $invoked++
+                    if ($workflowVersion -eq 'workflow-v3' -and [string]$step.stage -eq 'final-validation') {
+                        $graph = Add-DuoForgeThinFinalRevisionStepInternal -Graph $graph -ValidationResult $result
+                    }
                     Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph
                     $state = Set-DuoForgeRunStateInternal -RunDirectory $RunDirectory -Status 'RUNNING' -LastCompletedStage $step.stepKey -Round ([int]$step.round)
                     $commitData = [ordered]@{

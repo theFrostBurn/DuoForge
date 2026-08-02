@@ -5,7 +5,7 @@ function Get-DuoForgeExecutionPlanInternal {
         [ValidateSet('shared-document', 'document-merge', 'dual-document', 'dual-project-audit')]
         [string]$Mode,
 
-        [ValidateRange(2, 3)]
+        [ValidateRange(1, 3)]
         [int]$MaxRounds = 2,
 
         [ValidateSet('alternate', 'codex', 'claude')]
@@ -15,11 +15,69 @@ function Get-DuoForgeExecutionPlanInternal {
 
         [ValidateRange(0, 100)][int]$ContextBatchCount = 0,
 
-        [ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion = 'workflow-v2'
+        [ValidateSet('workflow-v1', 'workflow-v2', 'workflow-v3')][string]$WorkflowVersion = 'workflow-v2'
     )
 
+    if ($WorkflowVersion -in @('workflow-v1', 'workflow-v2') -and $MaxRounds -lt 2) {
+        throw (New-DuoForgeException -Code 'DF-ROUNDS' -Message 'workflow-v1/v2 라운드는 2 또는 3이어야 합니다.')
+    }
     if ($Mode -eq 'document-merge' -and $WorkflowVersion -ne 'workflow-v2') {
-        throw (New-DuoForgeException -Code 'DF-WORKFLOW-MODE' -Message 'document-merge는 workflow-v2에서만 지원합니다.')
+        if ($WorkflowVersion -ne 'workflow-v3') {
+            throw (New-DuoForgeException -Code 'DF-WORKFLOW-MODE' -Message 'document-merge는 workflow-v2/v3에서만 지원합니다.')
+        }
+    }
+
+    if ($WorkflowVersion -eq 'workflow-v3') {
+        if ($Mode -notin @('shared-document', 'document-merge', 'dual-document')) {
+            throw (New-DuoForgeException -Code 'DF-WORKFLOW-MODE' -Message 'workflow-v3 얇은 자동 코어는 문서 모드에서만 지원합니다.')
+        }
+        $synthesizer = if ($FirstSynthesizer -eq 'claude') { 'claude' } else { 'codex' }
+        $validator = if ($synthesizer -eq 'codex') { 'claude' } else { 'codex' }
+        $baseCalls = @(
+            [ordered]@{ provider = 'codex'; round = 1; stage = 'independent-result' },
+            [ordered]@{ provider = 'claude'; round = 1; stage = 'independent-result' },
+            [ordered]@{ provider = $synthesizer; round = 1; stage = 'integration' },
+            [ordered]@{ provider = $validator; round = 1; stage = 'final-validation' }
+        )
+        $conditionalCalls = @(
+            [ordered]@{ provider = $synthesizer; round = 1; stage = 'final-revision'; condition = 'critical-or-blocking-major' }
+        )
+        $providerPlans = [ordered]@{}
+        $withinLimits = $true
+        foreach ($provider in @('codex', 'claude')) {
+            $providerBaseCalls = @($baseCalls | Where-Object provider -eq $provider)
+            $providerConditionalCalls = @($conditionalCalls | Where-Object provider -eq $provider)
+            $maximumCalls = $providerBaseCalls.Count + $providerConditionalCalls.Count
+            if ($maximumCalls -gt $MaxCallsPerProvider) { $withinLimits = $false }
+            $providerPlans[$provider] = [ordered]@{
+                baseCalls = $providerBaseCalls.Count
+                conditionalCalls = $providerConditionalCalls.Count
+                retryBudget = 0
+                maximumCalls = $maximumCalls
+                limit = $MaxCallsPerProvider
+                calls = @($providerBaseCalls)
+            }
+        }
+        return [ordered]@{
+            schemaVersion = 2
+            workflowVersion = 'workflow-v3'
+            executionProfile = 'thin-core-v1'
+            mode = $Mode
+            maxRounds = 1
+            minimumNormalRounds = 1
+            retryPerStage = 0
+            baseCallCount = $baseCalls.Count
+            conditionalCallCount = $conditionalCalls.Count
+            maximumCallCount = $baseCalls.Count + $conditionalCalls.Count
+            baseCalls = @($baseCalls)
+            conditionalCalls = @($conditionalCalls)
+            providers = $providerPlans
+            synthesizers = @($synthesizer)
+            withinLimits = $withinLimits
+            explanationCallsExcluded = $true
+            contextBatchCount = $ContextBatchCount
+            contextProcessing = 'local-only'
+        }
     }
 
     $calls = [ordered]@{

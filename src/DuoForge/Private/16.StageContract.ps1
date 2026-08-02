@@ -24,6 +24,320 @@ function Get-DuoForgeObjectValue {
     return $property.Value
 }
 
+function Get-DuoForgeThinStageContractDefinitionInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][ValidateSet('independent-result', 'integration', 'final-validation', 'final-revision')][string]$Stage,
+        [ValidateRange(0, 2)][int]$OutputDocumentCount
+    )
+
+    $isValidation = $Stage -eq 'final-validation'
+    if ($isValidation -and $OutputDocumentCount -ne 0) {
+        throw (New-DuoForgeException -Code 'DF-THIN-CONTRACT' -Message '최종 검증 단계는 문서 출력을 요구할 수 없습니다.')
+    }
+    if (-not $isValidation -and $OutputDocumentCount -lt 1) {
+        throw (New-DuoForgeException -Code 'DF-THIN-CONTRACT' -Message '문서 생성 단계에는 하나 이상의 출력 문서가 필요합니다.')
+    }
+    return [ordered]@{
+        contractId = 'duoforge-thin-stage-v1'
+        stage = $Stage
+        primary = [ordered]@{
+            kind = if ($isValidation) { 'validation' } else { 'documents' }
+            outputDocumentCount = $OutputDocumentCount
+            failurePolicy = 'reject-stage'
+        }
+        metadata = [ordered]@{
+            failurePolicy = 'quarantine-item'
+            fields = @('summary', 'findings', 'openQuestions')
+        }
+        appOwnedFields = @(
+            'schemaVersion', 'stage', 'provider', 'performedBy', 'targetDocumentId',
+            'sourceDocumentIds', 'documentId', 'issueKey', 'proposedByProvider'
+        )
+    }
+}
+
+function New-DuoForgeThinProviderSchemaInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Definition)
+
+    $primaryProperties = [ordered]@{}
+    $primaryRequired = [System.Collections.Generic.List[string]]::new()
+    if ([string]$Definition.primary.kind -eq 'validation') {
+        $primaryProperties.approved = [ordered]@{ type = 'boolean' }
+        $primaryRequired.Add('approved')
+    }
+    else {
+        $documentCount = [int]$Definition.primary.outputDocumentCount
+        $primaryProperties.documents = [ordered]@{
+            type = 'array'
+            minItems = $documentCount
+            maxItems = $documentCount
+            items = [ordered]@{ type = 'string'; minLength = 1; pattern = '\S' }
+        }
+        $primaryRequired.Add('documents')
+    }
+    return [ordered]@{
+        '$schema' = 'http://json-schema.org/draft-07/schema#'
+        title = 'DuoForge thin provider payload'
+        type = 'object'
+        additionalProperties = $false
+        required = @('primary')
+        properties = [ordered]@{
+            primary = [ordered]@{
+                type = 'object'
+                additionalProperties = $false
+                required = @($primaryRequired)
+                properties = $primaryProperties
+            }
+            metadata = [ordered]@{
+                type = 'object'
+                additionalProperties = $true
+            }
+        }
+    }
+}
+
+function Assert-DuoForgeThinContractEquivalenceInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Definition)
+
+    $schema = New-DuoForgeThinProviderSchemaInternal -Definition $Definition
+    $kind = [string]$Definition.primary.kind
+    $valid = [string]$schema.type -eq 'object' -and [bool]$schema.properties.primary.additionalProperties -eq $false
+    if ($kind -eq 'validation') {
+        $valid = $valid -and 'approved' -in @($schema.properties.primary.required) -and [string]$schema.properties.primary.properties.approved.type -eq 'boolean'
+    }
+    else {
+        $count = [int]$Definition.primary.outputDocumentCount
+        $documents = $schema.properties.primary.properties.documents
+        $valid = $valid -and 'documents' -in @($schema.properties.primary.required) -and [int]$documents.minItems -eq $count -and [int]$documents.maxItems -eq $count
+    }
+    if (-not $valid) { throw (New-DuoForgeException -Code 'DF-PROJECT-CONTRACT' -Message '얇은 단계의 공급자 스키마와 런타임 계약이 동등하지 않습니다.') }
+    return $true
+}
+
+function New-DuoForgeThinValidationFailureInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Code,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    return [ordered]@{ code = $Code; path = $Path; count = 1; expected = @() }
+}
+
+function Test-DuoForgeThinProviderPayloadInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Payload,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Definition
+    )
+
+    $primaryFailures = [System.Collections.Generic.List[object]]::new()
+    $quarantined = [System.Collections.Generic.List[object]]::new()
+    $sanitizedFindings = [System.Collections.Generic.List[object]]::new()
+    $sanitizedQuestions = [System.Collections.Generic.List[object]]::new()
+    $summary = ''
+
+    $primary = Get-DuoForgeObjectValue -Object $Payload -Name 'primary'
+    if ($Payload -isnot [System.Collections.IDictionary] -or $primary -isnot [System.Collections.IDictionary]) {
+        $primaryFailures.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-REQUIRED' -Path 'primary'))
+    }
+    elseif ([string]$Definition.primary.kind -eq 'validation') {
+        if ((Get-DuoForgeObjectValue -Object $primary -Name 'approved') -isnot [bool]) {
+            $primaryFailures.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-TYPE' -Path 'primary.approved'))
+        }
+    }
+    else {
+        $documents = $null
+        if ($primary.Contains('documents')) { $documents = $primary['documents'] }
+        if ($null -eq $documents -or $documents -is [string] -or $documents -isnot [System.Collections.IEnumerable]) {
+            $primaryFailures.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-TYPE' -Path 'primary.documents'))
+        }
+        else {
+            $documentArray = @($documents)
+            if ($documentArray.Count -ne [int]$Definition.primary.outputDocumentCount) {
+                $primaryFailures.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-COUNT' -Path 'primary.documents'))
+            }
+            for ($index = 0; $index -lt $documentArray.Count; $index++) {
+                if ($documentArray[$index] -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$documentArray[$index])) {
+                    $primaryFailures.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-NONEMPTY' -Path "primary.documents[$index]"))
+                }
+            }
+        }
+    }
+
+    $metadata = Get-DuoForgeObjectValue -Object $Payload -Name 'metadata'
+    if ($null -ne $metadata -and $metadata -isnot [System.Collections.IDictionary]) {
+        $quarantined.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-TYPE' -Path 'metadata'))
+        $metadata = $null
+    }
+    if ($metadata -is [System.Collections.IDictionary]) {
+        $summaryValue = Get-DuoForgeObjectValue -Object $metadata -Name 'summary' -Default ''
+        if ($summaryValue -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$summaryValue)) { $summary = [string]$summaryValue }
+        elseif ($metadata.Contains('summary')) { $quarantined.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-NONEMPTY' -Path 'metadata.summary')) }
+
+        $findings = @(Get-DuoForgeObjectValue -Object $metadata -Name 'findings' -Default @())
+        for ($index = 0; $index -lt $findings.Count; $index++) {
+            $finding = $findings[$index]
+            $valid = $finding -is [System.Collections.IDictionary]
+            $severity = [string](Get-DuoForgeObjectValue -Object $finding -Name 'severity' -Default '')
+            $category = [string](Get-DuoForgeObjectValue -Object $finding -Name 'category' -Default '')
+            $claim = [string](Get-DuoForgeObjectValue -Object $finding -Name 'claim' -Default '')
+            $proposal = [string](Get-DuoForgeObjectValue -Object $finding -Name 'proposal' -Default '')
+            $requiresUser = Get-DuoForgeObjectValue -Object $finding -Name 'requiresUser'
+            $blockingProposal = Get-DuoForgeObjectValue -Object $finding -Name 'blockingProposal'
+            if (-not $valid -or $severity -notin @('critical', 'major', 'minor') -or [string]::IsNullOrWhiteSpace($category) -or [string]::IsNullOrWhiteSpace($claim) -or [string]::IsNullOrWhiteSpace($proposal) -or $requiresUser -isnot [bool] -or $blockingProposal -isnot [bool]) {
+                $quarantined.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "metadata.findings[$index]"))
+                continue
+            }
+            $sanitizedFindings.Add([ordered]@{ sourceIndex = $index; category = $category; severity = $severity; claim = $claim; proposal = $proposal; requiresUser = [bool]$requiresUser; blockingProposal = [bool]$blockingProposal; documentIndex = [int](Get-DuoForgeObjectValue -Object $finding -Name 'documentIndex' -Default 0) })
+        }
+
+        $questions = @(Get-DuoForgeObjectValue -Object $metadata -Name 'openQuestions' -Default @())
+        for ($questionIndex = 0; $questionIndex -lt $questions.Count; $questionIndex++) {
+            $question = $questions[$questionIndex]
+            $basePath = "metadata.openQuestions[$questionIndex]"
+            if ($question -isnot [System.Collections.IDictionary]) {
+                $quarantined.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-TYPE' -Path $basePath))
+                continue
+            }
+            $title = [string](Get-DuoForgeObjectValue -Object $question -Name 'title' -Default '')
+            $questionText = [string](Get-DuoForgeObjectValue -Object $question -Name 'question' -Default '')
+            $options = @(Get-DuoForgeObjectValue -Object $question -Name 'options' -Default @())
+            $recommended = [string](Get-DuoForgeObjectValue -Object $question -Name 'recommendedOption' -Default '')
+            $failurePath = ''
+            if ([string]::IsNullOrWhiteSpace($title)) { $failurePath = "$basePath.title" }
+            elseif ([string]::IsNullOrWhiteSpace($questionText)) { $failurePath = "$basePath.question" }
+            elseif ($options.Count -lt 2 -or $options.Count -gt 3) { $failurePath = "$basePath.options" }
+            else {
+                $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+                for ($optionIndex = 0; $optionIndex -lt $options.Count; $optionIndex++) {
+                    $option = [string]$options[$optionIndex]
+                    if ($options[$optionIndex] -isnot [string] -or [string]::IsNullOrWhiteSpace($option) -or (Test-DuoForgeQuestionOptionMetadataInternal -Option $option) -or -not $seen.Add($option.Trim())) {
+                        $failurePath = "$basePath.options[$optionIndex]"
+                        break
+                    }
+                }
+            }
+            if ([string]::IsNullOrWhiteSpace($failurePath) -and -not (Test-DuoForgeQuestionRecommendationInternal -RecommendedOption $recommended -Options $options)) {
+                $failurePath = "$basePath.recommendedOption"
+            }
+            $findingIndex = [int](Get-DuoForgeObjectValue -Object $question -Name 'findingIndex' -Default -1)
+            if ([string]::IsNullOrWhiteSpace($failurePath) -and @($sanitizedFindings | Where-Object sourceIndex -eq $findingIndex).Count -ne 1) {
+                $failurePath = "$basePath.findingIndex"
+            }
+            if (-not [string]::IsNullOrWhiteSpace($failurePath)) {
+                $quarantined.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-CONTRACT-MISMATCH' -Path $failurePath))
+                continue
+            }
+            $sanitizedQuestions.Add([ordered]@{ findingIndex = $findingIndex; title = $title; question = $questionText; options = @($options); recommendedOption = $recommended })
+        }
+    }
+
+    return [ordered]@{
+        valid = $primaryFailures.Count -eq 0
+        primary = [ordered]@{ valid = $primaryFailures.Count -eq 0; failures = @($primaryFailures) }
+        metadata = [ordered]@{
+            valid = $quarantined.Count -eq 0
+            summary = $summary
+            findings = @($sanitizedFindings)
+            openQuestions = @($sanitizedQuestions)
+            quarantined = @($quarantined)
+        }
+        retryWholeCall = $primaryFailures.Count -gt 0
+    }
+}
+
+function Complete-DuoForgeThinStageResultInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$ProviderPayload,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Step,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Definition
+    )
+
+    $validation = Test-DuoForgeThinProviderPayloadInternal -Payload $ProviderPayload -Definition $Definition
+    if (-not [bool]$validation.primary.valid) {
+        $exception = New-DuoForgeException -Code 'DF-STAGE-SCHEMA' -Message '단계의 주 결과 계약 검증에 실패했습니다.'
+        $exception.Data['DuoForgeValidationFailures'] = @($validation.primary.failures)
+        throw $exception
+    }
+    $primary = Get-DuoForgeObjectValue -Object $ProviderPayload -Name 'primary'
+    $outputIds = @(Get-DuoForgeObjectValue -Object $Step -Name 'outputDocumentIds' -Default @())
+    $documents = @()
+    if ($primary -is [System.Collections.IDictionary] -and $primary.Contains('documents')) { $documents = @($primary['documents']) }
+    $documentOutputs = [System.Collections.Generic.List[object]]::new()
+    for ($index = 0; $index -lt $documents.Count; $index++) {
+        $documentOutputs.Add([ordered]@{ documentId = [string]$outputIds[$index]; content = [string]$documents[$index] })
+    }
+    $provider = [string]$Step.provider
+    $stage = [string]$Step.stage
+    $round = [int]$Step.round
+    $generation = [Math]::Max(1, [int](Get-DuoForgeObjectValue -Object $Step -Name 'inputGeneration' -Default 1))
+    $issues = [System.Collections.Generic.List[object]]::new()
+    $issueKeyBySourceIndex = @{}
+    $ordinal = 0
+    foreach ($finding in @($validation.metadata.findings)) {
+        $ordinal++
+        $issueKey = 'LOCAL-R{0:D2}-{1}-{2}-G{3:D2}-{4:D3}' -f $round, $provider.ToUpperInvariant(), $stage.ToUpperInvariant(), $generation, $ordinal
+        $documentIndex = [int](Get-DuoForgeObjectValue -Object $finding -Name 'documentIndex' -Default 0)
+        if ($documentIndex -lt 0 -or $documentIndex -ge $outputIds.Count) { $documentIndex = 0 }
+        $targetDocumentId = if ($outputIds.Count -gt 0) { [string]$outputIds[$documentIndex] } else { 'merged' }
+        $issues.Add([ordered]@{
+            issueKey = $issueKey
+            targetDocumentId = $targetDocumentId
+            category = [string]$finding.category
+            severity = [string]$finding.severity
+            claim = [string]$finding.claim
+            evidence = @()
+            proposal = [string]$finding.proposal
+            requiresUser = [bool]$finding.requiresUser
+            blockingProposal = [bool]$finding.blockingProposal
+        })
+        $issueKeyBySourceIndex[[int]$finding.sourceIndex] = $issueKey
+    }
+    $openQuestions = [System.Collections.Generic.List[object]]::new()
+    foreach ($question in @($validation.metadata.openQuestions)) {
+        $findingIndex = [int]$question.findingIndex
+        if (-not $issueKeyBySourceIndex.ContainsKey($findingIndex)) { continue }
+        $openQuestions.Add([ordered]@{
+            issueKey = [string]$issueKeyBySourceIndex[$findingIndex]
+            title = [string]$question.title
+            question = [string]$question.question
+            options = @($question.options)
+            recommendedOption = [string]$question.recommendedOption
+        })
+    }
+    return [ordered]@{
+        schemaVersion = 3
+        stage = $stage
+        provider = $provider
+        performedBy = [string](Get-DuoForgeObjectValue -Object $Step -Name 'performedBy' -Default $provider)
+        round = $round
+        sourceDocumentIds = @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @())
+        documentOutputs = @($documentOutputs)
+        summary = if ([string]::IsNullOrWhiteSpace([string]$validation.metadata.summary)) { '부가 메타데이터 없음' } else { [string]$validation.metadata.summary }
+        issues = @($issues)
+        issueResponses = @()
+        adoptions = @()
+        openQuestions = @($openQuestions)
+        finalApproved = if ([string]$Definition.primary.kind -eq 'validation') { [bool]$primary.approved } else { $null }
+        metadataWarnings = @($validation.metadata.quarantined)
+    }
+}
+
+function Test-DuoForgeThinFinalRevisionRequiredInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$StoredValidationResult)
+
+    if ([bool](Get-DuoForgeObjectValue -Object $StoredValidationResult -Name 'finalApproved' -Default $false)) { return $false }
+    return @((Get-DuoForgeObjectValue -Object $StoredValidationResult -Name 'issues' -Default @()) | Where-Object {
+        [string]$_.severity -eq 'critical' -or ([string]$_.severity -eq 'major' -and [bool]$_.blockingProposal)
+    }).Count -gt 0
+}
+
 function Test-DuoForgeQuestionOptionMetadataInternal {
     [CmdletBinding()]
     param([AllowEmptyString()][string]$Option)
@@ -109,6 +423,73 @@ function Get-DuoForgeStageLineagePolicyInternal {
     }
 }
 
+function Get-DuoForgeStageResultContractProfileInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Stage,
+        [AllowNull()][string]$TargetDocumentId,
+        [AllowEmptyCollection()][string[]]$SourceDocumentIds = @()
+    )
+
+    $documentStages = @('independent-draft', 'independent-merge-draft', 'synthesis', 'owned-document-revision', 'document-revision')
+    $validationStages = @('final-validation', 'document-validation')
+    $profileName = if ($Stage -eq 'context-batch-analysis') { 'context-batch' }
+        elseif ($Stage -in @('independent-draft', 'independent-merge-draft')) { 'draft' }
+        elseif ($Stage -in @('cross-review', 'joint-document-review', 'document-review')) { 'review' }
+        elseif ($Stage -in @('author-response', 'review-response', 'owner-response')) { 'response' }
+        elseif ($Stage -in @('synthesis', 'owned-document-revision', 'document-revision')) { 'synthesis-revision' }
+        elseif ($Stage -in $validationStages) { 'validation' }
+        else { 'unknown' }
+    return [ordered]@{
+        profileName = $profileName
+        documentRequired = $Stage -in $documentStages
+        finalApprovedRequired = $Stage -in $validationStages
+        contextEvidenceRequired = $Stage -eq 'context-batch-analysis'
+        lineage = Get-DuoForgeStageLineagePolicyInternal -Stage $Stage -TargetDocumentId $TargetDocumentId -SourceDocumentIds $SourceDocumentIds
+    }
+}
+
+function Get-DuoForgeStageIssueTargetTokenInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Step)
+
+    $target = [string](Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId' -Default '')
+    if (-not [string]::IsNullOrWhiteSpace($target)) { return $target.ToUpperInvariant() }
+    $sources = @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @())
+    if ('A' -in $sources -and 'B' -in $sources) { return 'AB' }
+    if ('A' -in $sources) { return 'A' }
+    if ('B' -in $sources) { return 'B' }
+    if ('brief' -in $sources) { return 'MERGED' }
+    return 'NONE'
+}
+
+function Get-DuoForgeExpectedNewIssueKeyPrefixForStepInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Step)
+
+    $contextBatchId = [string](Get-DuoForgeObjectValue -Object $Step -Name 'contextBatchId' -Default '')
+    $batchToken = if ([string]::IsNullOrWhiteSpace($contextBatchId)) { '' } else { '-' + (($contextBatchId.ToUpperInvariant() -replace '[^A-Z0-9]+', '-').Trim('-')) }
+    $inputGeneration = [Math]::Max(1, [int](Get-DuoForgeObjectValue -Object $Step -Name 'inputGeneration' -Default 1))
+    $targetToken = Get-DuoForgeStageIssueTargetTokenInternal -Step $Step
+    return '{0}-R{1:D2}-{2}-{3}{4}-G{5:D2}-' -f $Step.provider.ToUpperInvariant(), [int]$Step.round, $Step.stage.ToUpperInvariant(), $targetToken, $batchToken, $inputGeneration
+}
+
+function Test-DuoForgeStageIssueKeyPrefixContractInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Manifest,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Step
+    )
+
+    if ((Get-DuoForgeWorkflowVersionInternal -Manifest $Manifest) -ne 'workflow-v2') { return $false }
+    if ([string](Get-DuoForgeObjectValue -Object $Manifest -Name 'promptTemplateVersion' -Default '') -notin @('duoforge-stage-v4', 'duoforge-stage-v5')) { return $false }
+    if ([string]$Step.stage -eq 'context-batch-analysis') {
+        $storedContextPlan = Get-DuoForgeObjectValue -Object $Manifest -Name 'contextPlan'
+        if ($null -ne $storedContextPlan -and [int](Get-DuoForgeObjectValue -Object $storedContextPlan -Name 'schemaVersion' -Default 1) -lt 2) { return $false }
+    }
+    return $true
+}
+
 function New-DuoForgeSafeValidationFailureInternal {
     [CmdletBinding()]
     param(
@@ -124,6 +505,40 @@ function New-DuoForgeSafeValidationFailureInternal {
         count = [Math]::Max(1, $Count)
         expected = @($Expected | Where-Object { [string]$_ -in @('A', 'B', 'merged', 'brief', 'codex', 'claude') } | Sort-Object -Unique)
     }
+}
+
+function Add-DuoForgeStageStructuralFailureInternal {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()][Parameter(Mandatory)][System.Collections.Generic.List[string]]$Errors,
+        [AllowEmptyCollection()][Parameter(Mandatory)][System.Collections.Generic.List[object]]$Failures,
+        [Parameter(Mandatory)][string]$Message,
+        [Parameter(Mandatory)][string]$Code,
+        [Parameter(Mandatory)][string]$Path,
+        [int]$Count = 1,
+        [AllowEmptyCollection()][string[]]$Expected = @()
+    )
+
+    $Errors.Add($Message)
+    $Failures.Add((New-DuoForgeSafeValidationFailureInternal -Code $Code -Path $Path -Count $Count -Expected $Expected))
+}
+
+function Test-DuoForgeSafeStageValidationPathInternal {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Path)
+
+    if ($Path -in @('$', 'schemaVersion', 'stage', 'provider', 'performedBy', 'targetDocumentId', 'sourceDocumentIds', 'summary', 'document', 'issues', 'issueResponses', 'adoptions', 'openQuestions', 'finalApproved')) { return $true }
+    $patterns = @(
+        '^issues\[\d+\]\.(?:issueKey|targetDocumentId|category|severity|claim|evidence|proposal|requiresUser|blockingProposal)$',
+        '^issues\[\d+\]\.evidence\[\d+\]\.(?:sourceDocumentId|proposedByProvider|path|location|excerptHash)$',
+        '^issueResponses\[\d+\]\.(?:issueKey|disposition|rationale|locations)$',
+        '^issueResponses\[\d+\]\.locations\[\d+\]$',
+        '^adoptions\[\d+\]\.(?:issueKey|sourceDocumentId|proposedByProvider|targetDocumentId|disposition|rationale|locations)$',
+        '^adoptions\[\d+\]\.locations\[\d+\]$',
+        '^openQuestions\[\d+\]\.(?:issueKey|title|question|options|recommendedOption|reasonNow|plainExplanation|codexOpinion|claudeOpinion|impactIfDeferred|estimatedCost|reversibility|confidence|safeDefault|experimentPossible)$',
+        '^openQuestions\[\d+\]\.options\[\d+\]$'
+    )
+    return @($patterns | Where-Object { $Path -match $_ }).Count -gt 0
 }
 
 function New-DuoForgeIssueReferenceIntegrityExceptionInternal {
@@ -159,6 +574,8 @@ function Test-DuoForgeStageResultInternal {
         [AllowNull()][System.Collections.IDictionary]$AdoptableIssueTargets,
         [AllowNull()][System.Collections.IDictionary]$AdoptableIssueProviders,
         [AllowNull()][System.Collections.IDictionary]$ContextEvidenceContract,
+        [AllowEmptyString()][string]$ExpectedIssueKeyPrefix = '',
+        [AllowEmptyString()][string]$ExpectedPerformedBy = '',
         [switch]$ThrowOnIssueReferenceIntegrityError,
         [switch]$ThrowOnError
     )
@@ -174,41 +591,43 @@ function Test-DuoForgeStageResultInternal {
     )
     foreach ($name in $requiredProperties) {
         if ($Result -isnot [System.Collections.IDictionary] -or -not $Result.Contains($name)) {
-            $errors.Add("필수 속성이 없습니다: $name")
+            Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "필수 속성이 없습니다: $name" -Code 'DF-VAL-REQUIRED' -Path $name
         }
     }
 
     if ($WorkflowVersion -eq 'workflow-v2') {
         foreach ($name in @('performedBy', 'targetDocumentId', 'sourceDocumentIds')) {
             if ($Result -isnot [System.Collections.IDictionary] -or -not $Result.Contains($name)) {
-                $errors.Add("필수 속성이 없습니다: $name")
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "필수 속성이 없습니다: $name" -Code 'DF-VAL-REQUIRED' -Path $name
             }
         }
     }
 
-    $lineagePolicy = if ($WorkflowVersion -eq 'workflow-v2') {
-        Get-DuoForgeStageLineagePolicyInternal -Stage $ExpectedStage -TargetDocumentId $ExpectedTargetDocumentId -SourceDocumentIds $ExpectedSourceDocumentIds
+    $contractProfile = if ($WorkflowVersion -eq 'workflow-v2') {
+        Get-DuoForgeStageResultContractProfileInternal -Stage $ExpectedStage -TargetDocumentId $ExpectedTargetDocumentId -SourceDocumentIds $ExpectedSourceDocumentIds
     }
     else { $null }
+    $lineagePolicy = if ($null -ne $contractProfile) { $contractProfile.lineage } else { $null }
 
     $expectedSchemaVersion = if ($WorkflowVersion -eq 'workflow-v2') { 2 } else { 1 }
     if ([int](Get-DuoForgeObjectValue -Object $Result -Name 'schemaVersion' -Default 0) -ne $expectedSchemaVersion) {
-        $errors.Add("schemaVersion은 $expectedSchemaVersion 이어야 합니다.")
+        Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "schemaVersion은 $expectedSchemaVersion 이어야 합니다." -Code 'DF-VAL-CONTRACT-MISMATCH' -Path 'schemaVersion'
     }
     if ([string](Get-DuoForgeObjectValue -Object $Result -Name 'stage') -cne $ExpectedStage) {
-        $errors.Add("stage가 예상값과 다릅니다: $ExpectedStage")
+        Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "stage가 예상값과 다릅니다: $ExpectedStage" -Code 'DF-VAL-CONTRACT-MISMATCH' -Path 'stage'
     }
     if ([string](Get-DuoForgeObjectValue -Object $Result -Name 'provider') -cne $ExpectedProvider) {
-        $errors.Add("provider가 예상값과 다릅니다: $ExpectedProvider")
+        Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "provider가 예상값과 다릅니다: $ExpectedProvider" -Code 'DF-VAL-CONTRACT-MISMATCH' -Path 'provider' -Expected @($ExpectedProvider)
     }
     if ($WorkflowVersion -eq 'workflow-v2') {
-        if ([string](Get-DuoForgeObjectValue -Object $Result -Name 'performedBy') -cne $ExpectedProvider) {
-            $errors.Add("performedBy가 예상값과 다릅니다: $ExpectedProvider")
+        if ([string]::IsNullOrWhiteSpace($ExpectedPerformedBy)) { $ExpectedPerformedBy = $ExpectedProvider }
+        if ([string](Get-DuoForgeObjectValue -Object $Result -Name 'performedBy') -cne $ExpectedPerformedBy) {
+            Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "performedBy가 예상값과 다릅니다: $ExpectedPerformedBy" -Code 'DF-VAL-CONTRACT-MISMATCH' -Path 'performedBy' -Expected @($ExpectedPerformedBy)
         }
         $actualTarget = Get-DuoForgeObjectValue -Object $Result -Name 'targetDocumentId'
         $expectedTarget = if ([string]::IsNullOrWhiteSpace($ExpectedTargetDocumentId)) { $null } else { $ExpectedTargetDocumentId }
         if (($null -eq $expectedTarget -and $null -ne $actualTarget) -or ($null -ne $expectedTarget -and [string]$actualTarget -cne [string]$expectedTarget)) {
-            $errors.Add("targetDocumentId가 예상값과 다릅니다: $expectedTarget")
+            Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "targetDocumentId가 예상값과 다릅니다: $expectedTarget" -Code 'DF-VAL-CONTRACT-MISMATCH' -Path 'targetDocumentId' -Expected @($expectedTarget)
         }
         $sourceIds = $null
         if ($Result -is [System.Collections.IDictionary] -and $Result.Contains('sourceDocumentIds')) {
@@ -218,34 +637,51 @@ function Test-DuoForgeStageResultInternal {
             $sourceIds = $Result.PSObject.Properties['sourceDocumentIds'].Value
         }
         if ($null -eq $sourceIds -or $sourceIds -is [string] -or $sourceIds -isnot [System.Collections.IEnumerable]) {
-            $errors.Add('sourceDocumentIds 속성은 배열이어야 합니다.')
+            Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'sourceDocumentIds 속성은 배열이어야 합니다.' -Code 'DF-VAL-TYPE' -Path 'sourceDocumentIds'
         }
         else {
-            $actualSources = @($sourceIds | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+            $sourceArray = @($sourceIds | ForEach-Object { [string]$_ })
+            $actualSources = @($sourceArray | Sort-Object -Unique)
             $expectedSources = @($ExpectedSourceDocumentIds | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+            if ($sourceArray.Count -ne $actualSources.Count) {
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'sourceDocumentIds에는 중복된 출처를 사용할 수 없습니다.' -Code 'DF-VAL-UNIQUE' -Path 'sourceDocumentIds'
+            }
             if (($actualSources -join ',') -cne ($expectedSources -join ',')) {
-                $errors.Add("sourceDocumentIds가 예상값과 다릅니다: $($expectedSources -join ',')")
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "sourceDocumentIds가 예상값과 다릅니다: $($expectedSources -join ',')" -Code 'DF-VAL-CONTRACT-MISMATCH' -Path 'sourceDocumentIds' -Expected @($expectedSources)
             }
         }
     }
 
-    $documentStages = @('independent-draft', 'independent-merge-draft', 'synthesis', 'owned-document-revision', 'document-revision')
-    if ($ExpectedStage -in $documentStages -and [string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $Result -Name 'document'))) {
-        $errors.Add("$ExpectedStage 단계에는 비어 있지 않은 document가 필요합니다.")
+    $documentRequired = if ($WorkflowVersion -eq 'workflow-v2') { [bool]$contractProfile.documentRequired } else { $ExpectedStage -in @('independent-draft', 'synthesis', 'owned-document-revision') }
+    $documentValue = Get-DuoForgeObjectValue -Object $Result -Name 'document'
+    if ($documentRequired -and [string]::IsNullOrWhiteSpace([string]$documentValue)) {
+        Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "$ExpectedStage 단계에는 비어 있지 않은 document가 필요합니다." -Code 'DF-VAL-NONEMPTY' -Path 'document'
     }
-    if ($ExpectedStage -in @('final-validation', 'document-validation') -and (Get-DuoForgeObjectValue -Object $Result -Name 'finalApproved') -isnot [bool]) {
-        $errors.Add("$ExpectedStage 단계에는 boolean finalApproved가 필요합니다.")
+    elseif ($WorkflowVersion -eq 'workflow-v2' -and -not $documentRequired -and $null -ne $documentValue) {
+        Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "$ExpectedStage 단계의 document는 null이어야 합니다." -Code 'DF-VAL-CONTRACT-MISMATCH' -Path 'document'
+    }
+    $finalApprovedRequired = if ($WorkflowVersion -eq 'workflow-v2') { [bool]$contractProfile.finalApprovedRequired } else { $ExpectedStage -in @('final-validation') }
+    $finalApprovedValue = Get-DuoForgeObjectValue -Object $Result -Name 'finalApproved'
+    if ($finalApprovedRequired -and $finalApprovedValue -isnot [bool]) {
+        Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "$ExpectedStage 단계에는 boolean finalApproved가 필요합니다." -Code 'DF-VAL-TYPE' -Path 'finalApproved'
+    }
+    elseif ($WorkflowVersion -eq 'workflow-v2' -and -not $finalApprovedRequired -and $null -ne $finalApprovedValue) {
+        Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "$ExpectedStage 단계의 finalApproved는 null이어야 합니다." -Code 'DF-VAL-CONTRACT-MISMATCH' -Path 'finalApproved'
     }
 
     foreach ($collectionName in @('issues', 'issueResponses', 'adoptions', 'openQuestions')) {
         if ($Result -isnot [System.Collections.IDictionary] -or -not $Result.Contains($collectionName)) {
-            $errors.Add("$collectionName 속성은 배열이어야 합니다.")
+            Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "$collectionName 속성은 배열이어야 합니다." -Code 'DF-VAL-TYPE' -Path $collectionName
             continue
         }
         $value = $Result[$collectionName]
         if ($null -eq $value -or $value -is [string] -or $value -isnot [System.Collections.IEnumerable]) {
-            $errors.Add("$collectionName 속성은 배열이어야 합니다.")
+            Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "$collectionName 속성은 배열이어야 합니다." -Code 'DF-VAL-TYPE' -Path $collectionName
         }
+    }
+
+    if ($WorkflowVersion -eq 'workflow-v2' -and [string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $Result -Name 'summary'))) {
+        Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'summary 값이 비어 있습니다.' -Code 'DF-VAL-NONEMPTY' -Path 'summary'
     }
 
     $issueItems = if ($Result -is [System.Collections.IDictionary] -and $Result.Contains('issues')) { $Result['issues'] } else { @() }
@@ -288,48 +724,60 @@ function Test-DuoForgeStageResultInternal {
                     }
                 }
             }
+            if ($WorkflowVersion -eq 'workflow-v2' -and -not [string]::IsNullOrWhiteSpace($ExpectedIssueKeyPrefix) -and $issueKey -notmatch ('^' + [regex]::Escape($ExpectedIssueKeyPrefix) + '\d{3,}$')) {
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'issues.issueKey가 현재 단계의 새 쟁점 접두사와 다릅니다.' -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "issues[$issueIndex].issueKey"
+            }
         }
         $severity = [string](Get-DuoForgeObjectValue -Object $issue -Name 'severity')
-        if ($severity -notin @('critical', 'major', 'minor')) { $errors.Add('issue.severity 값이 잘못되었습니다.') }
+        if ($severity -notin @('critical', 'major', 'minor')) {
+            Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'issue.severity 값이 잘못되었습니다.' -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "issues[$issueIndex].severity"
+        }
         $issueTargetName = if ($WorkflowVersion -eq 'workflow-v2') { 'targetDocumentId' } else { 'target' }
-        foreach ($name in @('issueKey', $issueTargetName, 'category', 'claim')) {
+        $requiredIssueStrings = @('issueKey', $issueTargetName, 'category', 'claim')
+        if ($WorkflowVersion -eq 'workflow-v2') { $requiredIssueStrings += 'proposal' }
+        foreach ($name in $requiredIssueStrings) {
             if ([string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $issue -Name $name))) {
-                $errors.Add("issue.$name 값이 비어 있습니다.")
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "issue.$name 값이 비어 있습니다." -Code 'DF-VAL-NONEMPTY' -Path "issues[$issueIndex].$name"
             }
         }
         if ($WorkflowVersion -eq 'workflow-v2') {
             $issueTarget = [string](Get-DuoForgeObjectValue -Object $issue -Name 'targetDocumentId')
-            if ($issueTarget -cnotin @('A', 'B', 'merged')) { $errors.Add('issue.targetDocumentId 값이 잘못되었습니다.') }
+            if ($issueTarget -cnotin @('A', 'B', 'merged')) {
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'issue.targetDocumentId 값이 잘못되었습니다.' -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "issues[$issueIndex].targetDocumentId"
+            }
             elseif ($issueTarget -cnotin @($lineagePolicy.issueTargetDocumentIds)) {
                 $errors.Add('issue.targetDocumentId가 현재 단계의 허용 대상과 다릅니다.')
                 $referenceFailures.Add((New-DuoForgeSafeValidationFailureInternal -Code 'DF-REF-TARGET-MISMATCH' -Path "issues[$issueIndex].targetDocumentId" -Expected @($lineagePolicy.issueTargetDocumentIds)))
             }
             $evidenceItems = @(Get-DuoForgeObjectValue -Object $issue -Name 'evidence' -Default @())
-            if ($ExpectedStage -eq 'context-batch-analysis' -and $null -ne $ContextEvidenceContract -and $evidenceItems.Count -lt 1) { $errors.Add('schema 2 context-batch-analysis issue에는 CORE 근거가 하나 이상 필요합니다.') }
-            foreach ($evidence in $evidenceItems) {
+            if ($ExpectedStage -eq 'context-batch-analysis' -and $null -ne $ContextEvidenceContract -and $evidenceItems.Count -lt 1) {
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'schema 2 context-batch-analysis issue에는 CORE 근거가 하나 이상 필요합니다.' -Code 'DF-VAL-COUNT' -Path "issues[$issueIndex].evidence"
+            }
+            for ($evidenceIndex = 0; $evidenceIndex -lt $evidenceItems.Count; $evidenceIndex++) {
+                $evidence = $evidenceItems[$evidenceIndex]
                 foreach ($name in @('sourceDocumentId', 'proposedByProvider', 'path', 'location', 'excerptHash')) {
                     if ([string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $evidence -Name $name))) {
-                        $errors.Add("issue.evidence.$name 값이 비어 있습니다.")
+                        Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "issue.evidence.$name 값이 비어 있습니다." -Code 'DF-VAL-NONEMPTY' -Path "issues[$issueIndex].evidence[$evidenceIndex].$name"
                     }
                 }
                 if ([string](Get-DuoForgeObjectValue -Object $evidence -Name 'sourceDocumentId') -cnotin @('brief', 'A', 'B', 'merged')) {
-                    $errors.Add('issue.evidence.sourceDocumentId 값이 잘못되었습니다.')
+                    Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'issue.evidence.sourceDocumentId 값이 잘못되었습니다.' -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "issues[$issueIndex].evidence[$evidenceIndex].sourceDocumentId"
                 }
                 elseif ([string](Get-DuoForgeObjectValue -Object $evidence -Name 'sourceDocumentId') -cnotin @($lineagePolicy.evidenceSourceDocumentIds)) {
-                    $errors.Add("issue.evidence.sourceDocumentId가 $ExpectedStage 단계의 허용 출처와 다릅니다.")
+                    Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "issue.evidence.sourceDocumentId가 $ExpectedStage 단계의 허용 출처와 다릅니다." -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "issues[$issueIndex].evidence[$evidenceIndex].sourceDocumentId" -Expected @($lineagePolicy.evidenceSourceDocumentIds)
                 }
                 if ([string](Get-DuoForgeObjectValue -Object $evidence -Name 'proposedByProvider') -notin @('codex', 'claude')) {
-                    $errors.Add('issue.evidence.proposedByProvider 값이 잘못되었습니다.')
+                    Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'issue.evidence.proposedByProvider 값이 잘못되었습니다.' -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "issues[$issueIndex].evidence[$evidenceIndex].proposedByProvider"
                 }
                 elseif ($ExpectedStage -eq 'context-batch-analysis' -and $null -ne $ContextEvidenceContract -and [string](Get-DuoForgeObjectValue -Object $evidence -Name 'proposedByProvider') -cne $ExpectedProvider) {
-                    $errors.Add('context-batch-analysis evidence.proposedByProvider가 실행 공급자와 다릅니다.')
+                    Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'context-batch-analysis evidence.proposedByProvider가 실행 공급자와 다릅니다.' -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "issues[$issueIndex].evidence[$evidenceIndex].proposedByProvider" -Expected @($ExpectedProvider)
                 }
                 if ($ExpectedStage -eq 'context-batch-analysis' -and $null -ne $ContextEvidenceContract) {
                     foreach ($name in @('sourceDocumentId', 'path', 'location', 'excerptHash')) {
                         $actualEvidenceValue = [string](Get-DuoForgeObjectValue -Object $evidence -Name $name -Default '')
                         $expectedEvidenceValue = [string](Get-DuoForgeObjectValue -Object $ContextEvidenceContract -Name $name -Default '')
                         if ($actualEvidenceValue -cne $expectedEvidenceValue) {
-                            $errors.Add("context-batch-analysis evidence.$name 값이 CORE 근거 계약과 다릅니다.")
+                            Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "context-batch-analysis evidence.$name 값이 CORE 근거 계약과 다릅니다." -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "issues[$issueIndex].evidence[$evidenceIndex].$name" -Expected $(if ($name -eq 'sourceDocumentId') { @($expectedEvidenceValue) } else { @() })
                         }
                     }
                 }
@@ -337,7 +785,7 @@ function Test-DuoForgeStageResultInternal {
         }
         foreach ($name in @('requiresUser', 'blockingProposal')) {
             if ((Get-DuoForgeObjectValue -Object $issue -Name $name) -isnot [bool]) {
-                $errors.Add("issue.$name 값은 boolean이어야 합니다.")
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "issue.$name 값은 boolean이어야 합니다." -Code 'DF-VAL-TYPE' -Path "issues[$issueIndex].$name"
             }
         }
     }
@@ -349,13 +797,32 @@ function Test-DuoForgeStageResultInternal {
         $structuralFailures.Add((New-DuoForgeSafeValidationFailureInternal -Code 'DF-VAL-ARRAY-NOT-ALLOWED' -Path 'issueResponses'))
     }
     if ($ExpectedStage -in $responseStages) {
-        foreach ($response in @($responseItems)) {
+        $responseArray = @($responseItems)
+        for ($responseIndex = 0; $responseIndex -lt $responseArray.Count; $responseIndex++) {
+            $response = $responseArray[$responseIndex]
             $disposition = [string](Get-DuoForgeObjectValue -Object $response -Name 'disposition')
             if ($disposition -notin @('ACCEPTED', 'PARTIALLY_ACCEPTED', 'REJECTED', 'DEFERRED', 'NEEDS_EVIDENCE', 'ASK_USER')) {
-                $errors.Add('issueResponses.disposition 값이 잘못되었습니다.')
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'issueResponses.disposition 값이 잘못되었습니다.' -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "issueResponses[$responseIndex].disposition"
             }
             if ([string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $response -Name 'issueKey'))) {
-                $errors.Add('issueResponses.issueKey 값이 비어 있습니다.')
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'issueResponses.issueKey 값이 비어 있습니다.' -Code 'DF-VAL-NONEMPTY' -Path "issueResponses[$responseIndex].issueKey"
+            }
+            if ($WorkflowVersion -eq 'workflow-v2' -and [string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $response -Name 'rationale'))) {
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'issueResponses.rationale 값이 비어 있습니다.' -Code 'DF-VAL-NONEMPTY' -Path "issueResponses[$responseIndex].rationale"
+            }
+            $responseLocations = $null
+            if ($response -is [System.Collections.IDictionary] -and $response.Contains('locations')) { $responseLocations = $response['locations'] }
+            elseif ($null -ne $response.PSObject.Properties['locations']) { $responseLocations = $response.PSObject.Properties['locations'].Value }
+            if ($null -eq $responseLocations -or $responseLocations -is [string] -or $responseLocations -isnot [System.Collections.IEnumerable]) {
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'issueResponses.locations 속성은 배열이어야 합니다.' -Code 'DF-VAL-TYPE' -Path "issueResponses[$responseIndex].locations"
+            }
+            else {
+                $responseLocationArray = @($responseLocations)
+                for ($locationIndex = 0; $locationIndex -lt $responseLocationArray.Count; $locationIndex++) {
+                    if ($WorkflowVersion -eq 'workflow-v2' -and [string]::IsNullOrWhiteSpace([string]$responseLocationArray[$locationIndex])) {
+                        Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'issueResponses.locations에는 비어 있지 않은 위치만 사용할 수 있습니다.' -Code 'DF-VAL-NONEMPTY' -Path "issueResponses[$responseIndex].locations[$locationIndex]"
+                    }
+                }
             }
         }
     }
@@ -386,38 +853,46 @@ function Test-DuoForgeStageResultInternal {
         $adoption = $adoptionArray[$adoptionIndex]
         foreach ($name in @('issueKey', 'rationale')) {
             if ([string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $adoption -Name $name))) {
-                $errors.Add("adoptions.$name 값이 비어 있습니다.")
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "adoptions.$name 값이 비어 있습니다." -Code 'DF-VAL-NONEMPTY' -Path "adoptions[$adoptionIndex].$name"
             }
         }
         if ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'disposition') -notin @('ACCEPTED', 'PARTIALLY_ACCEPTED', 'REJECTED', 'DEFERRED')) {
-            $errors.Add('adoptions.disposition 값이 잘못되었습니다.')
+            Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'adoptions.disposition 값이 잘못되었습니다.' -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "adoptions[$adoptionIndex].disposition"
         }
         $locations = $null
         if ($adoption -is [System.Collections.IDictionary] -and $adoption.Contains('locations')) { $locations = $adoption['locations'] }
         elseif ($null -ne $adoption.PSObject.Properties['locations']) { $locations = $adoption.PSObject.Properties['locations'].Value }
         if ($null -eq $locations -or $locations -is [string] -or $locations -isnot [System.Collections.IEnumerable]) {
-            $errors.Add('adoptions.locations 속성은 배열이어야 합니다.')
+            Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'adoptions.locations 속성은 배열이어야 합니다.' -Code 'DF-VAL-TYPE' -Path "adoptions[$adoptionIndex].locations"
         }
         elseif ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'disposition') -in @('ACCEPTED', 'PARTIALLY_ACCEPTED') -and @($locations).Count -eq 0) {
-            $errors.Add('ACCEPTED 또는 PARTIALLY_ACCEPTED adoption에는 실제 반영 위치가 필요합니다.')
+            Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'ACCEPTED 또는 PARTIALLY_ACCEPTED adoption에는 실제 반영 위치가 필요합니다.' -Code 'DF-VAL-COUNT' -Path "adoptions[$adoptionIndex].locations"
+        }
+        else {
+            $locationArray = @($locations)
+            for ($locationIndex = 0; $locationIndex -lt $locationArray.Count; $locationIndex++) {
+                if ($WorkflowVersion -eq 'workflow-v2' -and [string]::IsNullOrWhiteSpace([string]$locationArray[$locationIndex])) {
+                    Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'adoptions.locations에는 비어 있지 않은 위치만 사용할 수 있습니다.' -Code 'DF-VAL-NONEMPTY' -Path "adoptions[$adoptionIndex].locations[$locationIndex]"
+                }
+            }
         }
         if ($WorkflowVersion -eq 'workflow-v2') {
             foreach ($name in @('sourceDocumentId', 'proposedByProvider', 'targetDocumentId')) {
                 if ([string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $adoption -Name $name))) {
-                    $errors.Add("adoptions.$name 값이 비어 있습니다.")
+                    Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "adoptions.$name 값이 비어 있습니다." -Code 'DF-VAL-NONEMPTY' -Path "adoptions[$adoptionIndex].$name"
                 }
             }
             if ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'sourceDocumentId') -cnotin @('brief', 'A', 'B', 'merged')) {
-                $errors.Add('adoptions.sourceDocumentId 값이 잘못되었습니다.')
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'adoptions.sourceDocumentId 값이 잘못되었습니다.' -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "adoptions[$adoptionIndex].sourceDocumentId"
             }
             elseif ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'sourceDocumentId') -cnotin @($lineagePolicy.adoptionSourceDocumentIds)) {
-                $errors.Add("adoptions.sourceDocumentId가 $ExpectedStage 단계의 허용 출처와 다릅니다.")
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "adoptions.sourceDocumentId가 $ExpectedStage 단계의 허용 출처와 다릅니다." -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "adoptions[$adoptionIndex].sourceDocumentId" -Expected @($lineagePolicy.adoptionSourceDocumentIds)
             }
             if ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'proposedByProvider') -notin @('codex', 'claude')) {
-                $errors.Add('adoptions.proposedByProvider 값이 잘못되었습니다.')
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'adoptions.proposedByProvider 값이 잘못되었습니다.' -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "adoptions[$adoptionIndex].proposedByProvider"
             }
             if ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'targetDocumentId') -cnotin @('A', 'B', 'merged')) {
-                $errors.Add('adoptions.targetDocumentId 값이 잘못되었습니다.')
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'adoptions.targetDocumentId 값이 잘못되었습니다.' -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "adoptions[$adoptionIndex].targetDocumentId"
             }
             elseif ([string](Get-DuoForgeObjectValue -Object $adoption -Name 'targetDocumentId') -cnotin @($lineagePolicy.adoptionTargetDocumentIds)) {
                 $errors.Add('adoptions.targetDocumentId가 현재 단계의 허용 대상과 다릅니다.')
@@ -455,40 +930,50 @@ function Test-DuoForgeStageResultInternal {
     for ($questionIndex = 0; $questionIndex -lt $questionArray.Count; $questionIndex++) {
         $question = $questionArray[$questionIndex]
         foreach ($name in @('issueKey', 'title', 'question', 'recommendedOption', 'reasonNow', 'plainExplanation', 'codexOpinion', 'claudeOpinion', 'impactIfDeferred', 'estimatedCost', 'safeDefault')) {
-            if ([string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $question -Name $name))) { $errors.Add("openQuestions.$name 값이 비어 있습니다.") }
+            if ([string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $question -Name $name))) {
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message "openQuestions.$name 값이 비어 있습니다." -Code 'DF-VAL-NONEMPTY' -Path "openQuestions[$questionIndex].$name"
+            }
         }
         $options = @(Get-DuoForgeObjectValue -Object $question -Name 'options' -Default @())
-        if ($options.Count -lt 2 -or $options.Count -gt 3) { $errors.Add('openQuestions.options에는 실제 선택지 두 개 또는 세 개가 필요합니다.') }
+        if ($options.Count -lt 2 -or $options.Count -gt 3) {
+            Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'openQuestions.options에는 실제 선택지 두 개 또는 세 개가 필요합니다.' -Code 'DF-VAL-COUNT' -Path "openQuestions[$questionIndex].options"
+        }
         $normalizedOptions = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         for ($optionIndex = 0; $optionIndex -lt $options.Count; $optionIndex++) {
             if ($options[$optionIndex] -isnot [string]) {
-                $errors.Add('openQuestions.options의 각 선택지는 문자열이어야 합니다.')
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'openQuestions.options의 각 선택지는 문자열이어야 합니다.' -Code 'DF-VAL-TYPE' -Path "openQuestions[$questionIndex].options[$optionIndex]"
                 continue
             }
             $optionText = ([string]$options[$optionIndex]).Trim()
             if ([string]::IsNullOrWhiteSpace($optionText)) {
-                $errors.Add('openQuestions.options에는 비어 있지 않은 선택지만 사용할 수 있습니다.')
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'openQuestions.options에는 비어 있지 않은 선택지만 사용할 수 있습니다.' -Code 'DF-VAL-NONEMPTY' -Path "openQuestions[$questionIndex].options[$optionIndex]"
                 continue
             }
             if (Test-DuoForgeQuestionOptionMetadataInternal -Option $optionText) {
-                $errors.Add('openQuestions.options에는 스키마 설명이나 자리 표시 문구를 사용할 수 없습니다.')
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'openQuestions.options에는 스키마 설명이나 자리 표시 문구를 사용할 수 없습니다.' -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "openQuestions[$questionIndex].options[$optionIndex]"
             }
             $letter = [string][char]([int][char]'A' + $optionIndex)
             $prefixPattern = '^\s*' + [regex]::Escape($letter) + '\s*[:：.)-]\s*'
             $normalizedOption = ([regex]::Replace($optionText, $prefixPattern, '', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase) -replace '\s+', ' ').Trim()
             if (-not $normalizedOptions.Add($normalizedOption)) {
-                $errors.Add('openQuestions.options에는 서로 다른 선택지만 사용할 수 있습니다.')
+                Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'openQuestions.options에는 서로 다른 선택지만 사용할 수 있습니다.' -Code 'DF-VAL-UNIQUE' -Path "openQuestions[$questionIndex].options[$optionIndex]"
             }
         }
         $recommendedOption = [string](Get-DuoForgeObjectValue -Object $question -Name 'recommendedOption' -Default '')
         if (-not (Test-DuoForgeQuestionRecommendationInternal -RecommendedOption $recommendedOption -Options $options)) {
-            $errors.Add('openQuestions.recommendedOption은 options의 실제 선택지 또는 해당 A/B/C 코드와 일치해야 합니다.')
+            Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'openQuestions.recommendedOption은 options의 실제 선택지 또는 해당 A/B/C 코드와 일치해야 합니다.' -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "openQuestions[$questionIndex].recommendedOption"
         }
         $reversibility = [string](Get-DuoForgeObjectValue -Object $question -Name 'reversibility' -Default '')
-        if (-not [string]::IsNullOrWhiteSpace($reversibility) -and $reversibility -notin @('easy', 'moderate', 'hard', 'unknown')) { $errors.Add('openQuestions.reversibility 값이 잘못되었습니다.') }
+        if ($reversibility -notin @('easy', 'moderate', 'hard', 'unknown')) {
+            Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'openQuestions.reversibility 값이 잘못되었습니다.' -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "openQuestions[$questionIndex].reversibility"
+        }
         $confidence = [string](Get-DuoForgeObjectValue -Object $question -Name 'confidence' -Default '')
-        if (-not [string]::IsNullOrWhiteSpace($confidence) -and $confidence -notin @('low', 'medium', 'high')) { $errors.Add('openQuestions.confidence 값이 잘못되었습니다.') }
-        if ((Get-DuoForgeObjectValue -Object $question -Name 'experimentPossible') -isnot [bool]) { $errors.Add('openQuestions.experimentPossible 값은 boolean이어야 합니다.') }
+        if ($confidence -notin @('low', 'medium', 'high')) {
+            Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'openQuestions.confidence 값이 잘못되었습니다.' -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "openQuestions[$questionIndex].confidence"
+        }
+        if ((Get-DuoForgeObjectValue -Object $question -Name 'experimentPossible') -isnot [bool]) {
+            Add-DuoForgeStageStructuralFailureInternal -Errors $errors -Failures $structuralFailures -Message 'openQuestions.experimentPossible 값은 boolean이어야 합니다.' -Code 'DF-VAL-TYPE' -Path "openQuestions[$questionIndex].experimentPossible"
+        }
         if ($WorkflowVersion -eq 'workflow-v2' -and $null -ne $ReferenceIssueTargets) {
             $referenceKey = [string](Get-DuoForgeObjectValue -Object $question -Name 'issueKey')
             $referenceTarget = if ($resultIssueTargets.Contains($referenceKey)) { [string]$resultIssueTargets[$referenceKey] } elseif ($ReferenceIssueTargets.Contains($referenceKey)) { [string]$ReferenceIssueTargets[$referenceKey] } else { '' }
@@ -826,7 +1311,9 @@ function ConvertFrom-DuoForgeProviderResult {
         [Parameter(Mandatory)][ValidateSet('codex', 'claude')][string]$ExpectedProvider,
         [ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion = 'workflow-v1',
         [AllowNull()][string]$ExpectedTargetDocumentId,
-        [AllowEmptyCollection()][string[]]$ExpectedSourceDocumentIds = @()
+        [AllowEmptyCollection()][string[]]$ExpectedSourceDocumentIds = @(),
+        [AllowEmptyString()][string]$ExpectedPerformedBy = '',
+        [AllowEmptyString()][string]$ExpectedIssueKeyPrefix = ''
     )
 
     $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($RawJson)
@@ -840,10 +1327,26 @@ function ConvertFrom-DuoForgeProviderResult {
 
     $redactions = 0
     $protected = Protect-DuoForgeObjectInternal -Value $parsed -RedactionCount ([ref]$redactions)
-    $null = Test-DuoForgeStageResultInternal -Result $protected -ExpectedStage $ExpectedStage -ExpectedProvider $ExpectedProvider -WorkflowVersion $WorkflowVersion -ExpectedTargetDocumentId $ExpectedTargetDocumentId -ExpectedSourceDocumentIds $ExpectedSourceDocumentIds -ThrowOnError
+    $null = Test-DuoForgeStageResultInternal -Result $protected -ExpectedStage $ExpectedStage -ExpectedProvider $ExpectedProvider -WorkflowVersion $WorkflowVersion -ExpectedTargetDocumentId $ExpectedTargetDocumentId -ExpectedSourceDocumentIds $ExpectedSourceDocumentIds -ExpectedPerformedBy $ExpectedPerformedBy -ExpectedIssueKeyPrefix $ExpectedIssueKeyPrefix -ThrowOnError
     return [ordered]@{
         rawHash = $rawHash
         redactionCount = $redactions
         result = $protected
     }
+}
+
+function ConvertFrom-DuoForgeThinProviderResultInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$RawJson,
+        [Parameter(Mandatory)][ValidateSet('independent-result', 'integration', 'final-validation', 'final-revision')][string]$Stage
+    )
+
+    $bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($RawJson)
+    $rawHash = Get-DuoForgeSha256 -Bytes $bytes
+    try { $parsed = ConvertTo-DuoForgeHashtable -InputObject ($RawJson | ConvertFrom-Json -Depth 100) }
+    catch { throw (New-DuoForgeException -Code 'DF-PROVIDER-JSON' -Message "공급자 결과가 유효한 JSON이 아닙니다. 원문 해시: $rawHash") }
+    $redactions = 0
+    $protected = Protect-DuoForgeObjectInternal -Value $parsed -RedactionCount ([ref]$redactions)
+    return [ordered]@{ rawHash = $rawHash; redactionCount = $redactions; result = $protected }
 }

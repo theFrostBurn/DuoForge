@@ -26,7 +26,7 @@ function Get-DuoForgeWorkflowVersionInternal {
 
     $version = [string](Get-DuoForgeObjectValue -Object $Manifest -Name 'workflowVersion' -Default '')
     if ([string]::IsNullOrWhiteSpace($version)) { return 'workflow-v1' }
-    if ($version -notin @('workflow-v1', 'workflow-v2')) {
+    if ($version -notin @('workflow-v1', 'workflow-v2', 'workflow-v3')) {
         throw (New-DuoForgeException -Code 'DF-WORKFLOW-VERSION' -Message "지원하지 않는 워크플로 버전입니다: $version")
     }
     return $version

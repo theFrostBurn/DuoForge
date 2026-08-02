@@ -5,7 +5,7 @@ function Get-DuoForgeExecutionPlan {
         [ValidateSet('shared-document', 'document-merge', 'dual-document', 'dual-project-audit')]
         [string]$Mode,
 
-        [ValidateRange(2, 3)]
+        [ValidateRange(1, 3)]
         [int]$MaxRounds = 2,
 
         [ValidateSet('alternate', 'codex', 'claude')]
@@ -13,7 +13,7 @@ function Get-DuoForgeExecutionPlan {
 
         [int]$MaxCallsPerProvider = 24,
 
-        [ValidateSet('workflow-v1', 'workflow-v2')]
+        [ValidateSet('workflow-v1', 'workflow-v2', 'workflow-v3')]
         [string]$WorkflowVersion = 'workflow-v2'
     )
 

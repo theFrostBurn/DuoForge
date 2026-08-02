@@ -129,8 +129,10 @@ function New-DuoForgeStartRequestInternal {
         [string]$ClaudeReasoningEffort,
         [ValidateSet('prd', 'architecture', 'implementation-plan', 'adr', 'custom')]
         [string]$DocumentType = 'custom',
-        [ValidateRange(2, 3)]
-        [int]$MaxRounds = 2,
+        [ValidateRange(1, 3)]
+        [int]$MaxRounds = 1,
+        [ValidateSet('workflow-v2', 'workflow-v3')]
+        [string]$WorkflowVersion = 'workflow-v3',
         [string]$Workspace,
         [ValidateSet('alternate', 'codex', 'claude')]
         [string]$FirstSynthesizer = 'alternate',
@@ -151,8 +153,8 @@ function New-DuoForgeStartRequestInternal {
         -ClaudeContext $ClaudeContext
 
     return [ordered]@{
-        schemaVersion = 2
-        workflowVersion = 'workflow-v2'
+        schemaVersion = if ($WorkflowVersion -eq 'workflow-v3') { 3 } else { 2 }
+        workflowVersion = $WorkflowVersion
         mode = $Mode
         name = $Name
         documentType = $DocumentType
@@ -253,8 +255,10 @@ function Test-DuoForgeStartRequestInternal {
             $errors.Add([ordered]@{ code = 'DF-REQUEST-FIELD'; message = "$provider AI 설정에 사용할 수 없는 항목이 있습니다: $field" })
         }
     }
-    if ([int](Get-DuoForgeObjectValue -Object $Request -Name 'schemaVersion' -Default 0) -ne 2) {
-        $errors.Add([ordered]@{ code = 'DF-REQUEST-SCHEMA'; message = '신규 실행 요청 schemaVersion은 2여야 합니다.' })
+    $requestedWorkflow = [string](Get-DuoForgeObjectValue -Object $Request -Name 'workflowVersion' -Default '')
+    $expectedRequestSchema = if ($requestedWorkflow -eq 'workflow-v3') { 3 } else { 2 }
+    if ([int](Get-DuoForgeObjectValue -Object $Request -Name 'schemaVersion' -Default 0) -ne $expectedRequestSchema) {
+        $errors.Add([ordered]@{ code = 'DF-REQUEST-SCHEMA'; message = "신규 실행 요청 schemaVersion은 $expectedRequestSchema 이어야 합니다." })
     }
     $safeWarnings = [System.Collections.Generic.List[object]]::new()
     $deprecatedWarningMessage = '--codex와 --claude 문서 옵션은 사용 중단 예정입니다. --document-a와 --document-b를 사용해 주세요.'
@@ -290,8 +294,8 @@ function Test-DuoForgeStartRequestInternal {
     $requestWorkflowVersion = [string](Get-DuoForgeObjectValue -Object $Request -Name 'workflowVersion' -Default '')
     $resultsRoot = if ([string]::IsNullOrWhiteSpace([string]$Request.workspace)) { [string]$Config.resultsRoot } else { [string]$Request.workspace }
 
-    if ($requestWorkflowVersion -ne 'workflow-v2') {
-        $errors.Add([ordered]@{ code = 'DF-WORKFLOW-NEW-RUN'; message = '신규 실행 요청은 workflow-v2 계약으로만 만들 수 있습니다.' })
+    if ($requestWorkflowVersion -notin @('workflow-v2', 'workflow-v3')) {
+        $errors.Add([ordered]@{ code = 'DF-WORKFLOW-NEW-RUN'; message = '신규 실행 요청의 workflowVersion을 지원하지 않습니다.' })
     }
 
     foreach ($warning in @(Get-DuoForgeObjectValue -Object $Request -Name 'compatibilityWarnings' -Default @())) {
@@ -305,8 +309,9 @@ function Test-DuoForgeStartRequestInternal {
         $errors.Add([ordered]@{ code = Get-DuoForgeExceptionCode -Exception $_.Exception; message = $_.Exception.Message })
     }
 
-    if ([int]$Request.maxRounds -notin @(2, 3)) {
-        $errors.Add([ordered]@{ code = 'DF-ROUNDS'; message = '라운드는 2 또는 3이어야 합니다.' })
+    $allowedRounds = if ($requestWorkflowVersion -eq 'workflow-v3') { @(1) } else { @(2, 3) }
+    if ([int]$Request.maxRounds -notin $allowedRounds) {
+        $errors.Add([ordered]@{ code = 'DF-ROUNDS'; message = if ($requestWorkflowVersion -eq 'workflow-v3') { '얇은 자동 코어는 라운드 1만 사용합니다.' } else { 'workflow-v2 라운드는 2 또는 3이어야 합니다.' } })
     }
 
     $selectionValidation = Test-DuoForgeProviderSelectionsInternal -Selections (Get-DuoForgeObjectValue -Object $Request -Name 'providerSelections')
@@ -400,7 +405,7 @@ function Test-DuoForgeStartRequestInternal {
         ($mode -in @('document-merge', 'dual-document') -and $inputs.Contains('documents'))
     if ($canBuildPlan) {
         try {
-            $basePlan = Get-DuoForgeExecutionPlanInternal -Mode $mode -MaxRounds ([int]$Request.maxRounds) -FirstSynthesizer ([string]$Request.firstSynthesizer) -MaxCallsPerProvider ([int]$Config.limits.maxCallsPerProviderPerRun) -WorkflowVersion 'workflow-v2'
+            $basePlan = Get-DuoForgeExecutionPlanInternal -Mode $mode -MaxRounds ([int]$Request.maxRounds) -FirstSynthesizer ([string]$Request.firstSynthesizer) -MaxCallsPerProvider ([int]$Config.limits.maxCallsPerProviderPerRun) -WorkflowVersion $requestWorkflowVersion
             $partialValidation = [ordered]@{ request = $Request; inputs = $inputs }
             $contextPlan = New-DuoForgeContextBatchPlanInternal -ValidationResult $partialValidation -Config $Config -BaseExecutionPlan $basePlan
             if ([bool]$contextPlan.enabled -and $mode -in @('document-merge', 'dual-document')) {
@@ -413,7 +418,7 @@ function Test-DuoForgeStartRequestInternal {
                     $errors.Add([ordered]@{ code = 'DF-CONTEXT-DOCUMENT-CAPACITY'; message = "문서 A와 B를 모두 읽을 만큼 AI 요청 횟수가 남아 있지 않습니다. 읽지 못하는 문서: $($missingDocumentIds -join ', ')" })
                 }
             }
-            $plan = Get-DuoForgeExecutionPlanInternal -Mode $mode -MaxRounds ([int]$Request.maxRounds) -FirstSynthesizer ([string]$Request.firstSynthesizer) -MaxCallsPerProvider ([int]$Config.limits.maxCallsPerProviderPerRun) -ContextBatchCount ([int]$contextPlan.selectedBatchCount) -WorkflowVersion 'workflow-v2'
+            $plan = Get-DuoForgeExecutionPlanInternal -Mode $mode -MaxRounds ([int]$Request.maxRounds) -FirstSynthesizer ([string]$Request.firstSynthesizer) -MaxCallsPerProvider ([int]$Config.limits.maxCallsPerProviderPerRun) -ContextBatchCount ([int]$contextPlan.selectedBatchCount) -WorkflowVersion $requestWorkflowVersion
             if (-not $plan.withinLimits) {
                 $errors.Add([ordered]@{ code = 'DF-PLAN-CALL-LIMIT'; message = '예상 AI 요청 횟수가 작업별 허용 상한을 초과합니다. 작업 범위를 줄여 주세요.' })
             }

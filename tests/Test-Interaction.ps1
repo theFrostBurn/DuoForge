@@ -1038,11 +1038,12 @@ Test-Case 'CLI abandon, restore, delete는 확인 이탈을 보존하고 정확�
     Assert-Equal $calls.delete 1
 }
 
-Test-Case 'CLI 도움말은 포기한 작업 복원과 실패 재시도 명령을 안내한다' {
+Test-Case 'CLI 도움말은 포기한 작업 복원과 통합 복구 명령을 안내한다' {
     $help = (& $module { Write-DuoForgeHelp 6>&1 } | Out-String)
     Assert-ContainsText $help 'duoforge restore --run <실행 ID> [--workspace <폴더>] [--confirm-restore]'
-    Assert-ContainsText $help 'duoforge retry-failed --run <실행 ID> [--workspace <폴더>] [--confirm-retry]'
-    Assert-ContainsText $help 'duoforge repair-schema --run <실행 ID> [--workspace <폴더>]'
+    Assert-ContainsText $help 'duoforge recover --run <실행 ID> [--workspace <폴더>]'
+    Assert-NotContainsText $help 'retry-failed'
+    Assert-NotContainsText $help 'repair-schema'
 }
 
 Test-Case '작업 메뉴와 홈은 포기와 영구 삭제를 별도 항목으로 표시한다' {
@@ -1154,7 +1155,7 @@ Test-Case '실패한 작업은 홈 전용 목록과 제한된 다시 시도 준�
         param($runValue, $menuInvoker)
         Invoke-DuoForgeInteractiveRun -RunRecord ([ordered]@{ runId = [string]$runValue.state.runId; runDirectory = [string]$runValue.runDirectory }) -MenuInvoker $menuInvoker 6>$null
     } $fixture.run $workMenu
-    Assert-Equal @($workCapture.items | Where-Object { $_.value -eq 'retry-failed' -and [bool]$_.enabled }).Count 1
+    Assert-Equal @($workCapture.items | Where-Object { $_.value -eq 'recover' -and [bool]$_.enabled }).Count 1
     Assert-Equal @($workCapture.items | Where-Object value -eq 'R').Count 0
     Assert-Equal @($workCapture.items | Where-Object value -eq 'abandon').Count 1
 
@@ -1190,16 +1191,16 @@ Test-Case '실패한 작업은 홈 전용 목록과 제한된 다시 시도 준�
     $null = & $module {
         param($runId, $root, $reader, $control)
         $invoker = { param($id, $resultsRoot) $control.count++; throw '취소 경로에서 CLI가 다시 시도를 준비하면 안 됩니다.' }.GetNewClosure()
-        Invoke-DuoForgeCliCoreInternal -Arguments @('retry-failed', '--run', $runId, '--workspace', $root) -InputReader $reader -RetryInvoker $invoker -InteractiveHostProbe { $true } 6>$null
+        Invoke-DuoForgeCliCoreInternal -Arguments @('recover', '--run', $runId, '--workspace', $root) -InputReader $reader -RecoveryInvoker $invoker -InteractiveHostProbe { $true } 6>$null
     } ([string]$fixture.run.state.runId) $fixture.workspace $cliCancelReader $cliCalls
     Assert-Equal $cliCalls.count 0
     Assert-Equal (Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot) $cliBefore
 
-    $cliRetryReader = (New-DuoForgeInteractionTestLineReader -Values @('RETRY')).reader
+    $cliRetryReader = (New-DuoForgeInteractionTestLineReader -Values @('RECOVER')).reader
     $cliResult = & $module {
         param($runId, $root, $reader, $control)
         $invoker = { param($id, $resultsRoot) $control.count++; return [ordered]@{ runId = $id; status = 'RESUMABLE_ERROR'; providerCalls = 0 } }.GetNewClosure()
-        Invoke-DuoForgeCliCoreInternal -Arguments @('retry-failed', '--run', $runId, '--workspace', $root) -InputReader $reader -RetryInvoker $invoker -InteractiveHostProbe { $true } 6>$null
+        Invoke-DuoForgeCliCoreInternal -Arguments @('recover', '--run', $runId, '--workspace', $root) -InputReader $reader -RecoveryInvoker $invoker -InteractiveHostProbe { $true } 6>$null
     } ([string]$fixture.run.state.runId) $fixture.workspace $cliRetryReader $cliCalls
     Assert-Equal $cliCalls.count 1
     Assert-Equal $cliResult.status 'RESUMABLE_ERROR'
@@ -1209,18 +1210,19 @@ Test-Case '실패한 작업은 홈 전용 목록과 제한된 다시 시도 준�
         & $module {
             param($runId, $root, $control)
             $invoker = { param($id, $resultsRoot) $control.count++; throw '무확인 CLI에서 다시 시도를 준비하면 안 됩니다.' }.GetNewClosure()
-            Invoke-DuoForgeCliCoreInternal -Arguments @('retry-failed', '--run', $runId, '--workspace', $root) -RetryInvoker $invoker -InteractiveHostProbe { $false } 6>$null
+            Invoke-DuoForgeCliCoreInternal -Arguments @('recover', '--run', $runId, '--workspace', $root) -RecoveryInvoker $invoker -InteractiveHostProbe { $false } 6>$null
         } ([string]$fixture.run.state.runId) $fixture.workspace $cliCalls
-    } 'DF-RUN-RETRY-CONFIRM'
+    } 'DF-RUN-RECOVERY-CONFIRM'
     Assert-Equal $cliCalls.count 1
 
-    $cliFlagResult = & $module {
-        param($runId, $root, $control)
-        $invoker = { param($id, $resultsRoot) $control.count++; return [ordered]@{ runId = $id; status = 'RESUMABLE_ERROR'; providerCalls = 0 } }.GetNewClosure()
-        Invoke-DuoForgeCliCoreInternal -Arguments @('retry-failed', '--run', $runId, '--workspace', $root, '--confirm-retry') -RetryInvoker $invoker -InteractiveHostProbe { $false } 6>$null
-    } ([string]$fixture.run.state.runId) $fixture.workspace $cliCalls
-    Assert-Equal $cliCalls.count 2
-    Assert-Equal $cliFlagResult.providerCalls 0
+    Assert-ThrowsCode {
+        & $module {
+            param($runId, $root, $control)
+            $invoker = { param($id, $resultsRoot) $control.count++; throw '확인 플래그로 복구를 준비하면 안 됩니다.' }.GetNewClosure()
+            Invoke-DuoForgeCliCoreInternal -Arguments @('recover', '--run', $runId, '--workspace', $root, '--confirm-retry') -RecoveryInvoker $invoker -InteractiveHostProbe { $false } 6>$null
+        } ([string]$fixture.run.state.runId) $fixture.workspace $cliCalls
+    } 'DF-CLI-OPTION'
+    Assert-Equal $cliCalls.count 1
 }
 
 Test-Case '시간 제한 실패는 실패 목록에서 정확한 RETRY로만 60분 연장을 준비한다' {
@@ -1271,7 +1273,7 @@ Test-Case '시간 제한 실패는 실패 목록에서 정확한 RETRY로만 60�
         param($runId, $root, $menuInvoker)
         Invoke-DuoForgeInteractiveRun -RunRecord ([ordered]@{ runId = $runId; runDirectory = (Join-Path $root $runId) }) -MenuInvoker $menuInvoker 6>$null
     } ([string]$fixture.run.state.runId) $fixture.workspace $workMenu
-    Assert-Equal @($workCapture.items | Where-Object { $_.value -eq 'retry-failed' -and $_.label -eq '총 실행시간 60분 연장 준비' -and [bool]$_.enabled }).Count 1
+    Assert-Equal @($workCapture.items | Where-Object { $_.value -eq 'recover' -and $_.label -eq '이 작업 복구 준비' -and [bool]$_.enabled }).Count 1
     Assert-Equal @($workCapture.items | Where-Object value -eq 'R').Count 0
 
     foreach ($case in @(Get-DuoForgeInteractionAbortCases)) {
@@ -1330,11 +1332,11 @@ Test-Case '시간 제한 실패는 실패 목록에서 정확한 RETRY로만 60�
     Assert-Equal $interactiveResult.result.providerCalls 0
 
     $cliCalls = [ordered]@{ count = 0 }
-    $cliReader = (New-DuoForgeInteractionTestLineReader -Values @('RETRY')).reader
+    $cliReader = (New-DuoForgeInteractionTestLineReader -Values @('RECOVER')).reader
     $cliResult = & $module {
         param($runId, $root, $inputReader, $control)
         $invoker = { param($id, $resultsRoot) $control.count++; return [ordered]@{ runId = $id; status = 'RESUMABLE_ERROR'; recoveryKind = 'runtime-extension'; providerCalls = 0 } }.GetNewClosure()
-        Invoke-DuoForgeCliCoreInternal -Arguments @('retry-failed', '--run', $runId, '--workspace', $root) -InputReader $inputReader -RetryInvoker $invoker -InteractiveHostProbe { $true } 6>$null
+        Invoke-DuoForgeCliCoreInternal -Arguments @('recover', '--run', $runId, '--workspace', $root) -InputReader $inputReader -RecoveryInvoker $invoker -InteractiveHostProbe { $true } 6>$null
     } ([string]$fixture.run.state.runId) $fixture.workspace $cliReader $cliCalls
     Assert-Equal $cliCalls.count 1
     Assert-Equal $cliResult.recoveryKind 'runtime-extension'
@@ -1344,17 +1346,138 @@ Test-Case '시간 제한 실패는 실패 목록에서 정확한 RETRY로만 60�
         & $module {
             param($runId, $root, $control)
             $invoker = { param($id, $resultsRoot) $control.count++; throw '비대화형 시간 연장을 준비하면 안 됩니다.' }.GetNewClosure()
-            Invoke-DuoForgeCliCoreInternal -Arguments @('retry-failed', '--run', $runId, '--workspace', $root) -RetryInvoker $invoker -InteractiveHostProbe { $false } 6>$null
+            Invoke-DuoForgeCliCoreInternal -Arguments @('recover', '--run', $runId, '--workspace', $root) -RecoveryInvoker $invoker -InteractiveHostProbe { $false } 6>$null
         } ([string]$fixture.run.state.runId) $fixture.workspace $cliCalls
-    } 'DF-RUN-RETRY-CONFIRM'
+    } 'DF-RUN-RECOVERY-CONFIRM'
     Assert-ThrowsCode {
         & $module {
             param($runId, $root, $control)
             $invoker = { param($id, $resultsRoot) $control.count++; throw '확인 플래그로 시간 연장을 준비하면 안 됩니다.' }.GetNewClosure()
-            Invoke-DuoForgeCliCoreInternal -Arguments @('retry-failed', '--run', $runId, '--workspace', $root, '--confirm-retry') -RetryInvoker $invoker -InteractiveHostProbe { $false } 6>$null
+            Invoke-DuoForgeCliCoreInternal -Arguments @('recover', '--run', $runId, '--workspace', $root, '--confirm-retry') -RecoveryInvoker $invoker -InteractiveHostProbe { $false } 6>$null
         } ([string]$fixture.run.state.runId) $fixture.workspace $cliCalls
-    } 'DF-RUN-RETRY-CONFIRM'
+    } 'DF-CLI-OPTION'
     Assert-Equal $cliCalls.count 1
+}
+
+Test-Case '통합 복구 - 프로젝트 오류도 메뉴와 정확한 RECOVER 및 CLI의 같은 0-call 경계를 사용한다' {
+    $documentA = New-MarkdownFile -Path (Join-Path $tempRoot 'project-contract-repair-interaction\A\source.md') -Text '# 합성 문서 A'
+    $documentB = New-MarkdownFile -Path (Join-Path $tempRoot 'project-contract-repair-interaction\B\source.md') -Text '# 합성 문서 B'
+    $workspace = Join-Path $tempRoot 'project-contract-repair-interaction\results'
+    $request = New-TestStartRequest -Mode document-merge -DocumentA $documentA -DocumentB $documentB -Workspace $workspace -DocumentType prd -Name 'project-contract-repair-interaction'
+    $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+    $created = New-DuoForgeRun -ValidationResult $validation
+    $null = & $module {
+        param($directory)
+        $null = Initialize-DuoForgeStageGraph -RunDirectory $directory
+        $statePath = Join-Path $directory 'state.json'
+        $stepsPath = Join-Path $directory 'steps.json'
+        $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $statePath)
+        $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $stepsPath)
+        $state.status = 'FAILED_STAGE'
+        $step = @($graph.steps | Where-Object stepKey -eq 'r01-claude-independent-merge-draft')[0]
+        $step.status = 'FAILED'
+        $step.retryMode = 'RETRY_EXHAUSTED'
+        $step.inputGeneration = 1
+        $step.attemptCount = 3
+        $step.totalAttemptCount = 3
+        $step.manualRetryCount = 1
+        $step.lastError = [ordered]@{
+            code = 'DF-STAGE-SCHEMA'; category = 'provider-error'; retryable = $true; attempt = 3
+            projectContractFixId = 'DF-FIX-STAGE-RESULT-V2-PROFILE-EQUIVALENCE-20260802'
+            validationFailures = @([ordered]@{ code = 'DF-VAL-STRUCTURE'; path = '$'; count = 1; expected = @() })
+        }
+        Write-DuoForgeJsonAtomic -Path $stepsPath -Value $graph
+        Write-DuoForgeJsonAtomic -Path $statePath -Value $state
+    } $created.runDirectory
+    $run = & $module { param($runId, $root) Get-DuoForgeRunInternal -RunId $runId -ResultsRoot $root } $created.runId $workspace
+
+    $workCapture = [ordered]@{ items = $null }
+    $workMenu = {
+        param($items, $title, $initialSelectedIndex, $returnTarget)
+        $workCapture.items = @($items)
+        return [ordered]@{ action = 'back'; value = $null; source = 'line'; returnTarget = $returnTarget }
+    }.GetNewClosure()
+    $null = & $module {
+        param($runId, $root, $menuInvoker)
+        Invoke-DuoForgeInteractiveRun -RunRecord ([ordered]@{ runId = $runId; runDirectory = (Join-Path $root $runId) }) -MenuInvoker $menuInvoker 6>$null
+    } ([string]$run.state.runId) $workspace $workMenu
+    Assert-Equal @($workCapture.items | Where-Object { $_.value -eq 'recover' -and $_.label -eq '이 작업 복구 준비' -and [bool]$_.enabled }).Count 1
+    Assert-Equal @($workCapture.items | Where-Object { $_.value -eq 'retry-failed' -and [bool]$_.enabled }).Count 0
+    Assert-Equal @($workCapture.items | Where-Object { $_.value -eq 'repair-schema' -and [bool]$_.enabled }).Count 0
+
+    foreach ($case in @()) {
+        $before = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
+        $calls = [ordered]@{ project = 0; schema = 0 }
+        $keyReader = New-DuoForgeInteractionTestKeyReader -Keys @($case.keys)
+        $result = & $module {
+            param($runValue, $reader, $control)
+            $projectInvoker = { param($id, $resultsRoot) $control.project++; throw '합성 키 이탈에서 프로젝트 오류 복구를 준비하면 안 됩니다.' }.GetNewClosure()
+            Invoke-DuoForgeInteractiveUnifiedRecoveryInternal -Run $runValue -RecoveryInvoker $projectInvoker 6>$null
+        } $run $keyReader.reader $calls
+        Assert-Equal $calls.project 0
+        Assert-Equal $calls.schema 0
+        Assert-Equal $result.interaction.action $case.expectedAction
+        Assert-Equal (Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot) $before
+    }
+
+    foreach ($values in @(@('B'), @('Q'), @('recover', 'B'), @(' RECOVER', 'B'), @('RECOVER ', 'B'), @('TYPO', 'B'))) {
+        $before = Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot
+        $calls = [ordered]@{ count = 0 }
+        $reader = (New-DuoForgeInteractionTestLineReader -Values $values).reader
+        $result = & $module {
+            param($runValue, $inputReader, $control)
+            $invoker = { param($id, $resultsRoot) $control.count++; throw '이탈 입력에서 프로젝트 오류 복구를 준비하면 안 됩니다.' }.GetNewClosure()
+            Invoke-DuoForgeInteractiveUnifiedRecoveryInternal -Run $runValue -InputReader $inputReader -RecoveryInvoker $invoker 6>$null
+        } $run $reader $calls
+        Assert-Equal $calls.count 0
+        Assert-True ($null -eq $result.result)
+        Assert-Equal $result.returnTarget 'work-menu'
+        Assert-Equal (Get-DuoForgeInteractionTestTreeSnapshot -Root $tempRoot) $before
+    }
+
+    $interactiveCalls = [ordered]@{ count = 0 }
+    $repairReader = (New-DuoForgeInteractionTestLineReader -Values @('RECOVER')).reader
+    $interactiveResult = & $module {
+        param($runValue, $inputReader, $control)
+        $invoker = { param($id, $resultsRoot) $control.count++; return [ordered]@{ runId = $id; status = 'RESUMABLE_ERROR'; recoveryKind = 'project-contract'; providerCalls = 0 } }.GetNewClosure()
+        Invoke-DuoForgeInteractiveUnifiedRecoveryInternal -Run $runValue -InputReader $inputReader -RecoveryInvoker $invoker 6>$null
+    } $run $repairReader $interactiveCalls
+    Assert-Equal $interactiveCalls.count 1
+    Assert-Equal $interactiveResult.result.recoveryKind 'project-contract'
+    Assert-Equal $interactiveResult.result.providerCalls 0
+
+    $cliCalls = [ordered]@{ project = 0; schema = 0 }
+    $cliReader = (New-DuoForgeInteractionTestLineReader -Values @('RECOVER')).reader
+    $cliOutput = @(& $module {
+        param($runId, $root, $inputReader, $control)
+        $projectInvoker = { param($id, $resultsRoot) $control.project++; return [ordered]@{ runId = $id; status = 'RESUMABLE_ERROR'; recoveryKind = 'project-contract'; providerCalls = 0 } }.GetNewClosure()
+        $schemaInvoker = { param($id, $resultsRoot) $control.schema++; throw '프로젝트 오류 복구에서 schema invoker를 호출하면 안 됩니다.' }.GetNewClosure()
+        Invoke-DuoForgeCliCoreInternal -Arguments @('recover', '--run', $runId, '--workspace', $root) -InputReader $inputReader -RecoveryInvoker $projectInvoker -RepairInvoker $schemaInvoker -InteractiveHostProbe { $true } 6>$null
+    } ([string]$run.state.runId) $workspace $cliReader $cliCalls)
+    Assert-Equal $cliCalls.project 1
+    Assert-Equal $cliCalls.schema 0
+    Assert-Equal @($cliOutput | Where-Object { $_ -is [System.Collections.IDictionary] -and $_.Contains('action') }).Count 0
+    $cliResult = @($cliOutput | Where-Object { $_ -is [System.Collections.IDictionary] -and $_.Contains('recoveryKind') })[-1]
+    Assert-Equal $cliResult.recoveryKind 'project-contract'
+    Assert-Equal $cliResult.providerCalls 0
+
+    Assert-ThrowsCode {
+        & $module {
+            param($runId, $root, $control)
+            $invoker = { param($id, $resultsRoot) $control.project++; throw '비대화형 프로젝트 오류 복구를 준비하면 안 됩니다.' }.GetNewClosure()
+            Invoke-DuoForgeCliCoreInternal -Arguments @('recover', '--run', $runId, '--workspace', $root) -RecoveryInvoker $invoker -InteractiveHostProbe { $false } 6>$null
+        } ([string]$run.state.runId) $workspace $cliCalls
+    } 'DF-RUN-RECOVERY-CONFIRM'
+    Assert-ThrowsCode {
+        & $module {
+            param($runId, $root, $control)
+            $invoker = { param($id, $resultsRoot) $control.project++; throw '확인 플래그로 프로젝트 오류 복구를 준비하면 안 됩니다.' }.GetNewClosure()
+            Invoke-DuoForgeCliCoreInternal -Arguments @('recover', '--run', $runId, '--workspace', $root, '--confirm-repair') -RecoveryInvoker $invoker -InteractiveHostProbe { $false } 6>$null
+        } ([string]$run.state.runId) $workspace $cliCalls
+    } 'DF-CLI-OPTION'
+    Assert-Equal $cliCalls.project 1
+    $help = (& $module { Write-DuoForgeHelp 6>&1 } | Out-String)
+    Assert-ContainsText $help 'duoforge recover --run <실행 ID> [--workspace <폴더>]'
 }
 
 Test-Case '쟁점 참조 실패는 일반 RETRY와 분리된 정확한 REPAIR로만 준비한다' {
@@ -1390,7 +1513,7 @@ Test-Case '쟁점 참조 실패는 일반 RETRY와 분리된 정확한 REPAIR로
         param($runId, $root, $menuInvoker)
         Invoke-DuoForgeInteractiveRun -RunRecord ([ordered]@{ runId = $runId; runDirectory = (Join-Path $root $runId) }) -MenuInvoker $menuInvoker 6>$null
     } ([string]$fixture.run.state.runId) $fixture.workspace $workMenu
-    Assert-Equal @($workCapture.items | Where-Object { $_.value -eq 'repair-schema' -and $_.label -eq '쟁점 참조 복구 준비' -and [bool]$_.enabled }).Count 1
+    Assert-Equal @($workCapture.items | Where-Object { $_.value -eq 'recover' -and $_.label -eq '이 작업 복구 준비' -and [bool]$_.enabled }).Count 1
     Assert-Equal @($workCapture.items | Where-Object { $_.value -eq 'retry-failed' -and [bool]$_.enabled }).Count 0
 
     foreach ($case in @(Get-DuoForgeInteractionAbortCases)) {
@@ -1447,11 +1570,11 @@ Test-Case '쟁점 참조 실패는 일반 RETRY와 분리된 정확한 REPAIR로
     Assert-Equal $interactiveResult.result.providerCalls 0
 
     $cliCalls = [ordered]@{ count = 0 }
-    $cliReader = (New-DuoForgeInteractionTestLineReader -Values @('REPAIR')).reader
+    $cliReader = (New-DuoForgeInteractionTestLineReader -Values @('RECOVER')).reader
     $cliResult = & $module {
         param($runId, $root, $inputReader, $control)
         $invoker = { param($id, $resultsRoot) $control.count++; return [ordered]@{ runId = $id; status = 'RESUMABLE_ERROR'; recoveryKind = 'schema-reference-repair'; providerCalls = 0 } }.GetNewClosure()
-        Invoke-DuoForgeCliCoreInternal -Arguments @('repair-schema', '--run', $runId, '--workspace', $root) -InputReader $inputReader -RepairInvoker $invoker -InteractiveHostProbe { $true } 6>$null
+        Invoke-DuoForgeCliCoreInternal -Arguments @('recover', '--run', $runId, '--workspace', $root) -InputReader $inputReader -RecoveryInvoker $invoker -InteractiveHostProbe { $true } 6>$null
     } ([string]$fixture.run.state.runId) $fixture.workspace $cliReader $cliCalls
     Assert-Equal $cliCalls.count 1
     Assert-Equal $cliResult.providerCalls 0
@@ -1459,14 +1582,14 @@ Test-Case '쟁점 참조 실패는 일반 RETRY와 분리된 정확한 REPAIR로
         & $module {
             param($runId, $root, $control)
             $invoker = { param($id, $resultsRoot) $control.count++; throw '비대화형 복구를 준비하면 안 됩니다.' }.GetNewClosure()
-            Invoke-DuoForgeCliCoreInternal -Arguments @('repair-schema', '--run', $runId, '--workspace', $root) -RepairInvoker $invoker -InteractiveHostProbe { $false } 6>$null
+            Invoke-DuoForgeCliCoreInternal -Arguments @('recover', '--run', $runId, '--workspace', $root) -RecoveryInvoker $invoker -InteractiveHostProbe { $false } 6>$null
         } ([string]$fixture.run.state.runId) $fixture.workspace $cliCalls
-    } 'DF-SCHEMA-REPAIR-CONFIRM'
+    } 'DF-RUN-RECOVERY-CONFIRM'
     Assert-ThrowsCode {
         & $module {
             param($runId, $root, $control)
             $invoker = { param($id, $resultsRoot) $control.count++; throw '확인 플래그로 복구를 준비하면 안 됩니다.' }.GetNewClosure()
-            Invoke-DuoForgeCliCoreInternal -Arguments @('repair-schema', '--run', $runId, '--workspace', $root, '--confirm-repair') -RepairInvoker $invoker -InteractiveHostProbe { $false } 6>$null
+            Invoke-DuoForgeCliCoreInternal -Arguments @('recover', '--run', $runId, '--workspace', $root, '--confirm-repair') -RecoveryInvoker $invoker -InteractiveHostProbe { $false } 6>$null
         } ([string]$fixture.run.state.runId) $fixture.workspace $cliCalls
     } 'DF-CLI-OPTION'
     Assert-Equal $cliCalls.count 1

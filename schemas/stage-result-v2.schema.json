@@ -23,9 +23,10 @@
     "targetDocumentId": { "type": ["string", "null"], "enum": ["A", "B", "merged", null] },
     "sourceDocumentIds": {
       "type": "array",
-      "items": { "type": "string", "enum": ["brief", "A", "B", "merged"] }
+      "items": { "type": "string", "enum": ["brief", "A", "B", "merged"] },
+      "uniqueItems": true
     },
-    "summary": { "type": "string" },
+    "summary": { "type": "string", "minLength": 1, "pattern": "\\S" },
     "document": { "type": ["string", "null"] },
     "issues": {
       "type": "array",
@@ -34,11 +35,11 @@
         "additionalProperties": false,
         "required": ["issueKey", "targetDocumentId", "category", "severity", "claim", "evidence", "proposal", "requiresUser", "blockingProposal"],
         "properties": {
-          "issueKey": { "type": "string", "minLength": 1 },
+          "issueKey": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "targetDocumentId": { "type": "string", "enum": ["A", "B", "merged"] },
-          "category": { "type": "string", "minLength": 1 },
+          "category": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "severity": { "type": "string", "enum": ["critical", "major", "minor"] },
-          "claim": { "type": "string", "minLength": 1 },
+          "claim": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "evidence": {
             "type": "array",
             "items": {
@@ -48,13 +49,13 @@
               "properties": {
                 "sourceDocumentId": { "type": "string", "enum": ["brief", "A", "B", "merged"] },
                 "proposedByProvider": { "type": "string", "enum": ["codex", "claude"] },
-                "path": { "type": "string" },
-                "location": { "type": "string" },
-                "excerptHash": { "type": "string" }
+                "path": { "type": "string", "minLength": 1, "pattern": "\\S" },
+                "location": { "type": "string", "minLength": 1, "pattern": "\\S" },
+                "excerptHash": { "type": "string", "minLength": 1, "pattern": "\\S" }
               }
             }
           },
-          "proposal": { "type": "string" },
+          "proposal": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "requiresUser": { "type": "boolean" },
           "blockingProposal": { "type": "boolean" }
         }
@@ -67,13 +68,13 @@
         "additionalProperties": false,
         "required": ["issueKey", "disposition", "rationale", "locations"],
         "properties": {
-          "issueKey": { "type": "string", "minLength": 1 },
+          "issueKey": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "disposition": {
             "type": "string",
             "enum": ["ACCEPTED", "PARTIALLY_ACCEPTED", "REJECTED", "DEFERRED", "NEEDS_EVIDENCE", "ASK_USER"]
           },
-          "rationale": { "type": "string", "minLength": 1 },
-          "locations": { "type": "array", "items": { "type": "string" } }
+          "rationale": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "locations": { "type": "array", "items": { "type": "string", "minLength": 1, "pattern": "\\S" } }
         }
       }
     },
@@ -84,13 +85,13 @@
         "additionalProperties": false,
         "required": ["issueKey", "sourceDocumentId", "proposedByProvider", "targetDocumentId", "disposition", "rationale", "locations"],
         "properties": {
-          "issueKey": { "type": "string", "minLength": 1 },
+          "issueKey": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "sourceDocumentId": { "type": "string", "enum": ["brief", "A", "B", "merged"] },
           "proposedByProvider": { "type": "string", "enum": ["codex", "claude"] },
           "targetDocumentId": { "type": "string", "enum": ["A", "B", "merged"] },
           "disposition": { "type": "string", "enum": ["ACCEPTED", "PARTIALLY_ACCEPTED", "REJECTED", "DEFERRED"] },
-          "rationale": { "type": "string", "minLength": 1 },
-          "locations": { "type": "array", "items": { "type": "string" } }
+          "rationale": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "locations": { "type": "array", "items": { "type": "string", "minLength": 1, "pattern": "\\S" } }
         }
       }
     },
@@ -105,20 +106,20 @@
           "safeDefault", "experimentPossible"
         ],
         "properties": {
-          "issueKey": { "type": "string", "minLength": 1 },
-          "title": { "type": "string", "minLength": 1 },
-          "question": { "type": "string", "minLength": 1 },
-          "options": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 2, "maxItems": 3 },
-          "recommendedOption": { "type": "string", "minLength": 1 },
-          "reasonNow": { "type": "string" },
-          "plainExplanation": { "type": "string" },
-          "codexOpinion": { "type": "string" },
-          "claudeOpinion": { "type": "string" },
-          "impactIfDeferred": { "type": "string" },
-          "estimatedCost": { "type": "string" },
+          "issueKey": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "title": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "question": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "options": { "type": "array", "items": { "type": "string", "minLength": 1, "pattern": "\\S" }, "minItems": 2, "maxItems": 3, "uniqueItems": true },
+          "recommendedOption": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "reasonNow": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "plainExplanation": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "codexOpinion": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "claudeOpinion": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "impactIfDeferred": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "estimatedCost": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "reversibility": { "type": "string", "enum": ["easy", "moderate", "hard", "unknown"] },
           "confidence": { "type": "string", "enum": ["low", "medium", "high"] },
-          "safeDefault": { "type": "string", "minLength": 1 },
+          "safeDefault": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "experimentPossible": { "type": "boolean" }
         }
       }
