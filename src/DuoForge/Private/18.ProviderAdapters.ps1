@@ -42,6 +42,73 @@ function Remove-DuoForgeProviderWorkDirectory {
     }
 }
 
+function Get-DuoForgeStageScopedProviderSchemaInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Schema,
+        [Parameter(Mandatory)][System.Collections.IDictionary]$Step,
+        [ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion = 'workflow-v1',
+        [AllowEmptyString()][string]$PromptTemplateVersion = ''
+    )
+
+    $scoped = ConvertTo-DuoForgeHashtable -InputObject $Schema
+    if ($WorkflowVersion -ne 'workflow-v2' -or $PromptTemplateVersion -ne 'duoforge-stage-v5') { return $scoped }
+
+    $properties = $scoped.properties
+    $properties.stage.enum = @([string]$Step.stage)
+    $properties.provider.enum = @([string]$Step.provider)
+    $properties.performedBy.enum = @([string](Get-DuoForgeObjectValue -Object $Step -Name 'performedBy' -Default ([string]$Step.provider)))
+
+    $targetDocumentId = Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId'
+    if ($null -eq $targetDocumentId -or [string]::IsNullOrWhiteSpace([string]$targetDocumentId)) {
+        $properties.targetDocumentId.type = 'null'
+        $null = $properties.targetDocumentId.Remove('enum')
+    }
+    else {
+        $properties.targetDocumentId.type = 'string'
+        $properties.targetDocumentId.enum = @([string]$targetDocumentId)
+    }
+
+    $sourceDocumentIds = @((Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @()) | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+    $properties.sourceDocumentIds.items.enum = @($sourceDocumentIds)
+    $properties.sourceDocumentIds['minItems'] = $sourceDocumentIds.Count
+    $properties.sourceDocumentIds['maxItems'] = $sourceDocumentIds.Count
+
+    $lineagePolicy = Get-DuoForgeStageLineagePolicyInternal `
+        -Stage ([string]$Step.stage) `
+        -TargetDocumentId $targetDocumentId `
+        -SourceDocumentIds $sourceDocumentIds
+    if (-not [bool]$lineagePolicy.issueResponsesAllowed) { $properties.issueResponses['maxItems'] = 0 }
+    if (-not [bool]$lineagePolicy.adoptionsAllowed) { $properties.adoptions['maxItems'] = 0 }
+
+    $issueTargets = @($lineagePolicy.issueTargetDocumentIds)
+    if ($issueTargets.Count -eq 0) {
+        $properties.issues['maxItems'] = 0
+    }
+    else {
+        $properties.issues.items.properties.targetDocumentId.enum = @($issueTargets)
+    }
+    $evidenceSources = @($lineagePolicy.evidenceSourceDocumentIds)
+    if ($evidenceSources.Count -gt 0) {
+        $properties.issues.items.properties.evidence.items.properties.sourceDocumentId.enum = @($evidenceSources)
+    }
+
+    if ([string]$Step.stage -in @('independent-draft', 'independent-merge-draft', 'synthesis', 'owned-document-revision', 'document-revision')) {
+        $properties.document.type = 'string'
+        $properties.document['minLength'] = 1
+    }
+    else {
+        $properties.document.type = 'null'
+    }
+    if ([string]$Step.stage -in @('final-validation', 'document-validation')) {
+        $properties.finalApproved.type = 'boolean'
+    }
+    else {
+        $properties.finalApproved.type = 'null'
+    }
+    return $scoped
+}
+
 function Get-DuoForgeStructuredProviderCommandSpecInternal {
     [CmdletBinding()]
     param(
@@ -131,6 +198,7 @@ function Get-DuoForgeProviderCommandSpecInternal {
     $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
     $schemaPath = Get-DuoForgeStageSchemaPath -WorkflowVersion $workflowVersion
     $schema = Read-DuoForgeJson -Path $schemaPath
+    $schema = Get-DuoForgeStageScopedProviderSchemaInternal -Schema $schema -Step $Step -WorkflowVersion $workflowVersion -PromptTemplateVersion ([string]$manifest.promptTemplateVersion)
     return Get-DuoForgeStructuredProviderCommandSpecInternal `
         -Provider $Provider `
         -RunDirectory $RunDirectory `

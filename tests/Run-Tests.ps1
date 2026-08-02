@@ -4101,6 +4101,43 @@ try {
         }
     }
 
+    Test-Case 'workflow-v2 금지 컬렉션 오류는 형식 복구에 안전한 정확한 경로를 제공한다' {
+        $step = [ordered]@{
+            stepKey = 'r01-claude-independent-merge-draft'; provider = 'claude'; performedBy = 'claude'
+            targetDocumentId = 'merged'; sourceDocumentIds = @('A', 'B'); stage = 'independent-merge-draft'; round = 1
+        }
+        foreach ($collectionName in @('issueResponses', 'adoptions')) {
+            $failure = & $module {
+                param($s, $name)
+                $result = New-DuoForgeFakeStageResult -Step $s
+                if ($name -eq 'issueResponses') {
+                    $result.issueResponses = @([ordered]@{ issueKey = 'CANARY-ISSUE'; disposition = 'ACCEPTED'; rationale = 'RAW-CANARY'; locations = @('본문') })
+                }
+                else {
+                    $result.adoptions = @([ordered]@{
+                        issueKey = 'CANARY-ISSUE'; sourceDocumentId = 'A'; proposedByProvider = 'claude'; targetDocumentId = 'merged'
+                        disposition = 'REJECTED'; rationale = 'RAW-CANARY'; locations = @()
+                    })
+                }
+                try {
+                    $null = Test-DuoForgeStageResultInternal -Result $result -ExpectedStage $s.stage -ExpectedProvider $s.provider -WorkflowVersion workflow-v2 -ExpectedTargetDocumentId merged -ExpectedSourceDocumentIds $s.sourceDocumentIds -ThrowOnError
+                }
+                catch {
+                    return [ordered]@{
+                        code = [string]$_.Exception.Data['DuoForgeCode']
+                        failures = @($_.Exception.Data['DuoForgeValidationFailures'])
+                    }
+                }
+                throw '금지 컬렉션 검증이 실패 폐쇄되지 않았습니다.'
+            } $step $collectionName
+            Assert-Equal $failure.code 'DF-STAGE-SCHEMA'
+            Assert-Equal @($failure.failures).Count 1
+            Assert-Equal $failure.failures[0].code 'DF-VAL-ARRAY-NOT-ALLOWED'
+            Assert-Equal $failure.failures[0].path $collectionName
+            Assert-NotContainsText ($failure | ConvertTo-Json -Depth 10) 'RAW-CANARY'
+        }
+    }
+
     Test-Case 'workflow-v2 issueKey는 중복과 dangling 및 A/B 대상 충돌을 저장 전에 차단한다' {
         $reviewStep = [ordered]@{
             stepKey = 'r01-codex-document-review'; provider = 'codex'; performedBy = 'codex'
@@ -4681,6 +4718,77 @@ try {
         }
         Assert-Equal $explanationSchema.properties.schemaVersion.type 'integer'
         Assert-Equal $explanationSchema.properties.schemaVersion.const 1
+    }
+
+    Test-Case '문서 병합 호출은 단계별 금지 컬렉션을 프롬프트와 공급자 스키마에 고정한다' {
+        $documentA = New-MarkdownFile -Path (Join-Path $tempRoot 'scoped-schema\A\source.md') -Text '# 문서 A'
+        $documentB = New-MarkdownFile -Path (Join-Path $tempRoot 'scoped-schema\B\source.md') -Text '# 문서 B'
+        $workspace = Join-Path $tempRoot 'scoped-schema-results'
+        $request = New-TestStartRequest -Mode document-merge -DocumentA $documentA -DocumentB $documentB -Workspace $workspace -DocumentType prd
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $contracts = & $module {
+            param($directory)
+            $graph = Initialize-DuoForgeStageGraph -RunDirectory $directory
+            $baseSchema = Read-DuoForgeJson -Path (Get-DuoForgeStageSchemaPath -WorkflowVersion workflow-v2)
+            $codexStep = @($graph.steps | Where-Object stepKey -eq 'r01-codex-independent-merge-draft')[0]
+            $claudeStep = @($graph.steps | Where-Object stepKey -eq 'r01-claude-independent-merge-draft')[0]
+            $synthesisStep = @($graph.steps | Where-Object stage -eq 'synthesis')[0]
+            $responseStep = @($graph.steps | Where-Object stage -eq 'review-response')[0]
+            $prompt = New-DuoForgeStagePrompt -RunDirectory $directory -Graph $graph -Step $claudeStep
+            $repair = New-DuoForgeFormatRepairPrompt -OriginalPrompt $prompt -Step $claudeStep -ValidationFailures @(
+                [ordered]@{ code = 'DF-VAL-ARRAY-NOT-ALLOWED'; path = 'adoptions'; count = 1; expected = @() },
+                [ordered]@{ code = 'DF-VAL-ARRAY-NOT-ALLOWED'; path = 'document.RAW-CANARY'; count = 1; expected = @() }
+            )
+            $codexSpec = Get-DuoForgeProviderCommandSpecInternal -Provider codex -RunDirectory $directory -Step $codexStep -Prompt (New-DuoForgeStagePrompt -RunDirectory $directory -Graph $graph -Step $codexStep)
+            $codexSchemaPath = $codexSpec.arguments[[Array]::IndexOf([object[]]$codexSpec.arguments, '--output-schema') + 1]
+            $claudeSpec = Get-DuoForgeProviderCommandSpecInternal -Provider claude -RunDirectory $directory -Step $claudeStep -Prompt $prompt
+            $claudeSchemaJson = $claudeSpec.arguments[[Array]::IndexOf([object[]]$claudeSpec.arguments, '--json-schema') + 1]
+            [ordered]@{
+                prompt = $prompt
+                repair = $repair
+                codexSchema = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $codexSchemaPath)
+                claudeSchema = ConvertTo-DuoForgeHashtable -InputObject ($claudeSchemaJson | ConvertFrom-Json -Depth 100)
+                synthesisSchema = Get-DuoForgeStageScopedProviderSchemaInternal -Schema $baseSchema -Step $synthesisStep -WorkflowVersion workflow-v2 -PromptTemplateVersion duoforge-stage-v5
+                responseSchema = Get-DuoForgeStageScopedProviderSchemaInternal -Schema $baseSchema -Step $responseStep -WorkflowVersion workflow-v2 -PromptTemplateVersion duoforge-stage-v5
+                previousSchema = Get-DuoForgeStageScopedProviderSchemaInternal -Schema $baseSchema -Step $claudeStep -WorkflowVersion workflow-v2 -PromptTemplateVersion duoforge-stage-v4
+            }
+        } $run.runDirectory
+        $payload = Get-TestPromptPayload -PromptText $contracts.prompt.text
+        Assert-False ([bool]$payload.issueResponsesAllowed)
+        Assert-False ([bool]$payload.adoptionsAllowed)
+        Assert-Equal @($payload.allowedAdoptionTargetDocumentIds).Count 0
+        Assert-Equal @($payload.allowedAdoptionSourceDocumentIds).Count 0
+        Assert-ContainsText $contracts.prompt.text 'DATA.issueResponsesAllowed가 false이면 issueResponses는 반드시 []'
+        Assert-ContainsText $contracts.prompt.text 'DATA.adoptionsAllowed가 false이면 adoptions는 반드시 []'
+        Assert-ContainsText $contracts.repair.text '"code":"DF-VAL-ARRAY-NOT-ALLOWED","path":"adoptions"'
+        Assert-ContainsText $contracts.repair.text '"code":"DF-VAL-ARRAY-NOT-ALLOWED","path":"$"'
+        Assert-NotContainsText $contracts.repair.text 'document.RAW-CANARY'
+
+        $providerSchemas = @(
+            [ordered]@{ provider = 'codex'; schema = $contracts.codexSchema },
+            [ordered]@{ provider = 'claude'; schema = $contracts.claudeSchema }
+        )
+        foreach ($entry in $providerSchemas) {
+            $schema = $entry.schema
+            Assert-Equal ((@($schema.properties.stage.enum) -join ',')) 'independent-merge-draft'
+            Assert-Equal ((@($schema.properties.provider.enum) -join ',')) $entry.provider
+            Assert-Equal ((@($schema.properties.targetDocumentId.enum) -join ',')) 'merged'
+            Assert-Equal ((@($schema.properties.sourceDocumentIds.items.enum) -join ',')) 'A,B'
+            Assert-Equal ([int]$schema.properties.sourceDocumentIds.minItems) 2
+            Assert-Equal ([int]$schema.properties.sourceDocumentIds.maxItems) 2
+            Assert-Equal ([int]$schema.properties.issueResponses.maxItems) 0
+            Assert-Equal ([int]$schema.properties.adoptions.maxItems) 0
+            Assert-Equal ((@($schema.properties.issues.items.properties.targetDocumentId.enum) -join ',')) 'merged'
+            Assert-Equal ((@($schema.properties.issues.items.properties.evidence.items.properties.sourceDocumentId.enum) -join ',')) 'A,B'
+            Assert-Equal $schema.properties.document.type 'string'
+            Assert-Equal ([int]$schema.properties.document.minLength) 1
+            Assert-Equal $schema.properties.finalApproved.type 'null'
+        }
+        Assert-True ($null -eq $contracts.synthesisSchema.properties.adoptions.PSObject.Properties['maxItems'])
+        Assert-True ($null -eq $contracts.responseSchema.properties.issueResponses.PSObject.Properties['maxItems'])
+        Assert-True (@($contracts.previousSchema.properties.stage.enum).Count -gt 1)
+        Assert-True ($null -eq $contracts.previousSchema.properties.adoptions.PSObject.Properties['maxItems'])
     }
 
     Test-Case '공급자 오류 분류는 stderr를 안전 코드로 바꾸고 원문을 즉시 버린다' {

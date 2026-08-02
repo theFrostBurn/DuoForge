@@ -589,11 +589,33 @@ function New-DuoForgeStagePrompt {
             -SourceDocumentIds @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @())
         $payload.allowedIssueTargetDocumentIds = @($lineagePolicy.issueTargetDocumentIds)
         $payload.allowedEvidenceSourceDocumentIds = @($lineagePolicy.evidenceSourceDocumentIds)
-        $payload.allowedAdoptionTargetDocumentIds = @($lineagePolicy.adoptionTargetDocumentIds)
-        $payload.allowedAdoptionSourceDocumentIds = @($lineagePolicy.adoptionSourceDocumentIds)
+        if ([string]$manifest.promptTemplateVersion -eq 'duoforge-stage-v5') {
+            $payload.issueResponsesAllowed = [bool]$lineagePolicy.issueResponsesAllowed
+            $payload.adoptionsAllowed = [bool]$lineagePolicy.adoptionsAllowed
+            $payload.allowedAdoptionTargetDocumentIds = @()
+            $payload.allowedAdoptionSourceDocumentIds = @()
+        }
+        else {
+            $payload.allowedAdoptionTargetDocumentIds = @($lineagePolicy.adoptionTargetDocumentIds)
+            $payload.allowedAdoptionSourceDocumentIds = @($lineagePolicy.adoptionSourceDocumentIds)
+        }
+        if ([string]$manifest.promptTemplateVersion -eq 'duoforge-stage-v5' -and [bool]$lineagePolicy.adoptionsAllowed) {
+            $payload.allowedAdoptionTargetDocumentIds = @($lineagePolicy.adoptionTargetDocumentIds)
+            $payload.allowedAdoptionSourceDocumentIds = @($lineagePolicy.adoptionSourceDocumentIds)
+        }
         $payload.inputGeneration = [int](Get-DuoForgeObjectValue -Object $Step -Name 'inputGeneration' -Default 1)
     }
-    $workflowContract = if ($workflowVersion -eq 'workflow-v2') {
+    $workflowContract = if ($workflowVersion -eq 'workflow-v2' -and [string]$manifest.promptTemplateVersion -eq 'duoforge-stage-v5') {
+        @'
+- performedBy는 공급자 작업 할당이며 문서 소유권이 아닙니다. targetDocumentId와 sourceDocumentIds를 DATA의 단계 할당대로 지키세요.
+- issues의 targetDocumentId는 A, B 또는 merged 중 하나여야 합니다. 근거에는 sourceDocumentId, proposedByProvider, path, location, excerptHash를 서로 분리해 기록하세요.
+- DATA.issueResponsesAllowed가 false이면 issueResponses는 반드시 []로 반환하세요.
+- DATA.adoptionsAllowed가 false이면 adoptions는 반드시 []로 반환하세요. true일 때만 sourceDocumentId, proposedByProvider, targetDocumentId, disposition, rationale, locations를 기록하세요.
+- review-response는 검토자 평가만 issueResponses에 기록하고 adoptions는 []로 반환하세요. 실제 편집 판단과 채택은 document-revision 또는 synthesis의 adoptions에 기록하세요.
+- ACCEPTED 또는 PARTIALLY_ACCEPTED 채택에는 실제 반영 위치를 locations에 하나 이상 기록하세요.
+'@
+    }
+    elseif ($workflowVersion -eq 'workflow-v2') {
         @'
 - performedBy는 공급자 작업 할당이며 문서 소유권이 아닙니다. targetDocumentId와 sourceDocumentIds를 DATA의 단계 할당대로 지키세요.
 - issues의 targetDocumentId는 A, B 또는 merged 중 하나여야 합니다. 근거에는 sourceDocumentId, proposedByProvider, path, location, excerptHash를 서로 분리해 기록하세요.
@@ -704,12 +726,12 @@ function New-DuoForgeFormatRepairPrompt {
         [AllowEmptyCollection()][object[]]$ValidationFailures = @()
     )
 
-    $allowedFailureCodes = @('DF-VAL-STRUCTURE', 'DF-VAL-LEGACY', 'DF-REF-DUPLICATE', 'DF-REF-KEY-REUSED', 'DF-REF-DANGLING', 'DF-REF-TARGET-MISMATCH', 'DF-REF-PROVIDER-MISMATCH')
+    $allowedFailureCodes = @('DF-VAL-STRUCTURE', 'DF-VAL-LEGACY', 'DF-VAL-ARRAY-NOT-ALLOWED', 'DF-REF-DUPLICATE', 'DF-REF-KEY-REUSED', 'DF-REF-DANGLING', 'DF-REF-TARGET-MISMATCH', 'DF-REF-PROVIDER-MISMATCH')
     $safeFailures = @($ValidationFailures | ForEach-Object {
         $failureCode = [string](Get-DuoForgeObjectValue -Object $_ -Name 'code' -Default 'DF-VAL-STRUCTURE')
         if ($failureCode -notin $allowedFailureCodes) { $failureCode = 'DF-VAL-STRUCTURE' }
         $failurePath = [string](Get-DuoForgeObjectValue -Object $_ -Name 'path' -Default '$')
-        if ($failurePath -notmatch '^(?:\$|(?:issues|issueResponses|adoptions|openQuestions)\[\d+\]\.[A-Za-z][A-Za-z0-9]*)$') { $failurePath = '$' }
+        if ($failurePath -notmatch '^(?:\$|(?:issues|issueResponses|adoptions|openQuestions)(?:\[\d+\]\.[A-Za-z][A-Za-z0-9]*)?)$') { $failurePath = '$' }
         [ordered]@{
             code = $failureCode
             path = $failurePath

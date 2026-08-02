@@ -104,6 +104,7 @@ function Get-DuoForgeStageLineagePolicyInternal {
         evidenceSourceDocumentIds = @($sources)
         adoptionTargetDocumentIds = @($issueTargets | Sort-Object -Unique)
         adoptionSourceDocumentIds = @($sources)
+        issueResponsesAllowed = $Stage -in @('author-response', 'review-response', 'owner-response', 'final-validation', 'document-validation')
         adoptionsAllowed = $Stage -in @('synthesis', 'document-revision')
     }
 }
@@ -164,6 +165,7 @@ function Test-DuoForgeStageResultInternal {
 
     $errors = [System.Collections.Generic.List[string]]::new()
     $referenceFailures = [System.Collections.Generic.List[object]]::new()
+    $structuralFailures = [System.Collections.Generic.List[object]]::new()
     if ($null -eq $DefinitionIssueTargets) { $DefinitionIssueTargets = $KnownIssueTargets }
     if ($null -eq $ReferenceIssueTargets) { $ReferenceIssueTargets = $KnownIssueTargets }
     $requiredProperties = @(
@@ -344,6 +346,7 @@ function Test-DuoForgeStageResultInternal {
     $responseStages = @('author-response', 'review-response', 'owner-response', 'final-validation', 'document-validation')
     if ($WorkflowVersion -eq 'workflow-v2' -and $ExpectedStage -notin $responseStages -and @($responseItems).Count -gt 0) {
         $errors.Add("$ExpectedStage 단계에는 issueResponses를 기록할 수 없습니다.")
+        $structuralFailures.Add((New-DuoForgeSafeValidationFailureInternal -Code 'DF-VAL-ARRAY-NOT-ALLOWED' -Path 'issueResponses'))
     }
     if ($ExpectedStage -in $responseStages) {
         foreach ($response in @($responseItems)) {
@@ -376,6 +379,7 @@ function Test-DuoForgeStageResultInternal {
     $adoptionItems = if ($Result -is [System.Collections.IDictionary] -and $Result.Contains('adoptions')) { $Result['adoptions'] } else { @() }
     if ($WorkflowVersion -eq 'workflow-v2' -and -not [bool]$lineagePolicy.adoptionsAllowed -and @($adoptionItems).Count -gt 0) {
         $errors.Add("$ExpectedStage 단계에는 adoptions를 기록할 수 없습니다.")
+        $structuralFailures.Add((New-DuoForgeSafeValidationFailureInternal -Code 'DF-VAL-ARRAY-NOT-ALLOWED' -Path 'adoptions'))
     }
     $adoptionArray = @($adoptionItems)
     for ($adoptionIndex = 0; $adoptionIndex -lt $adoptionArray.Count; $adoptionIndex++) {
@@ -501,8 +505,10 @@ function Test-DuoForgeStageResultInternal {
 
     $structuralErrorCount = [Math]::Max(0, $errors.Count - $referenceFailures.Count)
     $validationFailures = [System.Collections.Generic.List[object]]::new()
-    if ($structuralErrorCount -gt 0) {
-        $validationFailures.Add((New-DuoForgeSafeValidationFailureInternal -Code 'DF-VAL-STRUCTURE' -Path '$' -Count $structuralErrorCount))
+    foreach ($failure in @($structuralFailures)) { $validationFailures.Add($failure) }
+    $genericStructuralErrorCount = [Math]::Max(0, $structuralErrorCount - $structuralFailures.Count)
+    if ($genericStructuralErrorCount -gt 0) {
+        $validationFailures.Add((New-DuoForgeSafeValidationFailureInternal -Code 'DF-VAL-STRUCTURE' -Path '$' -Count $genericStructuralErrorCount))
     }
     foreach ($failure in @($referenceFailures)) { $validationFailures.Add($failure) }
     $validation = [ordered]@{ valid = $errors.Count -eq 0; errors = @($errors); validationFailures = @($validationFailures) }
