@@ -2884,6 +2884,18 @@ try {
         }
         Assert-Equal $child.exitCode 0
         Assert-ContainsText ([string]$child.stdout) 'PATH_OK'
+
+        $unicodeInput = '한글 · emoji 😀 · UTF-8'
+        $unicodeChild = & $module {
+            param($value)
+            Invoke-DuoForgeProcess -CommandName 'node.exe' -Arguments @(
+                '-e',
+                "const c=require('crypto');const b=[];process.stdin.on('data',x=>b.push(x));process.stdin.on('end',()=>process.stdout.write(c.createHash('sha256').update(Buffer.concat(b)).digest('hex').toUpperCase()));"
+            ) -TimeoutSeconds 20 -StandardInput $value -EnvironmentAllowList @('PATH', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP')
+        } $unicodeInput
+        $expectedUnicodeHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($unicodeInput)))
+        Assert-Equal $unicodeChild.exitCode 0
+        Assert-Equal ([string]$unicodeChild.stdout).Trim() $expectedUnicodeHash
     }
 
     Test-Case 'doctor 카탈로그 stage는 같은 Codex 실행 파일과 인증 환경을 사용한다' {
@@ -5348,11 +5360,24 @@ try {
             }
             $definition = Get-DuoForgeThinStageContractDefinitionInternal -Stage $step.stage -OutputDocumentCount 1
             $schema = New-DuoForgeThinProviderSchemaInternal -Definition $definition
+            $strictSubset = Assert-DuoForgeProviderSchemaStrictSubsetInternal -Schema $schema
+            $strictStageCount = 0
+            foreach ($profile in @(
+                [ordered]@{ stage = 'independent-result'; count = 1 },
+                [ordered]@{ stage = 'integration'; count = 1 },
+                [ordered]@{ stage = 'final-validation'; count = 0 },
+                [ordered]@{ stage = 'final-revision'; count = 1 }
+            )) {
+                $profileDefinition = Get-DuoForgeThinStageContractDefinitionInternal -Stage $profile.stage -OutputDocumentCount $profile.count
+                $profileSchema = New-DuoForgeThinProviderSchemaInternal -Definition $profileDefinition
+                $null = Assert-DuoForgeProviderSchemaStrictSubsetInternal -Schema $profileSchema
+                $strictStageCount++
+            }
             $payload = [ordered]@{
                 primary = [ordered]@{ documents = @('# 유효한 합성 문서') }
                 metadata = [ordered]@{
                     summary = '독립 결과 요약'
-                    findings = @([ordered]@{ category = 'scope'; severity = 'minor'; claim = '범위를 확인합니다.'; proposal = '범위를 명시합니다.'; requiresUser = $false; blockingProposal = $false })
+                    findings = @([ordered]@{ category = 'scope'; severity = 'minor'; claim = '범위를 확인합니다.'; proposal = '범위를 명시합니다.'; requiresUser = $false; blockingProposal = $false; documentIndex = 0 })
                     openQuestions = @([ordered]@{
                         findingIndex = 0; title = '범위 선택'; question = '어느 범위로 할까요?'
                         options = @('전체', 'recommendedOption 없음 - 자리 표시'); recommendedOption = '전체'
@@ -5360,14 +5385,34 @@ try {
                 }
             }
             $validation = Test-DuoForgeThinProviderPayloadInternal -Payload $payload -Definition $definition
+            $nullableMetadata = Test-DuoForgeThinProviderPayloadInternal -Payload ([ordered]@{
+                primary = [ordered]@{ documents = @('# 선택 부가 정보 없음') }
+                metadata = [ordered]@{ summary = $null; findings = @(); openQuestions = @() }
+            }) -Definition $definition
             $stored = Complete-DuoForgeThinStageResultInternal -ProviderPayload $payload -Step $step -Definition $definition
-            return [ordered]@{ definition = $definition; schema = $schema; validation = $validation; stored = $stored }
+            return [ordered]@{ definition = $definition; schema = $schema; strictSubset = $strictSubset; strictStageCount = $strictStageCount; nullableMetadata = $nullableMetadata; validation = $validation; stored = $stored }
         }
 
         foreach ($field in @('schemaVersion', 'stage', 'provider', 'performedBy', 'targetDocumentId', 'sourceDocumentIds', 'issueKey')) {
             Assert-False ($field -in @($contract.schema.required)) "provider schema required에 앱 소유 필드가 남았습니다: $field"
             Assert-False $contract.schema.properties.Contains($field) "provider schema properties에 앱 소유 필드가 남았습니다: $field"
         }
+        Assert-False $contract.schema.Contains('$schema') 'provider schema는 JSON 메타 스키마 선언을 공급자에게 보내지 않아야 합니다.'
+        Assert-True ([bool]$contract.strictSubset)
+        Assert-Equal ([int]$contract.strictStageCount) 4
+        Assert-True ([bool]$contract.nullableMetadata.metadata.valid)
+        Assert-False ([bool]$contract.nullableMetadata.retryWholeCall)
+        Assert-True ('metadata' -in @($contract.schema.required))
+        Assert-False ([bool]$contract.schema.properties.metadata.additionalProperties)
+        Assert-Equal (@($contract.schema.properties.metadata.required | Sort-Object) -join ',') 'findings,openQuestions,summary'
+        Assert-Equal (@($contract.schema.properties.metadata.properties.findings.items.required | Sort-Object) -join ',') 'blockingProposal,category,claim,documentIndex,proposal,requiresUser,severity'
+        Assert-Equal (@($contract.schema.properties.metadata.properties.openQuestions.items.required | Sort-Object) -join ',') 'findingIndex,options,question,recommendedOption,title'
+        Assert-ThrowsCode {
+            & $module {
+                $badSchema = [ordered]@{ type = 'object'; properties = [ordered]@{ value = [ordered]@{ type = 'string' } }; required = @('value'); additionalProperties = $true }
+                Assert-DuoForgeProviderSchemaStrictSubsetInternal -Schema $badSchema
+            }
+        } 'DF-PROVIDER-SCHEMA-STRICT'
         Assert-True ([bool]$contract.validation.primary.valid)
         Assert-False ([bool]$contract.validation.metadata.valid)
         Assert-False ([bool]$contract.validation.retryWholeCall)
@@ -5458,11 +5503,12 @@ try {
         $cliOutput = & $module {
             param($id, $root, $control)
             $reader = { param($prompt) 'RECOVER' }
-            $invoker = { param($runId, $resultsRoot) $control.calls++; [ordered]@{ runId = $runId; status = 'RESUMABLE_ERROR'; providerCalls = 0; userCommand = 'recover' } }.GetNewClosure()
+            $invoker = { param($runId, $resultsRoot) $control.calls++; [ordered]@{ runId = $runId; status = 'RESUMABLE_ERROR'; providerCalls = 0; userCommand = 'recover'; resetSteps = @('INTERNAL-STAGE-CANARY') } }.GetNewClosure()
             Invoke-DuoForgeCliCoreInternal -Arguments @('recover', '--run', $id, '--workspace', $root) -InputReader $reader -RecoveryInvoker $invoker -InteractiveHostProbe { $true } 6>$null
         } $run.runId $workspace $cliControl
         Assert-Equal ([int]$cliControl.calls) 1
-        Assert-Equal ([int]@($cliOutput | Where-Object { $_ -is [System.Collections.IDictionary] })[-1].providerCalls) 0
+        Assert-Equal @($cliOutput | Where-Object { $_ -is [System.Collections.IDictionary] }).Count 0
+        Assert-NotContainsText ($cliOutput | Out-String) 'INTERNAL-STAGE-CANARY'
         $help = (& $module { Write-DuoForgeHelp 6>&1 } | Out-String)
         Assert-ContainsText $help 'duoforge recover --run <실행 ID> [--workspace <폴더>]'
         Assert-NotContainsText $help 'repair-contract'
@@ -5515,7 +5561,9 @@ try {
         $payload = [ordered]@{
             primary = [ordered]@{ approved = $false }
             metadata = [ordered]@{
-                findings = @([ordered]@{ severity = 'major'; category = 'correctness'; claim = '중대한 누락'; proposal = '수정'; requiresUser = $false; blockingProposal = $true })
+                summary = $null
+                findings = @([ordered]@{ severity = 'major'; category = 'correctness'; claim = '중대한 누락'; proposal = '수정'; requiresUser = $false; blockingProposal = $true; documentIndex = 0 })
+                openQuestions = @()
             }
         }
         $stored = & $module { param($p, $s) $definition = Get-DuoForgeThinStageContractDefinitionInternal -Stage final-validation -OutputDocumentCount 0; Complete-DuoForgeThinStageResultInternal -ProviderPayload $p -Step $s -Definition $definition } $payload $validationStep
@@ -5541,7 +5589,7 @@ try {
                 if ([string]$step.stage -eq 'final-validation') {
                     return [ordered]@{
                         primary = [ordered]@{ approved = $false }
-                        metadata = [ordered]@{ findings = @([ordered]@{ severity = 'major'; category = 'correctness'; claim = '중대한 누락'; proposal = '수정'; requiresUser = $false; blockingProposal = $true }) }
+                        metadata = [ordered]@{ summary = $null; findings = @([ordered]@{ severity = 'major'; category = 'correctness'; claim = '중대한 누락'; proposal = '수정'; requiresUser = $false; blockingProposal = $true; documentIndex = 0 }); openQuestions = @() }
                     }
                 }
                 return [ordered]@{ primary = [ordered]@{ documents = @($step.outputDocumentIds | ForEach-Object { '# 수정 완료' }) } }
@@ -5554,10 +5602,320 @@ try {
         Assert-Equal @($execution.graph.steps | Where-Object stage -eq 'final-revision').Count 1
     }
 
+    Test-Case '얇은 자동 코어 - 사용자 권장 결정은 문서 단계와 최종 쟁점에 반영되고 반복 질문 종료를 복구한다' {
+        $caseRoot = Join-Path $tempRoot 'thin-core-user-decisions'
+        $workspace = Join-Path $caseRoot 'results'
+        $documentA = New-MarkdownFile -Path (Join-Path $caseRoot 'A\source.md') -Text '# 문서 A'
+        $documentB = New-MarkdownFile -Path (Join-Path $caseRoot 'B\source.md') -Text '# 문서 B'
+        $request = New-TestStartRequest -Mode document-merge -DocumentA $documentA -DocumentB $documentB -Workspace $workspace -DocumentType custom -MaxRounds 1 -WorkflowVersion workflow-v3 -FirstSynthesizer codex
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $first = & $module {
+            param($directory)
+            $calls = [System.Collections.Generic.List[string]]::new()
+            $invoker = {
+                param($step, $prompt)
+                $calls.Add([string]$step.stage)
+                if ([string]$step.stage -eq 'final-validation') {
+                    return [ordered]@{
+                        primary = [ordered]@{ approved = $false }
+                        metadata = [ordered]@{
+                            summary = '결정 필요'
+                            findings = @([ordered]@{ severity = 'major'; category = 'preference'; claim = '합성 결정 축'; proposal = '권장 방향 반영'; requiresUser = $true; blockingProposal = $true; documentIndex = 0 })
+                            openQuestions = @([ordered]@{ findingIndex = 0; title = '합성 결정'; question = '권장 방향을 반영할까요?'; options = @('A: 권장 방향 반영', 'B: 기존 방향 유지'); recommendedOption = 'A' })
+                        }
+                    }
+                }
+                $content = if ([string]$step.stage -eq 'final-revision') { '# 최초 후보 문서' } else { '# 합성 후보 문서' }
+                $metadata = if ([string]$step.stage -eq 'final-revision') {
+                    [ordered]@{
+                        summary = '결정 대기'
+                        findings = @([ordered]@{ severity = 'major'; category = 'preference'; claim = '합성 결정 축'; proposal = '권장 방향 반영'; requiresUser = $true; blockingProposal = $true; documentIndex = 0 })
+                        openQuestions = @([ordered]@{ findingIndex = 0; title = '합성 결정'; question = '권장 방향을 반영할까요?'; options = @('A: 권장 방향 반영', 'B: 기존 방향 유지'); recommendedOption = 'A' })
+                    }
+                }
+                else { [ordered]@{ summary = '문서 결과' } }
+                return [ordered]@{ primary = [ordered]@{ documents = @($step.outputDocumentIds | ForEach-Object { $content }) }; metadata = $metadata }
+            }.GetNewClosure()
+            $result = Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $invoker
+            [ordered]@{ result = $result; calls = @($calls) }
+        } $run.runDirectory
+        Assert-Equal $first.result.status 'AWAITING_USER' ($first.result | ConvertTo-Json -Depth 20 -Compress)
+        Assert-Equal $first.calls.Count 5
+        $pending = Get-Content -LiteralPath (Join-Path $run.runDirectory 'decisions\pending.json') -Raw | ConvertFrom-Json -Depth 50
+        Assert-Equal @($pending.questions).Count 1
+        $answer = Set-DuoForgeIssueAnswer -RunId $run.runId -IssueId ([string]$pending.questions[0].issueKey) -Choice A -ResultsRoot $workspace
+        Assert-Equal (@($answer.resetSteps | Sort-Object) -join ',') 'r01-claude-final-validation,r01-codex-final-revision,r01-codex-integration'
+        $resetGraph = Get-Content -LiteralPath (Join-Path $run.runDirectory 'steps.json') -Raw | ConvertFrom-Json -Depth 50
+        Assert-Equal @($resetGraph.steps | Where-Object { [string]$_.stage -eq 'independent-result' -and [string]$_.status -eq 'COMMITTED' }).Count 2
+        Assert-Equal @($resetGraph.steps | Where-Object { [string]$_.stage -in @('integration', 'final-validation', 'final-revision') -and [string]$_.status -in @('PENDING', 'STALE') }).Count 3
+
+        $continued = & $module {
+            param($directory)
+            $calls = [System.Collections.Generic.List[string]]::new()
+            $control = @{ promptHasDecision = $false }
+            $invoker = {
+                param($step, $prompt)
+                $calls.Add([string]$step.stage)
+                if ([string]$step.stage -eq 'integration') {
+                    $control.promptHasDecision = [string]$prompt.text -like '*"decisionProjectionVersion":"user-decisions-v1"*' -and [string]$prompt.text -like '*"userDecisions"*' -and [string]$prompt.text -like '*권장 방향 반영*'
+                    return [ordered]@{ primary = [ordered]@{ documents = @('# 결정 반영 합의 문서') }; metadata = [ordered]@{ summary = '결정 반영' } }
+                }
+                if ([string]$step.stage -eq 'final-validation') {
+                    return [ordered]@{ primary = [ordered]@{ approved = $true }; metadata = [ordered]@{ summary = '승인' } }
+                }
+                throw "예상하지 않은 재실행 단계: $($step.stage)"
+            }.GetNewClosure()
+            $result = Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $invoker
+            [ordered]@{
+                result = $result; calls = @($calls); promptHasDecision = $control.promptHasDecision
+                graph = Read-DuoForgeJson -Path (Join-Path $directory 'steps.json')
+                ledger = Read-DuoForgeJson -Path (Join-Path $directory 'issues.json')
+                pending = Read-DuoForgeJson -Path (Join-Path $directory 'decisions\pending.json')
+            }
+        } $run.runDirectory
+        Assert-Equal $continued.result.status 'COMPLETED' ($continued.result | ConvertTo-Json -Depth 20 -Compress)
+        Assert-Equal ($continued.calls -join ',') 'integration,final-validation'
+        Assert-True ([bool]$continued.promptHasDecision)
+        Assert-Equal @($continued.graph.steps | Where-Object stage -eq 'final-revision').Count 0
+        Assert-Equal @($continued.pending.questions).Count 0
+        $resolved = @($continued.ledger.issues | Where-Object { @($_.responses.user).Count -gt 0 })
+        Assert-Equal $resolved.Count 1
+        Assert-Equal $resolved[0].resolutionStatus 'RESOLVED'
+        Assert-False ([bool]$resolved[0].blocking)
+        Assert-ContainsText (Get-Content -LiteralPath (Join-Path $run.runDirectory 'final\FINAL.md') -Raw) '결정 반영 합의 문서'
+        $nonDecisionSurfaces = @(
+            (Get-Content -LiteralPath (Join-Path $run.runDirectory 'state.json') -Raw),
+            (Get-Content -LiteralPath (Join-Path $run.runDirectory 'steps.json') -Raw),
+            (Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') -Raw)
+        ) -join "`n"
+        $diagnosticsPath = Join-Path $run.runDirectory 'diagnostics.jsonl'
+        if (Test-Path -LiteralPath $diagnosticsPath -PathType Leaf) {
+            $nonDecisionSurfaces += "`n" + (Get-Content -LiteralPath $diagnosticsPath -Raw)
+        }
+        Assert-NotContainsText $nonDecisionSurfaces '권장 방향 반영'
+
+        $repairRoot = Join-Path $tempRoot 'thin-core-decision-repair'
+        $repairWorkspace = Join-Path $repairRoot 'results'
+        $repairInput = New-MarkdownFile -Path (Join-Path $repairRoot 'input\brief.md') -Text '# 결정 복구 입력'
+        $repairRequest = New-TestStartRequest -Mode shared-document -Brief $repairInput -Workspace $repairWorkspace -DocumentType prd -MaxRounds 1 -WorkflowVersion workflow-v3 -FirstSynthesizer codex
+        $repairValidation = Test-DuoForgeStartRequest -Request $repairRequest -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $repairWorkspace)
+        $repairRun = New-DuoForgeRun -ValidationResult $repairValidation
+        $repairCalls = @{ count = 0 }
+        $repairWaiting = & $module {
+            param($directory, $control)
+            $invoker = {
+                param($step)
+                $control.count++
+                if ([string]$step.stage -eq 'final-validation') {
+                    return [ordered]@{
+                        primary = [ordered]@{ approved = $false }
+                        metadata = [ordered]@{
+                            summary = '결정 필요'
+                            findings = @([ordered]@{ severity = 'major'; category = 'preference'; claim = '복구 결정 축'; proposal = '권장 방향 반영'; requiresUser = $true; blockingProposal = $true; documentIndex = 0 })
+                            openQuestions = @([ordered]@{ findingIndex = 0; title = '복구 결정'; question = '권장 방향을 반영할까요?'; options = @('A: 권장 방향 반영', 'B: 기존 방향 유지'); recommendedOption = 'A' })
+                        }
+                    }
+                }
+                $metadata = if ([string]$step.stage -eq 'final-revision') {
+                    [ordered]@{
+                        summary = '결정 대기'
+                        findings = @([ordered]@{ severity = 'major'; category = 'preference'; claim = '복구 결정 축'; proposal = '권장 방향 반영'; requiresUser = $true; blockingProposal = $true; documentIndex = 0 })
+                        openQuestions = @([ordered]@{ findingIndex = 0; title = '복구 결정'; question = '권장 방향을 반영할까요?'; options = @('A: 권장 방향 반영', 'B: 기존 방향 유지'); recommendedOption = 'A' })
+                    }
+                }
+                else { [ordered]@{ summary = '문서 결과' } }
+                return [ordered]@{ primary = [ordered]@{ documents = @($step.outputDocumentIds | ForEach-Object { '# 복구 후보' }) }; metadata = $metadata }
+            }.GetNewClosure()
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $invoker
+        } $repairRun.runDirectory $repairCalls
+        Assert-Equal $repairWaiting.status 'AWAITING_USER'
+        $legacyGraph = Get-Content -LiteralPath (Join-Path $repairRun.runDirectory 'steps.json') -Raw | ConvertFrom-Json -Depth 50
+        $legacyLedger = Get-Content -LiteralPath (Join-Path $repairRun.runDirectory 'issues.json') -Raw | ConvertFrom-Json -Depth 50
+        $legacyPending = Get-Content -LiteralPath (Join-Path $repairRun.runDirectory 'decisions\pending.json') -Raw | ConvertFrom-Json -Depth 50
+        $legacyState = Get-Content -LiteralPath (Join-Path $repairRun.runDirectory 'state.json') -Raw | ConvertFrom-Json -Depth 50
+        $null = Set-DuoForgeIssueAnswer -RunId $repairRun.runId -IssueId ([string]$legacyPending.questions[0].issueKey) -Choice A -ResultsRoot $repairWorkspace
+        & $module {
+            param($directory, $graph, $ledger, $pending, $state)
+            $state.status = 'QUESTION_LIMIT_REACHED'
+            $state.decisionReviewCycle = 3
+            $state.maxDecisionReviewCycles = 3
+            $state.decisionReviewLimitReached = $true
+            Write-DuoForgeJsonAtomic -Path (Join-Path $directory 'steps.json') -Value $graph
+            Write-DuoForgeJsonAtomic -Path (Join-Path $directory 'issues.json') -Value $ledger
+            Write-DuoForgeJsonAtomic -Path (Join-Path $directory 'decisions\pending.json') -Value $pending
+            Write-DuoForgeJsonAtomic -Path (Join-Path $directory 'state.json') -Value $state
+        } $repairRun.runDirectory $legacyGraph $legacyLedger $legacyPending $legacyState
+        $callsBeforeRepair = [int]$repairCalls.count
+        $eligibility = & $module { param($directory) Get-DuoForgeUnifiedRecoveryEligibilityInternal -RunDirectory $directory } $repairRun.runDirectory
+        Assert-True ([bool]$eligibility.eligible) ([string]$eligibility.reason)
+        Assert-Equal $eligibility.plan.internalCause 'decision-application'
+        $trackedRepairPaths = @('state.json', 'steps.json', 'decisions\pending.json', 'events.jsonl')
+        $trackedRepairHashes = [ordered]@{}
+        foreach ($relativePath in $trackedRepairPaths) {
+            $trackedRepairHashes[$relativePath] = (Get-FileHash -LiteralPath (Join-Path $repairRun.runDirectory $relativePath) -Algorithm SHA256).Hash
+        }
+        $historyDirectory = Join-Path $repairRun.runDirectory 'history\decisions'
+        $historyBeforeFault = @(
+            if (Test-Path -LiteralPath $historyDirectory -PathType Container) {
+                Get-ChildItem -LiteralPath $historyDirectory -File | Sort-Object Name | ForEach-Object { '{0}:{1}' -f $_.Name, (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
+            }
+        )
+        Assert-ThrowsCode {
+            & $module {
+                param($id, $root)
+                Enable-DuoForgeUnifiedRecoveryInternal -RunId $id -ResultsRoot $root -FaultInjector { param($point) throw (New-DuoForgeException -Code 'DF-TEST-DECISION-RECOVERY-FAULT' -Message '합성 결정 복구 중단') }
+            } $repairRun.runId $repairWorkspace
+        } 'DF-TEST-DECISION-RECOVERY-FAULT'
+        foreach ($relativePath in $trackedRepairPaths) {
+            Assert-Equal (Get-FileHash -LiteralPath (Join-Path $repairRun.runDirectory $relativePath) -Algorithm SHA256).Hash $trackedRepairHashes[$relativePath]
+        }
+        $historyAfterFault = @(
+            if (Test-Path -LiteralPath $historyDirectory -PathType Container) {
+                Get-ChildItem -LiteralPath $historyDirectory -File | Sort-Object Name | ForEach-Object { '{0}:{1}' -f $_.Name, (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash }
+            }
+        )
+        Assert-Equal ($historyAfterFault -join "`n") ($historyBeforeFault -join "`n")
+        $prepared = & $module { param($id, $root) Enable-DuoForgeUnifiedRecoveryInternal -RunId $id -ResultsRoot $root } $repairRun.runId $repairWorkspace
+        Assert-Equal $prepared.status 'PAUSED_USER'
+        Assert-Equal $prepared.recoveryKind 'decision-application'
+        Assert-Equal $prepared.providerCalls 0
+        Assert-Equal $repairCalls.count $callsBeforeRepair
+        $preparedState = Get-Content -LiteralPath (Join-Path $repairRun.runDirectory 'state.json') -Raw | ConvertFrom-Json -Depth 50
+        $preparedGraph = Get-Content -LiteralPath (Join-Path $repairRun.runDirectory 'steps.json') -Raw | ConvertFrom-Json -Depth 50
+        $preparedPending = Get-Content -LiteralPath (Join-Path $repairRun.runDirectory 'decisions\pending.json') -Raw | ConvertFrom-Json -Depth 50
+        Assert-Equal $preparedState.status 'PAUSED_USER'
+        Assert-False ([bool]$preparedState.decisionReviewLimitReached)
+        Assert-Equal $preparedState.recoveryCause 'decision-application'
+        Assert-Equal @($preparedPending.questions).Count 0
+        Assert-Equal @($preparedGraph.steps | Where-Object { [string]$_.stage -in @('integration', 'final-validation', 'final-revision') -and [string]$_.status -in @('PENDING', 'STALE') }).Count 3
+        $repairEvents = @(Get-Content -LiteralPath (Join-Path $repairRun.runDirectory 'events.jsonl') | ForEach-Object { $_ | ConvertFrom-Json -Depth 50 })
+        Assert-Equal @($repairEvents | Where-Object type -eq 'DECISION_APPLICATION_RECOVERY_PREPARED').Count 1
+    }
+
+    Test-Case '최종 승인 뒤 새 차단 질문은 권장안 복구로 최종 수정 한 번만 실행한다' {
+        $caseRoot = Join-Path $tempRoot 'terminal-recommendation-success'
+        $workspace = Join-Path $caseRoot 'results'
+        $documentA = New-MarkdownFile -Path (Join-Path $caseRoot 'A\source.md') -Text '# 문서 A'
+        $documentB = New-MarkdownFile -Path (Join-Path $caseRoot 'B\source.md') -Text '# 문서 B'
+        $request = New-TestStartRequest -Mode document-merge -DocumentA $documentA -DocumentB $documentB -Workspace $workspace -DocumentType custom -MaxRounds 1 -WorkflowVersion workflow-v3 -FirstSynthesizer codex
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $calls = @{ count = 0 }
+        $waiting = & $module {
+            param($directory, $control)
+            $invoker = {
+                param($step)
+                $control.count++
+                if ([string]$step.stage -eq 'integration') {
+                    return [ordered]@{
+                        primary = [ordered]@{ documents = @('# 통합 후보') }
+                        metadata = [ordered]@{
+                            summary = '추가 결정 필요'
+                            findings = @([ordered]@{ severity = 'critical'; category = 'correctness'; claim = '최종 결정 축'; proposal = '권장안 적용'; requiresUser = $true; blockingProposal = $true; documentIndex = 0 })
+                            openQuestions = @([ordered]@{ findingIndex = 0; title = '최종 결정'; question = '권장안을 적용할까요?'; options = @('A: 권장안 적용', 'B: 기존안 유지'); recommendedOption = 'A' })
+                        }
+                    }
+                }
+                if ([string]$step.stage -eq 'final-validation') {
+                    return [ordered]@{ primary = [ordered]@{ approved = $true }; metadata = [ordered]@{ summary = '최종 승인'; findings = @(); openQuestions = @() } }
+                }
+                return [ordered]@{ primary = [ordered]@{ documents = @($step.outputDocumentIds | ForEach-Object { '# 독립 후보' }) }; metadata = [ordered]@{ summary = '독립 결과'; findings = @(); openQuestions = @() } }
+            }.GetNewClosure()
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $invoker
+        } $run.runDirectory $calls
+        Assert-Equal $waiting.status 'AWAITING_USER'
+        Assert-Equal $calls.count 4
+        $pending = Get-Content -LiteralPath (Join-Path $run.runDirectory 'decisions\pending.json') -Raw | ConvertFrom-Json -Depth 50
+        Assert-Equal @($pending.questions).Count 1
+        & $module {
+            param($directory)
+            $statePath = Join-Path $directory 'state.json'
+            $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $statePath)
+            $state.status = 'QUESTION_LIMIT_REACHED'
+            $state.decisionReviewCycle = [int]$state.maxDecisionReviewCycles
+            $state.decisionReviewLimitReached = $true
+            Write-DuoForgeJsonAtomic -Path $statePath -Value $state
+        } $run.runDirectory
+        $callsBeforeRecovery = @(Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ForEach-Object { $_ | ConvertFrom-Json -Depth 30 } | Where-Object type -eq 'PROVIDER_CALL_STARTED').Count
+        $prepared = & $module { param($id, $root) Enable-DuoForgeUnifiedRecoveryInternal -RunId $id -ResultsRoot $root } $run.runId $workspace
+        Assert-Equal $prepared.status 'PAUSED_USER'
+        Assert-Equal $prepared.recoveryKind 'terminal-recommendation'
+        Assert-Equal $prepared.providerCalls 0
+        $preparedGraph = Get-Content -LiteralPath (Join-Path $run.runDirectory 'steps.json') -Raw | ConvertFrom-Json -Depth 50
+        Assert-Equal @($preparedGraph.steps | Where-Object { [string]$_.stage -eq 'final-revision' -and [string]$_.status -eq 'PENDING' }).Count 1
+        $callsAfterRecovery = @(Get-Content -LiteralPath (Join-Path $run.runDirectory 'events.jsonl') | ForEach-Object { $_ | ConvertFrom-Json -Depth 30 } | Where-Object type -eq 'PROVIDER_CALL_STARTED').Count
+        Assert-Equal $callsAfterRecovery $callsBeforeRecovery
+        $answered = Set-DuoForgeIssueAnswer -RunId $run.runId -IssueId ([string]$pending.questions[0].issueKey) -Choice A -ResultsRoot $workspace
+        Assert-Equal (@($answered.resetSteps) -join ',') 'r01-codex-final-revision'
+        $oneShotBudget = & $module { param($directory) Get-DuoForgeRemainingCallBudget -RunDirectory $directory } $run.runDirectory
+        Assert-Equal $oneShotBudget.providers.codex.scheduledCallsRemaining 1
+        Assert-Equal $oneShotBudget.providers.codex.failureRetryCallsRemaining 0
+        Assert-Equal $oneShotBudget.providers.codex.maximumPlannedAdditionalCalls 1
+        Assert-Equal $oneShotBudget.providers.claude.maximumPlannedAdditionalCalls 0
+        $revision = & $module {
+            param($directory)
+            $calls = [System.Collections.Generic.List[string]]::new()
+            $decisionVisible = @{ value = $false }
+            $invoker = {
+                param($step, $prompt)
+                $calls.Add([string]$step.stage)
+                $decisionVisible.value = [string]$prompt.text -like '*"userDecisions"*' -and [string]$prompt.text -like '*권장안 적용*'
+                return [ordered]@{ primary = [ordered]@{ documents = @('# 권장안 반영 완료') }; metadata = [ordered]@{ summary = '최종 수정 완료'; findings = @(); openQuestions = @() } }
+            }.GetNewClosure()
+            $result = Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $invoker
+            [ordered]@{ result = $result; calls = @($calls); decisionVisible = $decisionVisible.value }
+        } $run.runDirectory
+        Assert-Equal $revision.result.status 'COMPLETED'
+        Assert-Equal ($revision.calls -join ',') 'final-revision'
+        Assert-True ([bool]$revision.decisionVisible)
+    }
+
+    Test-Case '마지막 권장안 복구의 최종 수정은 실패해도 자동 재시도하지 않는다' {
+        $caseRoot = Join-Path $tempRoot 'terminal-recommendation-one-shot'
+        $workspace = Join-Path $caseRoot 'results'
+        $documentA = New-MarkdownFile -Path (Join-Path $caseRoot 'A\source.md') -Text '# 문서 A'
+        $documentB = New-MarkdownFile -Path (Join-Path $caseRoot 'B\source.md') -Text '# 문서 B'
+        $request = New-TestStartRequest -Mode document-merge -DocumentA $documentA -DocumentB $documentB -Workspace $workspace -DocumentType custom -MaxRounds 1 -WorkflowVersion workflow-v3 -FirstSynthesizer codex
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $failure = & $module {
+            param($directory)
+            $manifest = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $directory 'manifest.json'))
+            $statePath = Join-Path $directory 'state.json'
+            $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $statePath)
+            $state.status = 'RUNNING'
+            $state.recoveryCause = 'terminal-recommendation'
+            Write-DuoForgeJsonAtomic -Path $statePath -Value $state
+            $graph = Initialize-DuoForgeStageGraph -RunDirectory $directory
+            $step = @($graph.steps)[0]
+            $step.stage = 'final-revision'
+            $step.status = 'STARTED'
+            $step.attemptCount = 1
+            $exception = [InvalidOperationException]::new('합성 실패')
+            $exception.Data['DuoForgeCode'] = 'DF-PROVIDER-JSON'
+            $exception.Data['DuoForgeFailureCategory'] = 'provider-error'
+            $exception.Data['DuoForgeFailureStatus'] = 'RESUMABLE_ERROR'
+            $exception.Data['DuoForgeRetryable'] = $true
+            try { throw $exception }
+            catch {
+                Resolve-DuoForgeStageFailureInternal -RunDirectory $directory -Manifest $manifest -WorkflowVersion 'workflow-v3' -State $state -Graph $graph -Step $step -ErrorRecord $_ -Invoked 1
+            }
+        } $run.runDirectory
+        Assert-False ([bool]$failure.retryScheduled)
+        Assert-Equal $failure.result.status 'FAILED_STAGE'
+        Assert-Equal $failure.result.invoked 1
+        $failedGraph = Get-Content -LiteralPath (Join-Path $run.runDirectory 'steps.json') -Raw | ConvertFrom-Json -Depth 50
+        Assert-Equal $failedGraph.steps[0].retryMode 'RETRY_EXHAUSTED'
+        Assert-Equal $failedGraph.steps[0].attemptCount 1
+    }
+
     Test-Case '공급자 오류 분류는 stderr를 안전 코드로 바꾸고 원문을 즉시 버린다' {
         $classifications = & $module {
             $fixtures = [ordered]@{
                 model = 'model gpt-test is not available RAW-MODEL-CANARY'
+                multilineModel = "model gpt-test is`r`nnot supported for this account RAW-MULTILINE-MODEL-CANARY"
+                ansiModel = "`e[31munsupported_value`e[0m`r`nparam: model RAW-ANSI-MODEL-CANARY"
                 auth = 'login required RAW-AUTH-CANARY'
                 option = "unexpected argument '--bad' found RAW-OPTION-CANARY"
                 schema = 'invalid_json_schema RAW-SCHEMA-CANARY'
@@ -5567,6 +5925,10 @@ try {
                 quota = 'usage limit reached RAW-QUOTA-CANARY'
                 rate = 'too many requests RAW-RATE-CANARY'
                 unknown = 'opaque failure RAW-UNKNOWN-CANARY'
+                contextFile = 'unable to open output path RAW-CONTEXT-FILE-CANARY'
+                contextRuntime = "thread 'main' panicked at invalid UTF-8 character boundary RAW-CONTEXT-RUNTIME-CANARY"
+                contextLocalized = '알 수 없는 공급자 오류 RAW-CONTEXT-LOCALIZED-CANARY'
+                nulSeparatedModel = (('model unavailable RAW-NUL-MODEL-CANARY'.ToCharArray()) -join "`0")
             }
             $result = [ordered]@{}
             $cleared = [ordered]@{}
@@ -5578,10 +5940,31 @@ try {
             $timeoutProcess = [ordered]@{ started = $true; timedOut = $true; exitCode = $null; stdout = 'RAW-TIMEOUT-OUT'; stderr = 'RAW-TIMEOUT-ERR'; errorCategory = 'timeout' }
             $result.timeout = Get-DuoForgeProviderFailureClassificationInternal -Provider claude -ProcessResult $timeoutProcess
             $cleared.timeout = [ordered]@{ stdout = [string]$timeoutProcess.stdout; stderr = [string]$timeoutProcess.stderr }
+            $codexStdoutProcess = [ordered]@{
+                started = $true; timedOut = $false; exitCode = 1; stderr = ''; errorCategory = $null
+                stdoutBytes = 123; stderrBytes = 0
+                stdout = '{"type":"error","message":"invalid_json_schema RAW-CODEX-JSON-STDOUT-CANARY"}'
+            }
+            $result.codexStdoutSchema = Get-DuoForgeProviderFailureClassificationInternal -Provider codex -ProcessResult $codexStdoutProcess
+            $cleared.codexStdoutSchema = [ordered]@{ stdout = [string]$codexStdoutProcess.stdout; stderr = [string]$codexStdoutProcess.stderr }
+            $codexTurnFailed = [ordered]@{ started = $true; timedOut = $false; exitCode = 1; stdout = '{"type":"turn.failed","error":{"message":"model gpt-test is not available RAW-CODEX-TURN-FAILED"}}'; stderr = ''; errorCategory = $null }
+            $result.codexTurnFailed = Get-DuoForgeProviderFailureClassificationInternal -Provider codex -ProcessResult $codexTurnFailed
+            $cleared.codexTurnFailed = [ordered]@{ stdout = [string]$codexTurnFailed.stdout; stderr = [string]$codexTurnFailed.stderr }
+            $codexDistractors = @(
+                '{"type":"item.completed","item":{"type":"error","message":"invalid_json_schema RAW-ITEM-ERROR"}}',
+                '{"type":"item.completed","item":{"type":"agent_message","text":"login required RAW-AGENT-MESSAGE"}}',
+                '{"type":"request.failed","error":{"message":"quota RAW-REQUEST-FAILED"}}',
+                'not-json RAW-MALFORMED'
+            ) -join "`n"
+            $codexDistractorProcess = [ordered]@{ started = $true; timedOut = $false; exitCode = 1; stdout = $codexDistractors; stderr = ''; errorCategory = $null }
+            $result.codexDistractors = Get-DuoForgeProviderFailureClassificationInternal -Provider codex -ProcessResult $codexDistractorProcess
+            $cleared.codexDistractors = [ordered]@{ stdout = [string]$codexDistractorProcess.stdout; stderr = [string]$codexDistractorProcess.stderr }
             return [ordered]@{ result = $result; cleared = $cleared }
         }
         $expected = [ordered]@{
             model = @('MODEL_UNAVAILABLE', 'DF-PROVIDER-MODEL-UNAVAILABLE', 'BLOCKED_PREFLIGHT', $false)
+            multilineModel = @('MODEL_UNAVAILABLE', 'DF-PROVIDER-MODEL-UNAVAILABLE', 'BLOCKED_PREFLIGHT', $false)
+            ansiModel = @('MODEL_UNAVAILABLE', 'DF-PROVIDER-MODEL-UNAVAILABLE', 'BLOCKED_PREFLIGHT', $false)
             auth = @('AUTH', 'DF-PROVIDER-AUTH', 'BLOCKED_PREFLIGHT', $false)
             option = @('INVALID_OPTION', 'DF-PROVIDER-INVALID-OPTION', 'BLOCKED_PREFLIGHT', $false)
             schema = @('SCHEMA_REJECTED', 'DF-PROVIDER-SCHEMA-REJECTED', 'BLOCKED_PREFLIGHT', $false)
@@ -5591,7 +5974,14 @@ try {
             quota = @('QUOTA', 'DF-PROVIDER-QUOTA', 'PAUSED_QUOTA', $false)
             rate = @('RATE_LIMIT', 'DF-PROVIDER-RATE-LIMIT', 'RESUMABLE_ERROR', $true)
             unknown = @('UNKNOWN', 'DF-PROVIDER-PROCESS', 'RESUMABLE_ERROR', $false)
+            contextFile = @('CONTEXT_FILE', 'DF-PROVIDER-PROCESS', 'RESUMABLE_ERROR', $false)
+            contextRuntime = @('CONTEXT_RUNTIME', 'DF-PROVIDER-PROCESS', 'RESUMABLE_ERROR', $false)
+            contextLocalized = @('CONTEXT_LOCALIZED', 'DF-PROVIDER-PROCESS', 'RESUMABLE_ERROR', $false)
+            nulSeparatedModel = @('MODEL_UNAVAILABLE', 'DF-PROVIDER-MODEL-UNAVAILABLE', 'BLOCKED_PREFLIGHT', $false)
             timeout = @('TIMEOUT', 'DF-PROVIDER-TIMEOUT', 'RESUMABLE_ERROR', $true)
+            codexStdoutSchema = @('SCHEMA_REJECTED', 'DF-PROVIDER-SCHEMA-REJECTED', 'BLOCKED_PREFLIGHT', $false)
+            codexTurnFailed = @('MODEL_UNAVAILABLE', 'DF-PROVIDER-MODEL-UNAVAILABLE', 'BLOCKED_PREFLIGHT', $false)
+            codexDistractors = @('UNKNOWN', 'DF-PROVIDER-PROCESS', 'RESUMABLE_ERROR', $false)
         }
         foreach ($name in $expected.Keys) {
             Assert-Equal $classifications.result[$name].safeReason $expected[$name][0]
@@ -5601,6 +5991,8 @@ try {
             Assert-True ([string]::IsNullOrEmpty([string]$classifications.cleared[$name].stdout))
             Assert-True ([string]::IsNullOrEmpty([string]$classifications.cleared[$name].stderr))
         }
+        Assert-Equal ([int64]$classifications.result.codexStdoutSchema.process.stdoutBytes) 123
+        Assert-Equal ([int64]$classifications.result.codexStdoutSchema.process.stderrBytes) 0
         $safeJson = $classifications | ConvertTo-Json -Depth 20
         Assert-NotContainsText $safeJson 'RAW-'
         Assert-Equal $classifications.result.model.safeReason 'MODEL_UNAVAILABLE' 'stdout의 AUTH 문구가 stderr 분류보다 우선하면 안 됩니다.'
@@ -7084,7 +7476,7 @@ try {
             }
         } $run.runId $run.runDirectory
         Assert-Equal $limitedMenu.stateLabel '사용자 확인을 3번 거친 뒤 멈춤'
-        Assert-Equal (@($limitedMenu.items | ForEach-Object { [string]$_.value }) -join ',') 'I,O,back'
+        Assert-Equal (@($limitedMenu.items | ForEach-Object { [string]$_.value }) -join ',') 'I,O,recover,back'
 
         $earlyWorkspace = Join-Path $tempRoot 'decision-review-early-results'
         $earlyRequest = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $earlyWorkspace -DocumentType prd

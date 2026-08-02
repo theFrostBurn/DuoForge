@@ -48,7 +48,24 @@ function Get-DuoForgeThinStageContractDefinitionInternal {
         }
         metadata = [ordered]@{
             failurePolicy = 'quarantine-item'
-            fields = @('summary', 'findings', 'openQuestions')
+            fields = [ordered]@{
+                summary = [ordered]@{ kind = 'nullable-string' }
+                findings = [ordered]@{
+                    kind = 'array'
+                    item = [ordered]@{
+                        required = @('severity', 'category', 'claim', 'proposal', 'requiresUser', 'blockingProposal', 'documentIndex')
+                        severity = @('critical', 'major', 'minor')
+                    }
+                }
+                openQuestions = [ordered]@{
+                    kind = 'array'
+                    item = [ordered]@{
+                        required = @('findingIndex', 'title', 'question', 'options', 'recommendedOption')
+                        minimumOptions = 2
+                        maximumOptions = 3
+                    }
+                }
+            }
         }
         appOwnedFields = @(
             'schemaVersion', 'stage', 'provider', 'performedBy', 'targetDocumentId',
@@ -68,21 +85,56 @@ function New-DuoForgeThinProviderSchemaInternal {
         $primaryRequired.Add('approved')
     }
     else {
-        $documentCount = [int]$Definition.primary.outputDocumentCount
         $primaryProperties.documents = [ordered]@{
             type = 'array'
-            minItems = $documentCount
-            maxItems = $documentCount
-            items = [ordered]@{ type = 'string'; minLength = 1; pattern = '\S' }
+            items = [ordered]@{ type = 'string' }
         }
         $primaryRequired.Add('documents')
     }
+    $findingContract = $Definition.metadata.fields.findings.item
+    $questionContract = $Definition.metadata.fields.openQuestions.item
+    $metadataProperties = [ordered]@{
+        summary = [ordered]@{ type = @('string', 'null') }
+        findings = [ordered]@{
+            type = 'array'
+            items = [ordered]@{
+                type = 'object'
+                additionalProperties = $false
+                required = @($findingContract.required)
+                properties = [ordered]@{
+                    severity = [ordered]@{ type = 'string'; enum = @($findingContract.severity) }
+                    category = [ordered]@{ type = 'string' }
+                    claim = [ordered]@{ type = 'string' }
+                    proposal = [ordered]@{ type = 'string' }
+                    requiresUser = [ordered]@{ type = 'boolean' }
+                    blockingProposal = [ordered]@{ type = 'boolean' }
+                    documentIndex = [ordered]@{ type = 'integer' }
+                }
+            }
+        }
+        openQuestions = [ordered]@{
+            type = 'array'
+            items = [ordered]@{
+                type = 'object'
+                additionalProperties = $false
+                required = @($questionContract.required)
+                properties = [ordered]@{
+                    findingIndex = [ordered]@{ type = 'integer' }
+                    title = [ordered]@{ type = 'string' }
+                    question = [ordered]@{ type = 'string' }
+                    options = [ordered]@{
+                        type = 'array'
+                        items = [ordered]@{ type = 'string' }
+                    }
+                    recommendedOption = [ordered]@{ type = 'string' }
+                }
+            }
+        }
+    }
     return [ordered]@{
-        '$schema' = 'http://json-schema.org/draft-07/schema#'
-        title = 'DuoForge thin provider payload'
         type = 'object'
         additionalProperties = $false
-        required = @('primary')
+        required = @('primary', 'metadata')
         properties = [ordered]@{
             primary = [ordered]@{
                 type = 'object'
@@ -92,10 +144,113 @@ function New-DuoForgeThinProviderSchemaInternal {
             }
             metadata = [ordered]@{
                 type = 'object'
-                additionalProperties = $true
+                additionalProperties = $false
+                required = @($Definition.metadata.fields.Keys)
+                properties = $metadataProperties
             }
         }
     }
+}
+
+function Assert-DuoForgeProviderSchemaStrictSubsetInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$Schema)
+
+    $allowedKeywords = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($keyword in @(
+        '$ref', '$defs', 'description', 'type', 'enum', 'const', 'anyOf',
+        'properties', 'required', 'additionalProperties', 'items',
+        'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf'
+    )) { $null = $allowedKeywords.Add($keyword) }
+    $allowedTypes = @('string', 'number', 'boolean', 'integer', 'object', 'array', 'null')
+    $propertyCount = 0
+    $failure = $null
+
+    function Test-Node {
+        param(
+            [Parameter(Mandatory)][System.Collections.IDictionary]$Node,
+            [Parameter(Mandatory)][string]$Path,
+            [Parameter(Mandatory)][int]$Depth,
+            [switch]$Root
+        )
+        if ($null -ne $script:__duoForgeStrictSchemaFailure) { return }
+        if ($Depth -gt 10) { $script:__duoForgeStrictSchemaFailure = "$Path.depth"; return }
+        foreach ($key in @($Node.Keys)) {
+            if (-not $allowedKeywords.Contains([string]$key)) { $script:__duoForgeStrictSchemaFailure = "$Path.keyword"; return }
+        }
+        $types = @()
+        if ($Node.Contains('type')) {
+            $typeValue = $Node['type']
+            $types = @($typeValue | ForEach-Object { [string]$_ })
+            if ($types.Count -eq 0 -or @($types | Where-Object { $_ -notin $allowedTypes }).Count -gt 0) {
+                $script:__duoForgeStrictSchemaFailure = "$Path.type"
+                return
+            }
+        }
+        if ($Root -and ($types -notcontains 'object' -or $Node.Contains('anyOf'))) {
+            $script:__duoForgeStrictSchemaFailure = "$Path.root"
+            return
+        }
+        $isObject = $types -contains 'object' -or $Node.Contains('properties')
+        if ($isObject) {
+            $properties = if ($Node.Contains('properties')) { $Node['properties'] } else { $null }
+            if ($properties -isnot [System.Collections.IDictionary] -or -not $Node.Contains('additionalProperties') -or [bool]$Node['additionalProperties']) {
+                $script:__duoForgeStrictSchemaFailure = "$Path.object"
+                return
+            }
+            $propertyNames = @($properties.Keys | ForEach-Object { [string]$_ })
+            $requiredNames = if ($Node.Contains('required')) { @($Node['required'] | ForEach-Object { [string]$_ }) } else { @() }
+            if ((($propertyNames | Sort-Object) -join "`n") -cne (($requiredNames | Sort-Object) -join "`n")) {
+                $script:__duoForgeStrictSchemaFailure = "$Path.required"
+                return
+            }
+            $script:__duoForgeStrictSchemaPropertyCount += $propertyNames.Count
+            if ($script:__duoForgeStrictSchemaPropertyCount -gt 5000) { $script:__duoForgeStrictSchemaFailure = "$Path.size"; return }
+            foreach ($propertyName in $propertyNames) {
+                $child = $properties[$propertyName]
+                if ($child -isnot [System.Collections.IDictionary]) { $script:__duoForgeStrictSchemaFailure = "$Path.properties"; return }
+                Test-Node -Node $child -Path "$Path.properties.$propertyName" -Depth ($Depth + 1)
+            }
+        }
+        if ($Node.Contains('items')) {
+            $items = $Node['items']
+            if ($items -isnot [System.Collections.IDictionary]) { $script:__duoForgeStrictSchemaFailure = "$Path.items"; return }
+            Test-Node -Node $items -Path "$Path.items" -Depth ($Depth + 1)
+        }
+        if ($Node.Contains('anyOf')) {
+            $branches = @($Node['anyOf'])
+            if ($branches.Count -eq 0) { $script:__duoForgeStrictSchemaFailure = "$Path.anyOf"; return }
+            for ($index = 0; $index -lt $branches.Count; $index++) {
+                if ($branches[$index] -isnot [System.Collections.IDictionary]) { $script:__duoForgeStrictSchemaFailure = "$Path.anyOf"; return }
+                Test-Node -Node $branches[$index] -Path "$Path.anyOf[$index]" -Depth ($Depth + 1)
+            }
+        }
+        if ($Node.Contains('$defs')) {
+            $definitions = $Node['$defs']
+            if ($definitions -isnot [System.Collections.IDictionary]) { $script:__duoForgeStrictSchemaFailure = "$Path.defs"; return }
+            foreach ($definitionName in @($definitions.Keys)) {
+                if ($definitions[$definitionName] -isnot [System.Collections.IDictionary]) { $script:__duoForgeStrictSchemaFailure = "$Path.defs"; return }
+                Test-Node -Node $definitions[$definitionName] -Path "$Path.defs.$definitionName" -Depth ($Depth + 1)
+            }
+        }
+    }
+
+    $script:__duoForgeStrictSchemaFailure = $null
+    $script:__duoForgeStrictSchemaPropertyCount = 0
+    try {
+        Test-Node -Node $Schema -Path '$' -Depth 1 -Root
+        $failure = $script:__duoForgeStrictSchemaFailure
+    }
+    finally {
+        Remove-Variable -Name __duoForgeStrictSchemaFailure -Scope Script -ErrorAction SilentlyContinue
+        Remove-Variable -Name __duoForgeStrictSchemaPropertyCount -Scope Script -ErrorAction SilentlyContinue
+    }
+    if ($null -ne $failure) {
+        $exception = New-DuoForgeException -Code 'DF-PROVIDER-SCHEMA-STRICT' -Message '공급자 구조화 출력 스키마가 엄격 호환 계약을 충족하지 않습니다.'
+        $exception.Data['DuoForgeValidationPath'] = [string]$failure
+        throw $exception
+    }
+    return $true
 }
 
 function Assert-DuoForgeThinContractEquivalenceInternal {
@@ -105,13 +260,17 @@ function Assert-DuoForgeThinContractEquivalenceInternal {
     $schema = New-DuoForgeThinProviderSchemaInternal -Definition $Definition
     $kind = [string]$Definition.primary.kind
     $valid = [string]$schema.type -eq 'object' -and [bool]$schema.properties.primary.additionalProperties -eq $false
+    $valid = $valid -and [bool](Assert-DuoForgeProviderSchemaStrictSubsetInternal -Schema $schema)
+    $valid = $valid -and 'metadata' -in @($schema.required)
+    $valid = $valid -and [bool]$schema.properties.metadata.additionalProperties -eq $false
+    $valid = $valid -and ((@($Definition.metadata.fields.Keys | Sort-Object) -join ',') -ceq (@($schema.properties.metadata.required | Sort-Object) -join ','))
     if ($kind -eq 'validation') {
         $valid = $valid -and 'approved' -in @($schema.properties.primary.required) -and [string]$schema.properties.primary.properties.approved.type -eq 'boolean'
     }
     else {
         $count = [int]$Definition.primary.outputDocumentCount
         $documents = $schema.properties.primary.properties.documents
-        $valid = $valid -and 'documents' -in @($schema.properties.primary.required) -and [int]$documents.minItems -eq $count -and [int]$documents.maxItems -eq $count
+        $valid = $valid -and 'documents' -in @($schema.properties.primary.required) -and [string]$documents.type -eq 'array' -and [string]$documents.items.type -eq 'string'
     }
     if (-not $valid) { throw (New-DuoForgeException -Code 'DF-PROJECT-CONTRACT' -Message '얇은 단계의 공급자 스키마와 런타임 계약이 동등하지 않습니다.') }
     return $true
@@ -125,6 +284,14 @@ function New-DuoForgeThinValidationFailureInternal {
     )
 
     return [ordered]@{ code = $Code; path = $Path; count = 1; expected = @() }
+}
+
+function Test-DuoForgeJsonIntegerInternal {
+    [CmdletBinding()]
+    param($Value)
+
+    return $Value -is [byte] -or $Value -is [sbyte] -or $Value -is [int16] -or $Value -is [uint16] -or `
+        $Value -is [int32] -or $Value -is [uint32] -or $Value -is [int64] -or $Value -is [uint64]
 }
 
 function Test-DuoForgeThinProviderPayloadInternal {
@@ -145,17 +312,23 @@ function Test-DuoForgeThinProviderPayloadInternal {
         $primaryFailures.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-REQUIRED' -Path 'primary'))
     }
     elseif ([string]$Definition.primary.kind -eq 'validation') {
-        if ((Get-DuoForgeObjectValue -Object $primary -Name 'approved') -isnot [bool]) {
+        if ((@($primary.Keys | ForEach-Object { [string]$_ } | Sort-Object) -join ',') -cne 'approved') {
+            $primaryFailures.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-CONTRACT-MISMATCH' -Path 'primary'))
+        }
+        elseif ((Get-DuoForgeObjectValue -Object $primary -Name 'approved') -isnot [bool]) {
             $primaryFailures.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-TYPE' -Path 'primary.approved'))
         }
     }
     else {
         $documents = $null
-        if ($primary.Contains('documents')) { $documents = $primary['documents'] }
-        if ($null -eq $documents -or $documents -is [string] -or $documents -isnot [System.Collections.IEnumerable]) {
+        if ((@($primary.Keys | ForEach-Object { [string]$_ } | Sort-Object) -join ',') -cne 'documents') {
+            $primaryFailures.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-CONTRACT-MISMATCH' -Path 'primary'))
+        }
+        elseif ($primary.Contains('documents')) { $documents = $primary['documents'] }
+        if ($primaryFailures.Count -eq 0 -and ($null -eq $documents -or $documents -is [string] -or $documents -isnot [System.Collections.IEnumerable])) {
             $primaryFailures.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-TYPE' -Path 'primary.documents'))
         }
-        else {
+        elseif ($primaryFailures.Count -eq 0) {
             $documentArray = @($documents)
             if ($documentArray.Count -ne [int]$Definition.primary.outputDocumentCount) {
                 $primaryFailures.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-COUNT' -Path 'primary.documents'))
@@ -174,9 +347,20 @@ function Test-DuoForgeThinProviderPayloadInternal {
         $metadata = $null
     }
     if ($metadata -is [System.Collections.IDictionary]) {
+        $metadataFieldNames = @($Definition.metadata.fields.Keys | ForEach-Object { [string]$_ })
+        foreach ($metadataName in @($metadata.Keys | ForEach-Object { [string]$_ })) {
+            if ($metadataName -notin $metadataFieldNames) {
+                $quarantined.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "metadata.$metadataName"))
+            }
+        }
+        foreach ($metadataName in $metadataFieldNames) {
+            if (-not $metadata.Contains($metadataName)) {
+                $quarantined.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-REQUIRED' -Path "metadata.$metadataName"))
+            }
+        }
         $summaryValue = Get-DuoForgeObjectValue -Object $metadata -Name 'summary' -Default ''
         if ($summaryValue -is [string] -and -not [string]::IsNullOrWhiteSpace([string]$summaryValue)) { $summary = [string]$summaryValue }
-        elseif ($metadata.Contains('summary')) { $quarantined.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-NONEMPTY' -Path 'metadata.summary')) }
+        elseif ($metadata.Contains('summary') -and $null -ne $summaryValue) { $quarantined.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-NONEMPTY' -Path 'metadata.summary')) }
 
         $findings = @(Get-DuoForgeObjectValue -Object $metadata -Name 'findings' -Default @())
         for ($index = 0; $index -lt $findings.Count; $index++) {
@@ -188,11 +372,18 @@ function Test-DuoForgeThinProviderPayloadInternal {
             $proposal = [string](Get-DuoForgeObjectValue -Object $finding -Name 'proposal' -Default '')
             $requiresUser = Get-DuoForgeObjectValue -Object $finding -Name 'requiresUser'
             $blockingProposal = Get-DuoForgeObjectValue -Object $finding -Name 'blockingProposal'
-            if (-not $valid -or $severity -notin @('critical', 'major', 'minor') -or [string]::IsNullOrWhiteSpace($category) -or [string]::IsNullOrWhiteSpace($claim) -or [string]::IsNullOrWhiteSpace($proposal) -or $requiresUser -isnot [bool] -or $blockingProposal -isnot [bool]) {
+            $documentIndexValue = Get-DuoForgeObjectValue -Object $finding -Name 'documentIndex'
+            $findingKeys = if ($valid) { @($finding.Keys | ForEach-Object { [string]$_ } | Sort-Object) } else { @() }
+            $requiredFindingKeys = @($Definition.metadata.fields.findings.item.required | Sort-Object)
+            $valid = $valid -and (($findingKeys -join ',') -ceq ($requiredFindingKeys -join ','))
+            $valid = $valid -and (Test-DuoForgeJsonIntegerInternal -Value $documentIndexValue)
+            $documentIndex = if (Test-DuoForgeJsonIntegerInternal -Value $documentIndexValue) { [int64]$documentIndexValue } else { -1 }
+            $maximumDocumentIndex = [Math]::Max(0, [int]$Definition.primary.outputDocumentCount - 1)
+            if (-not $valid -or $documentIndex -lt 0 -or $documentIndex -gt $maximumDocumentIndex -or $severity -notin @($Definition.metadata.fields.findings.item.severity) -or [string]::IsNullOrWhiteSpace($category) -or [string]::IsNullOrWhiteSpace($claim) -or [string]::IsNullOrWhiteSpace($proposal) -or $requiresUser -isnot [bool] -or $blockingProposal -isnot [bool]) {
                 $quarantined.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-CONTRACT-MISMATCH' -Path "metadata.findings[$index]"))
                 continue
             }
-            $sanitizedFindings.Add([ordered]@{ sourceIndex = $index; category = $category; severity = $severity; claim = $claim; proposal = $proposal; requiresUser = [bool]$requiresUser; blockingProposal = [bool]$blockingProposal; documentIndex = [int](Get-DuoForgeObjectValue -Object $finding -Name 'documentIndex' -Default 0) })
+            $sanitizedFindings.Add([ordered]@{ sourceIndex = $index; category = $category; severity = $severity; claim = $claim; proposal = $proposal; requiresUser = [bool]$requiresUser; blockingProposal = [bool]$blockingProposal; documentIndex = [int]$documentIndex })
         }
 
         $questions = @(Get-DuoForgeObjectValue -Object $metadata -Name 'openQuestions' -Default @())
@@ -203,14 +394,17 @@ function Test-DuoForgeThinProviderPayloadInternal {
                 $quarantined.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-TYPE' -Path $basePath))
                 continue
             }
+            $questionKeys = @($question.Keys | ForEach-Object { [string]$_ } | Sort-Object)
+            $requiredQuestionKeys = @($Definition.metadata.fields.openQuestions.item.required | Sort-Object)
             $title = [string](Get-DuoForgeObjectValue -Object $question -Name 'title' -Default '')
             $questionText = [string](Get-DuoForgeObjectValue -Object $question -Name 'question' -Default '')
             $options = @(Get-DuoForgeObjectValue -Object $question -Name 'options' -Default @())
             $recommended = [string](Get-DuoForgeObjectValue -Object $question -Name 'recommendedOption' -Default '')
             $failurePath = ''
-            if ([string]::IsNullOrWhiteSpace($title)) { $failurePath = "$basePath.title" }
+            if (($questionKeys -join ',') -cne ($requiredQuestionKeys -join ',')) { $failurePath = $basePath }
+            elseif ([string]::IsNullOrWhiteSpace($title)) { $failurePath = "$basePath.title" }
             elseif ([string]::IsNullOrWhiteSpace($questionText)) { $failurePath = "$basePath.question" }
-            elseif ($options.Count -lt 2 -or $options.Count -gt 3) { $failurePath = "$basePath.options" }
+            elseif ($options.Count -lt [int]$Definition.metadata.fields.openQuestions.item.minimumOptions -or $options.Count -gt [int]$Definition.metadata.fields.openQuestions.item.maximumOptions) { $failurePath = "$basePath.options" }
             else {
                 $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
                 for ($optionIndex = 0; $optionIndex -lt $options.Count; $optionIndex++) {
@@ -224,7 +418,8 @@ function Test-DuoForgeThinProviderPayloadInternal {
             if ([string]::IsNullOrWhiteSpace($failurePath) -and -not (Test-DuoForgeQuestionRecommendationInternal -RecommendedOption $recommended -Options $options)) {
                 $failurePath = "$basePath.recommendedOption"
             }
-            $findingIndex = [int](Get-DuoForgeObjectValue -Object $question -Name 'findingIndex' -Default -1)
+            $findingIndexValue = Get-DuoForgeObjectValue -Object $question -Name 'findingIndex'
+            $findingIndex = if (Test-DuoForgeJsonIntegerInternal -Value $findingIndexValue) { [int64]$findingIndexValue } else { -1 }
             if ([string]::IsNullOrWhiteSpace($failurePath) -and @($sanitizedFindings | Where-Object sourceIndex -eq $findingIndex).Count -ne 1) {
                 $failurePath = "$basePath.findingIndex"
             }
@@ -332,7 +527,6 @@ function Test-DuoForgeThinFinalRevisionRequiredInternal {
     [CmdletBinding()]
     param([Parameter(Mandatory)][System.Collections.IDictionary]$StoredValidationResult)
 
-    if ([bool](Get-DuoForgeObjectValue -Object $StoredValidationResult -Name 'finalApproved' -Default $false)) { return $false }
     return @((Get-DuoForgeObjectValue -Object $StoredValidationResult -Name 'issues' -Default @()) | Where-Object {
         [string]$_.severity -eq 'critical' -or ([string]$_.severity -eq 'major' -and [bool]$_.blockingProposal)
     }).Count -gt 0

@@ -200,6 +200,9 @@ function Invoke-DuoForgeProcess {
         $startInfo.RedirectStandardError = -not $Interactive
         $startInfo.RedirectStandardInput = -not $Interactive -and $PSBoundParameters.ContainsKey('StandardInput')
         if (-not $Interactive) {
+            if ($startInfo.RedirectStandardInput) {
+                $startInfo.StandardInputEncoding = [System.Text.UTF8Encoding]::new($false)
+            }
             $startInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
             $startInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
         }

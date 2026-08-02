@@ -1006,6 +1006,8 @@ function Assert-DuoForgeRunStorageContractInternal {
         foreach ($component in @($state, $inventory, $ledger)) {
             if ([string](Get-DuoForgeObjectValue -Object $component -Name 'workflowVersion' -Default '') -ne 'workflow-v3') { & $fail 'workflow-v3 구성요소가 다른 workflowVersion을 선언합니다.' }
         }
+        try { $null = Assert-DuoForgeIssueLedgerV2Internal -Issues @($ledger.issues) }
+        catch { & $fail $_.Exception.Message }
         if ([string](Get-DuoForgeObjectValue -Object $manifest -Name 'promptTemplateVersion' -Default '') -ne 'duoforge-thin-stage-v1' -or [string](Get-DuoForgeObjectValue -Object $state -Name 'promptContractVersion' -Default '') -ne 'duoforge-thin-stage-v1') { & $fail 'workflow-v3 프롬프트 계약이 일치하지 않습니다.' }
         if ([int](Get-DuoForgeObjectValue -Object $manifest -Name 'stageGraphSchemaVersion' -Default 0) -ne 3 -or [int](Get-DuoForgeObjectValue -Object $manifest -Name 'stageResultSchemaVersion' -Default 0) -ne 3) { & $fail 'workflow-v3 단계 계약 버전이 다릅니다.' }
         if ($null -ne $steps -and ([int]$steps.schemaVersion -ne 3 -or [string]$steps.workflowVersion -ne 'workflow-v3')) { & $fail 'workflow-v3 steps 계약이 일치하지 않습니다.' }

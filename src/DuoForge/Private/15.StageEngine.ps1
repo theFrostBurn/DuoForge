@@ -90,8 +90,14 @@ function Add-DuoForgeThinFinalRevisionStepInternal {
     )
 
     if ([string](Get-DuoForgeObjectValue -Object $Graph -Name 'workflowVersion' -Default '') -ne 'workflow-v3') { return $Graph }
-    if (-not (Test-DuoForgeThinFinalRevisionRequiredInternal -StoredValidationResult $ValidationResult)) { return $Graph }
-    if (@($Graph.steps | Where-Object { [string]$_.stage -eq 'final-revision' }).Count -gt 0) { return $Graph }
+    $existing = @($Graph.steps | Where-Object { [string]$_.stage -eq 'final-revision' })
+    if (-not (Test-DuoForgeThinFinalRevisionRequiredInternal -StoredValidationResult $ValidationResult)) {
+        if ($existing.Count -gt 0 -and @($existing | Where-Object { [string]$_.status -ne 'COMMITTED' }).Count -eq $existing.Count) {
+            $Graph.steps = @($Graph.steps | Where-Object { [string]$_.stage -ne 'final-revision' })
+        }
+        return $Graph
+    }
+    if ($existing.Count -gt 0) { return $Graph }
     $conditional = Get-DuoForgeObjectValue -Object $Graph -Name 'conditionalFinalRevision'
     if ($conditional -isnot [System.Collections.IDictionary]) { throw (New-DuoForgeException -Code 'DF-PROJECT-CONTRACT' -Message '조건부 최종 수정 계약이 없습니다.') }
     $provider = [string]$conditional.provider
@@ -538,8 +544,13 @@ function Resolve-DuoForgeStageFailureInternal {
     $formatRecovery = Test-DuoForgeFormatRecoveryErrorInternal -Code $errorCode
     $runtimeLimit = $errorCode -ceq 'DF-RUN-TIME-LIMIT'
     $referenceRepairRequired = $errorCode -ceq 'DF-STAGE-REFERENCE'
-    $retryExhausted = -not $runtimeLimit -and $retryable -and [int]$Step.attemptCount -ge 2
-    $retryScheduled = -not $runtimeLimit -and $retryable -and [int]$Step.attemptCount -lt 2
+    $automaticAttemptLimit = if (
+        $WorkflowVersion -ceq 'workflow-v3' -and
+        [string](Get-DuoForgeObjectValue -Object $State -Name 'recoveryCause' -Default '') -ceq 'terminal-recommendation' -and
+        [string](Get-DuoForgeObjectValue -Object $Step -Name 'stage' -Default '') -ceq 'final-revision'
+    ) { 1 } else { 2 }
+    $retryExhausted = -not $runtimeLimit -and $retryable -and [int]$Step.attemptCount -ge $automaticAttemptLimit
+    $retryScheduled = -not $runtimeLimit -and $retryable -and [int]$Step.attemptCount -lt $automaticAttemptLimit
     $Step.retryMode = if ($runtimeLimit) { $preservedRetryMode } elseif ($referenceRepairRequired) { 'REFERENCE_REPAIR_REQUIRED' } elseif ($retryExhausted) { 'RETRY_EXHAUSTED' } elseif ($retryScheduled -and $formatRecovery) { 'FORMAT_REPAIR' } elseif ($retryScheduled) { 'STANDARD_RETRY' } else { $null }
     $processMetadata = if ($ErrorRecord.Exception.Data.Contains('DuoForgeProcess')) { Get-DuoForgeSafeProcessMetadataInternal -ProcessResult $ErrorRecord.Exception.Data['DuoForgeProcess'] } else { $null }
     $providers = Get-DuoForgeObjectValue -Object $Manifest -Name 'providers' -Default ([ordered]@{})

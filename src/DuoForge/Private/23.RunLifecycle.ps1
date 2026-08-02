@@ -88,6 +88,147 @@ function Get-DuoForgeRecoveryPlanInternal {
     }
 }
 
+function Get-DuoForgeDecisionApplicationRepairEligibilityInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$RunDirectory)
+
+    $manifest = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json'))
+    $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'state.json'))
+    $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
+    $ineligible = {
+        param([string]$Reason)
+        return [ordered]@{ eligible = $false; reason = $Reason; workflowVersion = $workflowVersion }
+    }
+    try { $null = Assert-DuoForgeRunStorageContractInternal -RunDirectory $RunDirectory }
+    catch { return & $ineligible '저장 실행 계약이 유효하지 않아 결정 반영 복구를 준비할 수 없습니다.' }
+    if ($workflowVersion -ne 'workflow-v3' -or [string]$state.status -ne 'QUESTION_LIMIT_REACHED' -or -not [bool](Get-DuoForgeObjectValue -Object $state -Name 'decisionReviewLimitReached' -Default $false)) {
+        return & $ineligible '사용자 결정 반영 결함으로 질문 한도에 도달한 workflow-v3 실행이 아닙니다.'
+    }
+    if ([string](Get-DuoForgeObjectValue -Object $state -Name 'recoveryCause' -Default '') -eq 'decision-application') {
+        return & $ineligible '이 실행의 사용자 결정 반영 복구를 이미 사용했습니다.'
+    }
+    $stepsPath = Join-Path $RunDirectory 'steps.json'
+    if (-not (Test-Path -LiteralPath $stepsPath -PathType Leaf)) { return & $ineligible '복구할 단계 기록이 없습니다.' }
+    $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $stepsPath)
+    if (@($graph.steps | Where-Object { [string]$_.stage -eq 'integration' }).Count -ne 1 -or
+        @($graph.steps | Where-Object { [string]$_.stage -eq 'final-validation' }).Count -ne 1 -or
+        @($graph.steps | Where-Object { [string]$_.status -ne 'COMMITTED' }).Count -gt 0) {
+        return & $ineligible '결정 반영 복구에 필요한 완료 단계 그래프가 아닙니다.'
+    }
+
+    $pendingPath = Join-Path $RunDirectory 'decisions\pending.json'
+    $pending = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $pendingPath)
+    $questions = @($pending.questions)
+    if ($questions.Count -lt 1) { return & $ineligible '반복 여부를 확인할 보존 질문이 없습니다.' }
+    $ledger = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'issues.json'))
+    $records = @(Read-DuoForgeJsonLines -Path (Join-Path $RunDirectory 'decisions\user-answers.jsonl') -AllowMissing)
+    $effective = @(Get-DuoForgeEffectiveUserDecisionsInternal -Records $records | Where-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'action' -Default '') -eq 'ANSWER' })
+    foreach ($question in $questions) {
+        $issueId = [string](Get-DuoForgeObjectValue -Object $question -Name 'issueKey' -Default '')
+        $issue = @($ledger.issues | Where-Object { [string]$_.issueId -eq $issueId } | Select-Object -First 1)
+        $decision = @($effective | Where-Object { [string]$_.issueId -eq $issueId } | Select-Object -Last 1)
+        if ($issue.Count -ne 1 -or $decision.Count -ne 1) { return & $ineligible '모든 보존 질문에 일치하는 기존 답변이 있지 않습니다.' }
+        $fingerprint = [string](Get-DuoForgeObjectValue -Object $decision[0] -Name 'issueFingerprint' -Default '')
+        if ([string]::IsNullOrWhiteSpace($fingerprint) -or $fingerprint -cne [string]$issue[0].fingerprint) { return & $ineligible '기존 답변과 현재 쟁점의 식별 계약이 다릅니다.' }
+        $recordedQuestion = ([string](Get-DuoForgeObjectValue -Object $decision[0] -Name 'questionText' -Default '') -replace '\s+', ' ').Trim()
+        $currentQuestion = ([string](Get-DuoForgeObjectValue -Object $question -Name 'question' -Default '') -replace '\s+', ' ').Trim()
+        $recordedTitle = ([string](Get-DuoForgeObjectValue -Object $decision[0] -Name 'questionTitle' -Default '') -replace '\s+', ' ').Trim()
+        $currentTitle = ([string](Get-DuoForgeObjectValue -Object $question -Name 'title' -Default '') -replace '\s+', ' ').Trim()
+        $recordedRecommendation = ([string](Get-DuoForgeObjectValue -Object $decision[0] -Name 'recommendedOption' -Default '') -replace '\s+', ' ').Trim()
+        $currentRecommendation = ([string](Get-DuoForgeObjectValue -Object $question -Name 'recommendedOption' -Default '') -replace '\s+', ' ').Trim()
+        $recordedClaim = ([string](Get-DuoForgeObjectValue -Object $decision[0] -Name 'claim' -Default '') -replace '\s+', ' ').Trim()
+        $currentClaim = ([string](Get-DuoForgeObjectValue -Object $issue[0] -Name 'claim' -Default '') -replace '\s+', ' ').Trim()
+        $recordedProposal = ([string](Get-DuoForgeObjectValue -Object $decision[0] -Name 'proposal' -Default '') -replace '\s+', ' ').Trim()
+        $currentProposal = ([string](Get-DuoForgeObjectValue -Object $issue[0] -Name 'proposal' -Default '') -replace '\s+', ' ').Trim()
+        $recordedOptions = @((Get-DuoForgeObjectValue -Object $decision[0] -Name 'questionOptions' -Default @()) | ForEach-Object { ([string]$_ -replace '\s+', ' ').Trim() })
+        $currentOptions = @((Get-DuoForgeObjectValue -Object $question -Name 'options' -Default @()) | ForEach-Object { ([string]$_ -replace '\s+', ' ').Trim() })
+        $selected = ([string](Get-DuoForgeObjectValue -Object $decision[0] -Name 'selectedOption' -Default '') -replace '\s+', ' ').Trim()
+        if ($recordedQuestion -cne $currentQuestion -or $recordedTitle -cne $currentTitle -or
+            $recordedRecommendation -cne $currentRecommendation -or $recordedClaim -cne $currentClaim -or
+            $recordedProposal -cne $currentProposal -or ($recordedOptions -join "`n") -cne ($currentOptions -join "`n") -or
+            $selected -cnotin $currentOptions) {
+            return & $ineligible '보존 질문이 기존 답변의 질문 계약과 달라 새 사용자 판단이 필요합니다.'
+        }
+    }
+    $integrationStep = @($graph.steps | Where-Object { [string]$_.stage -eq 'integration' })[0]
+    $plan = [ordered]@{
+        workflowVersion = 'workflow-v3'; internalCause = 'decision-application'; failureCode = 'DF-DECISION-APPLICATION'
+        stepKey = [string]$integrationStep.stepKey
+        userAction = 'prepare-recovery'; userCommand = 'recover'; confirmationToken = 'RECOVER'
+        userState = 'PAUSED_USER'; providerCalls = 0; requiresLive = $true; consumesUserRetryBudget = $false
+    }
+    return [ordered]@{ eligible = $true; reason = ''; workflowVersion = $workflowVersion; state = $state; graph = $graph; plan = $plan; repeatedQuestionCount = $questions.Count }
+}
+
+function Get-DuoForgeTerminalRecommendationRepairEligibilityInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$RunDirectory)
+
+    $manifest = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json'))
+    $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'state.json'))
+    $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
+    $ineligible = {
+        param([string]$Reason)
+        return [ordered]@{ eligible = $false; reason = $Reason; workflowVersion = $workflowVersion }
+    }
+    try { $null = Assert-DuoForgeRunStorageContractInternal -RunDirectory $RunDirectory }
+    catch { return & $ineligible '저장 실행 계약이 유효하지 않아 마지막 권장안 복구를 준비할 수 없습니다.' }
+    if ($workflowVersion -ne 'workflow-v3' -or [string]$state.status -ne 'QUESTION_LIMIT_REACHED' -or
+        -not [bool](Get-DuoForgeObjectValue -Object $state -Name 'decisionReviewLimitReached' -Default $false)) {
+        return & $ineligible '마지막 권장안 복구가 필요한 workflow-v3 질문 한도 실행이 아닙니다.'
+    }
+    if ([string](Get-DuoForgeObjectValue -Object $state -Name 'recoveryCause' -Default '') -eq 'terminal-recommendation') {
+        return & $ineligible '이 실행의 마지막 권장안 복구를 이미 사용했습니다.'
+    }
+    $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'steps.json'))
+    $integration = @($graph.steps | Where-Object { [string]$_.stage -eq 'integration' })
+    $validation = @($graph.steps | Where-Object { [string]$_.stage -eq 'final-validation' })
+    if ($integration.Count -ne 1 -or $validation.Count -ne 1 -or
+        @($graph.steps | Where-Object { [string]$_.status -ne 'COMMITTED' }).Count -gt 0 -or
+        @($graph.steps | Where-Object { [string]$_.stage -eq 'final-revision' }).Count -gt 0) {
+        return & $ineligible '마지막 권장안만 최종 수정에 반영할 수 있는 완료 단계 그래프가 아닙니다.'
+    }
+    $pending = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'decisions\pending.json'))
+    $questions = @($pending.questions)
+    if ($questions.Count -lt 1 -or $questions.Count -gt 3) { return & $ineligible '마지막 권장안으로 안전하게 처리할 질문 수가 아닙니다.' }
+    $ledger = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'issues.json'))
+    $records = @(Read-DuoForgeJsonLines -Path (Join-Path $RunDirectory 'decisions\user-answers.jsonl') -AllowMissing)
+    $effective = @(Get-DuoForgeEffectiveUserDecisionsInternal -Records $records | Where-Object { [string]$_.action -eq 'ANSWER' })
+    $revisionIssues = [System.Collections.Generic.List[object]]::new()
+    foreach ($question in $questions) {
+        $issueId = [string](Get-DuoForgeObjectValue -Object $question -Name 'issueKey' -Default '')
+        $issue = @($ledger.issues | Where-Object { [string]$_.issueId -eq $issueId })
+        if ($issue.Count -ne 1 -or -not [bool](Get-DuoForgeObjectValue -Object $issue[0] -Name 'blocking' -Default $false) -or
+            @($effective | Where-Object { [string]$_.issueId -eq $issueId }).Count -gt 0) {
+            return & $ineligible '마지막 권장안 복구는 아직 답하지 않은 단일 차단 쟁점 계약에만 사용할 수 있습니다.'
+        }
+        $options = @(Get-DuoForgeQuestionOptionsForInteractionInternal -Options @(Get-DuoForgeObjectValue -Object $question -Name 'options' -Default @()))
+        $recommended = ([string](Get-DuoForgeObjectValue -Object $question -Name 'recommendedOption' -Default '')).Trim()
+        $matched = $false
+        for ($index = 0; $index -lt $options.Count; $index++) {
+            $letter = [string][char]([int][char]'A' + $index)
+            $raw = [string]$options[$index]
+            $prefix = '^\s*' + [regex]::Escape($letter) + '\s*[:：.)-]\s*'
+            $label = [regex]::Replace($raw, $prefix, '', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase).Trim()
+            if ($recommended -ieq $letter -or $recommended -ieq $raw -or $recommended -ieq $label -or $recommended -match $prefix) { $matched = $true; break }
+        }
+        if (-not $matched) { return & $ineligible '마지막 질문에 실제 선택지와 일치하는 AI 권장안이 없습니다.' }
+        $revisionIssues.Add([ordered]@{
+            severity = [string](Get-DuoForgeObjectValue -Object $issue[0] -Name 'severity' -Default '')
+            blockingProposal = [bool](Get-DuoForgeObjectValue -Object $issue[0] -Name 'blocking' -Default $false)
+        })
+    }
+    $plan = [ordered]@{
+        workflowVersion = 'workflow-v3'; internalCause = 'terminal-recommendation'; failureCode = 'DF-TERMINAL-RECOMMENDATION'
+        stepKey = [string]$validation[0].stepKey; userAction = 'prepare-recovery'; userCommand = 'recover'; confirmationToken = 'RECOVER'
+        userState = 'PAUSED_USER'; providerCalls = 0; requiresLive = $true; consumesUserRetryBudget = $false
+    }
+    return [ordered]@{
+        eligible = $true; reason = ''; workflowVersion = $workflowVersion; state = $state; graph = $graph; plan = $plan
+        questionCount = $questions.Count; revisionRequirement = [ordered]@{ issues = @($revisionIssues) }
+    }
+}
+
 function Get-DuoForgeUnifiedRecoveryEligibilityInternal {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$RunDirectory)
@@ -98,6 +239,11 @@ function Get-DuoForgeUnifiedRecoveryEligibilityInternal {
     $stepsPath = Join-Path $RunDirectory 'steps.json'
     if (-not (Test-Path -LiteralPath $stepsPath -PathType Leaf)) { return [ordered]@{ eligible = $false; reason = '복구할 단계 기록이 없습니다.'; workflowVersion = $workflowVersion } }
     $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $stepsPath)
+    if ([string]$state.status -eq 'QUESTION_LIMIT_REACHED') {
+        $decisionApplication = Get-DuoForgeDecisionApplicationRepairEligibilityInternal -RunDirectory $RunDirectory
+        if ([bool]$decisionApplication.eligible) { return $decisionApplication }
+        return Get-DuoForgeTerminalRecommendationRepairEligibilityInternal -RunDirectory $RunDirectory
+    }
     $failed = @($graph.steps | Where-Object { [string]$_.status -eq 'FAILED' })
     if ($failed.Count -ne 1 -or [string]$state.status -notin @('FAILED_STAGE', 'RESUMABLE_ERROR')) {
         return [ordered]@{ eligible = $false; reason = '복구할 실패 단계를 하나로 특정할 수 없습니다.'; workflowVersion = $workflowVersion }
@@ -127,6 +273,66 @@ function Enable-DuoForgeUnifiedRecoveryInternal {
     $runDirectory = [string]$run.runDirectory
     $eligibility = Get-DuoForgeUnifiedRecoveryEligibilityInternal -RunDirectory $runDirectory
     if (-not [bool]$eligibility.eligible) { throw (New-DuoForgeException -Code 'DF-RUN-RECOVERY-NOT-ELIGIBLE' -Message ([string]$eligibility.reason)) }
+    if ([string]$eligibility.plan.internalCause -eq 'terminal-recommendation') {
+        return Invoke-WithDuoForgeRunLock -RunDirectory $runDirectory -ScriptBlock {
+            return Invoke-WithDuoForgeRunMutationTransactionInternal -RunDirectory $runDirectory -RelativePaths @('state.json', 'steps.json', 'decisions\pending.json', 'events.jsonl') -RelativeDirectories @('history\decisions') -ScriptBlock {
+                $current = Get-DuoForgeTerminalRecommendationRepairEligibilityInternal -RunDirectory $runDirectory
+                if (-not [bool]$current.eligible) { throw (New-DuoForgeException -Code 'DF-RUN-RECOVERY-NOT-ELIGIBLE' -Message ([string]$current.reason)) }
+                $graph = ConvertTo-DuoForgeHashtable -InputObject $current.graph
+                $validationStep = @($graph.steps | Where-Object { [string]$_.stage -eq 'final-validation' })[0]
+                if ([string]::IsNullOrWhiteSpace([string]$validationStep.artifactPath) -or
+                    (Get-DuoForgeSha256 -Path ([string]$validationStep.artifactPath)) -cne [string]$validationStep.artifactHash) {
+                    throw (New-DuoForgeException -Code 'DF-PROMPT-DEPENDENCY-INTEGRITY' -Message '최종 검증 산출물의 무결성이 변경되었습니다.')
+                }
+                $graph = Add-DuoForgeThinFinalRevisionStepInternal -Graph $graph -ValidationResult (ConvertTo-DuoForgeHashtable -InputObject $current.revisionRequirement)
+                $revisionSteps = @($graph.steps | Where-Object { [string]$_.stage -eq 'final-revision' -and [string]$_.status -eq 'PENDING' })
+                if ($revisionSteps.Count -ne 1) { throw (New-DuoForgeException -Code 'DF-PROJECT-CONTRACT' -Message '마지막 권장안을 반영할 최종 수정 단계를 만들지 못했습니다.') }
+                Write-DuoForgeJsonAtomic -Path (Join-Path $runDirectory 'steps.json') -Value $graph
+                $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $runDirectory 'state.json'))
+                $state.status = 'PAUSED_USER'
+                $state.lastCompletedStage = [string]$validationStep.stepKey
+                $state.decisionReviewLimitReached = $false
+                $state.recoveryPreparationCount = [int](Get-DuoForgeObjectValue -Object $state -Name 'recoveryPreparationCount' -Default 0) + 1
+                $state.recoveryPreparedAt = Get-DuoForgeUtcNow
+                $state.recoveryCause = 'terminal-recommendation'
+                $state.updatedAt = Get-DuoForgeUtcNow
+                Write-DuoForgeJsonAtomic -Path (Join-Path $runDirectory 'state.json') -Value $state
+                if ($null -ne $FaultInjector) { & $FaultInjector 'after-state-and-steps' }
+                Add-DuoForgeRunEvent -RunDirectory $runDirectory -Type 'TERMINAL_RECOMMENDATION_RECOVERY_PREPARED' -Status 'PAUSED_USER' -Data ([ordered]@{ questionCount = [int]$current.questionCount; resetSteps = @($revisionSteps.stepKey); providerCalls = 0 })
+                return [ordered]@{
+                    runId = $RunId; status = 'PAUSED_USER'; recoveryKind = 'terminal-recommendation'
+                    userCommand = 'recover'; confirmationToken = 'RECOVER'; providerCalls = 0; requiresLive = $true
+                    consumesUserRetryBudget = $false; resetSteps = @($revisionSteps.stepKey)
+                }
+            }
+        }
+    }
+    if ([string]$eligibility.plan.internalCause -eq 'decision-application') {
+        return Invoke-WithDuoForgeRunLock -RunDirectory $runDirectory -ScriptBlock {
+            return Invoke-WithDuoForgeRunMutationTransactionInternal -RunDirectory $runDirectory -RelativePaths @('state.json', 'steps.json', 'decisions\pending.json', 'events.jsonl') -RelativeDirectories @('history\decisions') -ScriptBlock {
+                $current = Get-DuoForgeDecisionApplicationRepairEligibilityInternal -RunDirectory $runDirectory
+                if (-not [bool]$current.eligible) { throw (New-DuoForgeException -Code 'DF-RUN-RECOVERY-NOT-ELIGIBLE' -Message ([string]$current.reason)) }
+                $reset = Reset-DuoForgeDecisionAffectedSteps -RunDirectory $runDirectory -Mode ([string]$current.state.mode)
+                Write-DuoForgeJsonAtomic -Path (Join-Path $runDirectory 'decisions\pending.json') -Value ([ordered]@{ schemaVersion = 1; questions = @() })
+                $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $runDirectory 'state.json'))
+                $state.status = 'PAUSED_USER'
+                $state.lastCompletedStage = [string]$reset.lastCommittedStep
+                $state.decisionReviewLimitReached = $false
+                $state.recoveryPreparationCount = [int](Get-DuoForgeObjectValue -Object $state -Name 'recoveryPreparationCount' -Default 0) + 1
+                $state.recoveryPreparedAt = Get-DuoForgeUtcNow
+                $state.recoveryCause = 'decision-application'
+                $state.updatedAt = Get-DuoForgeUtcNow
+                Write-DuoForgeJsonAtomic -Path (Join-Path $runDirectory 'state.json') -Value $state
+                if ($null -ne $FaultInjector) { & $FaultInjector 'after-state-and-steps' }
+                Add-DuoForgeRunEvent -RunDirectory $runDirectory -Type 'DECISION_APPLICATION_RECOVERY_PREPARED' -Status 'PAUSED_USER' -Data ([ordered]@{ repeatedQuestionCount = [int]$current.repeatedQuestionCount; resetSteps = @($reset.resetSteps); providerCalls = 0 })
+                return [ordered]@{
+                    runId = $RunId; status = 'PAUSED_USER'; recoveryKind = 'decision-application'
+                    userCommand = 'recover'; confirmationToken = 'RECOVER'; providerCalls = 0; requiresLive = $true
+                    consumesUserRetryBudget = $false; resetSteps = @($reset.resetSteps)
+                }
+            }
+        }
+    }
     if ([string]$eligibility.workflowVersion -ne 'workflow-v3') {
         $cause = [string]$eligibility.plan.internalCause
         $legacy = switch ($cause) {

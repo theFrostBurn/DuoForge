@@ -376,7 +376,17 @@ function Invoke-DuoForgeCliCoreInternal {
             }
             $result = if ($null -ne $RecoveryInvoker) { & $RecoveryInvoker $runId $workspace } else { Enable-DuoForgeUnifiedRecoveryInternal -RunId $runId -ResultsRoot $workspace }
             Write-DuoForgeDisplayRowsInternal -Rows @(New-DuoForgeNoticeRowsInternal -Kind success -Title '복구를 준비했습니다.' -Message '아직 AI를 호출하지 않았습니다.' -NextAction '내용을 확인한 뒤 resume --live에서 별도의 LIVE 확인을 진행해 주세요.' -Layout $layout) -Layout $layout
-            return $result
+            $publicRecoveryKind = [string](Get-DuoForgeObjectValue -Object $result -Name 'recoveryKind' -Default '')
+            if ($publicRecoveryKind -notin @('failed-stage-retry', 'runtime-extension', 'schema-reference-repair', 'prompt-size-repair')) {
+                $publicRecoveryKind = ''
+            }
+            return [pscustomobject]@{
+                runId = [string](Get-DuoForgeObjectValue -Object $result -Name 'runId' -Default $runId)
+                status = [string](Get-DuoForgeObjectValue -Object $result -Name 'status' -Default '')
+                recoveryKind = $publicRecoveryKind
+                providerCalls = [int](Get-DuoForgeObjectValue -Object $result -Name 'providerCalls' -Default 0)
+                requiresLive = [bool](Get-DuoForgeObjectValue -Object $result -Name 'requiresLive' -Default $true)
+            }
         }
         '__compat-v2-repair-contract' {
             $null = Assert-DuoForgeCliOptionsInternal -Parsed $parsed -AllowedNames @('run', 'workspace')

@@ -2000,7 +2000,7 @@ function Invoke-DuoForgeInteractiveRun {
         if ([string]$run.state.status -notin @('PAUSED_USER') -and [string]$run.state.status -notin $terminalStates -and -not $runtimeLimitFailure -and [bool]$continuation.eligible) { $menuItems.Add([ordered]@{ value = 'P'; label = '현재 AI 작업이 끝난 뒤 멈추기'; shortcuts = @('P'); enabled = $true }) }
         $menuItems.Add([ordered]@{ value = 'I'; label = '확인할 내용 보기'; shortcuts = @('I'); enabled = $true })
         if (Test-Path -LiteralPath (Join-Path ([string]$run.runDirectory) 'final') -PathType Container) { $menuItems.Add([ordered]@{ value = 'O'; label = '결과 폴더 열기'; shortcuts = @('O'); enabled = $true }) }
-        if ([string]$run.state.status -in @('FAILED_STAGE', 'RESUMABLE_ERROR') -or $runtimeLimitFailure) {
+        if ([string]$run.state.status -in @('FAILED_STAGE', 'RESUMABLE_ERROR', 'QUESTION_LIMIT_REACHED') -or $runtimeLimitFailure) {
             $recoveryEligibility = Get-DuoForgeUnifiedRecoveryEligibilityInternal -RunDirectory ([string]$run.runDirectory)
             $menuItems.Add([ordered]@{
                 value = 'recover'
@@ -2043,7 +2043,7 @@ function Invoke-DuoForgeInteractiveRun {
             $finalDirectory = Join-Path ([string]$run.runDirectory) 'final'
             if (Test-Path -LiteralPath $finalDirectory -PathType Container) { Start-Process -FilePath 'explorer.exe' -ArgumentList @($finalDirectory); continue }
         }
-        if ($choice -ieq 'recover' -and ([string]$run.state.status -in @('FAILED_STAGE', 'RESUMABLE_ERROR') -or $runtimeLimitFailure)) {
+        if ($choice -ieq 'recover' -and ([string]$run.state.status -in @('FAILED_STAGE', 'RESUMABLE_ERROR', 'QUESTION_LIMIT_REACHED') -or $runtimeLimitFailure)) {
             $outcome = Invoke-DuoForgeInteractiveUnifiedRecoveryInternal -Run $run -InputReader $InputReader -RecoveryInvoker $RecoveryInvoker
             if ($null -ne $outcome.result) { return [ordered]@{ action = 'submit'; value = 'recover'; source = 'menu'; returnTarget = 'home' } }
             continue

@@ -22,6 +22,7 @@ function Get-DuoForgeRemainingCallBudget {
     param([Parameter(Mandatory)][string]$RunDirectory)
 
     $manifest = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json')
+    $state = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'state.json')
     $stepsPath = Join-Path $RunDirectory 'steps.json'
     if (Test-Path -LiteralPath $stepsPath -PathType Leaf) {
         $graph = Read-DuoForgeJson -Path $stepsPath
@@ -48,7 +49,12 @@ function Get-DuoForgeRemainingCallBudget {
         $blockedSteps = @($remainingSteps | Where-Object { [string]$_.status -eq 'FAILED' })
         $runnableSteps = @($remainingSteps | Where-Object { $_ -notin $blockedSteps })
         $scheduledCallsRemaining = $runnableSteps.Count
-        $failureRetryCallsRemaining = @($runnableSteps | Where-Object { [int]$_.attemptCount -eq 0 }).Count
+        $terminalRecommendationOneShot =
+            (Get-DuoForgeWorkflowVersionInternal -Manifest $manifest) -ceq 'workflow-v3' -and
+            [string](Get-DuoForgeObjectValue -Object $state -Name 'recoveryCause' -Default '') -ceq 'terminal-recommendation'
+        $failureRetryCallsRemaining = @($runnableSteps | Where-Object {
+            [int]$_.attemptCount -eq 0 -and -not ($terminalRecommendationOneShot -and [string]$_.stage -ceq 'final-revision')
+        }).Count
         $maximumPlannedAdditionalCalls = $scheduledCallsRemaining + $failureRetryCallsRemaining
         $providerPlans = Get-DuoForgeObjectValue -Object $manifest.executionPlan -Name 'providers'
         $providerPlan = Get-DuoForgeObjectValue -Object $providerPlans -Name $provider

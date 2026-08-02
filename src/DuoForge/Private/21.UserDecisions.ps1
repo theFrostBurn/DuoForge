@@ -90,7 +90,8 @@ function Reset-DuoForgeDecisionAffectedSteps {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$RunDirectory,
-        [Parameter(Mandatory)][string]$Mode
+        [Parameter(Mandatory)][string]$Mode,
+        [AllowEmptyCollection()][string[]]$AffectedStages = @()
     )
 
     $stepsPath = Join-Path $RunDirectory 'steps.json'
@@ -101,7 +102,13 @@ function Reset-DuoForgeDecisionAffectedSteps {
     $manifest = Read-DuoForgeJson -Path (Join-Path $RunDirectory 'manifest.json')
     $workflowVersion = Get-DuoForgeWorkflowVersionInternal -Manifest $manifest
     $maximumRound = [int]$graph.maxRounds
-    if ($Mode -in @('shared-document', 'document-merge')) {
+    if (@($AffectedStages).Count -gt 0) {
+        $affected = @($graph.steps | Where-Object { [int]$_.round -eq $maximumRound -and [string]$_.stage -in $AffectedStages })
+    }
+    elseif ($workflowVersion -eq 'workflow-v3') {
+        $affected = @($graph.steps | Where-Object { [int]$_.round -eq $maximumRound -and [string]$_.stage -in @('integration', 'final-validation', 'final-revision') })
+    }
+    elseif ($Mode -in @('shared-document', 'document-merge')) {
         $affected = @($graph.steps | Where-Object { [int]$_.round -eq $maximumRound -and [string]$_.stage -in @('synthesis', 'final-validation') })
     }
     elseif ($workflowVersion -eq 'workflow-v2') {
@@ -245,7 +252,13 @@ function Set-DuoForgeUserDecisionInternal {
             $pending.questions = @($pending.questions | Where-Object { [string]$_.issueKey -ne $IssueId })
             Write-DuoForgeJsonAtomic -Path $pendingPath -Value $pending
 
-            $reset = Reset-DuoForgeDecisionAffectedSteps -RunDirectory $directory -Mode ([string]$state.mode)
+            $terminalRecommendation = [string](Get-DuoForgeObjectValue -Object $state -Name 'recoveryCause' -Default '') -eq 'terminal-recommendation'
+            $reset = if ($terminalRecommendation) {
+                Reset-DuoForgeDecisionAffectedSteps -RunDirectory $directory -Mode ([string]$state.mode) -AffectedStages @('final-revision')
+            }
+            else {
+                Reset-DuoForgeDecisionAffectedSteps -RunDirectory $directory -Mode ([string]$state.mode)
+            }
             $state.status = 'PAUSED_USER'
             $state.lastCompletedStage = [string]$reset.lastCommittedStep
             $state.openIssues = @($state.openIssues | Where-Object { $_ -ne $IssueId }) + @($IssueId)

@@ -299,6 +299,74 @@ function ConvertFrom-DuoForgeClaudeEnvelope {
     return ConvertFrom-DuoForgeProviderResult -RawJson $raw -ExpectedStage $ExpectedStage -ExpectedProvider 'claude' -WorkflowVersion $WorkflowVersion -ExpectedTargetDocumentId $ExpectedTargetDocumentId -ExpectedSourceDocumentIds $ExpectedSourceDocumentIds -ExpectedPerformedBy $ExpectedPerformedBy -ExpectedIssueKeyPrefix $ExpectedIssueKeyPrefix
 }
 
+function Get-DuoForgeProviderDiagnosticReasonInternal {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$DiagnosticText)
+
+    $normalized = ''
+    try {
+        $normalized = [regex]::Replace($DiagnosticText, '\x1B\[[0-?]*[ -/]*[@-~]', '')
+        $normalized = [regex]::Replace($normalized, '[\p{Cc}\p{Cf}]', '')
+        $normalized = [regex]::Replace($normalized, '\s+', ' ').Trim()
+        if ($normalized -match '(?i)(invalid_json_schema|invalid\s+(?:json\s+)?schema|schema.+(?:rejected|not\s+supported|not\s+permitted|not\s+allowed)|invalid\s+schema\s+for\s+response_format)') { return 'SCHEMA_REJECTED' }
+        if ($normalized -match '(?i)(reasoning\s+(?:effort|level).*(?:not\s+supported|unsupported|unavailable|invalid)|(?:not\s+supported|unsupported|invalid).+reasoning\s+(?:effort|level))') { return 'REASONING_UNAVAILABLE' }
+        if ($normalized -match '(?i)(unsupported\s+value.+not\s+supported.+model|model.+configuration.+(?:not\s+supported|unsupported|invalid))') { return 'MODEL_CONFIGURATION_UNAVAILABLE' }
+        if ($normalized -match '(?i)(model\s+.+(?:not\s+found|not\s+available|unavailable|not\s+supported|unsupported|does\s+not\s+exist)|(?:not\s+found|not\s+available|unavailable|not\s+supported|unsupported|unknown|invalid).{0,100}model|(?:do\s+not|don.t)\s+have\s+access\s+to\s+(?:the\s+)?model|invalid\s+model|unsupported_value.{0,120}(?:param.{0,20}model|model)|(?:param.{0,20}model).{0,120}unsupported_value)') { return 'MODEL_UNAVAILABLE' }
+        if ($normalized -match '(?i)(not\s+logged\s+in|login\s+required|please\s+(?:log\s*in|login)|unauthorized|authentication\s+failed|invalid\s+(?:credential|token)|expired\s+(?:token|session)|로그인|인증|자격\s*증명)') { return 'AUTH' }
+        if ($normalized -match '(?i)(unexpected\s+argument|unknown\s+(?:argument|option)|unrecognized\s+(?:argument|option)|invalid\s+value.+(?:argument|option))') { return 'INVALID_OPTION' }
+        if ($normalized -match "(?i)(usage\s+limit|quota|insufficient_quota|out\s+of\s+credits|plan\s+(?:usage\s+)?limit|limit\s+reached\s+for\s+your\s+plan|you(?:'|’)ve\s+hit\s+your\s+limit|사용\s*한도|할당량)") { return 'QUOTA' }
+        if ($normalized -match '(?i)(rate\s+limit|too\s+many\s+requests|temporarily\s+throttled|속도\s*제한)') { return 'RATE_LIMIT' }
+        if ($normalized -match '(?i)(network\s+(?:error|unavailable)|connection\s+(?:failed|refused|reset|timed\s*out)|name\s+resolution|dns\s+(?:error|failure)|service\s+unavailable|gateway\s+timeout|tls\s+(?:error|failure)|certificate\s+(?:error|failure)|stream\s+disconnected|request\s+failed|네트워크|연결\s*(?:실패|거부|재설정|시간\s*초과))') { return 'NETWORK' }
+        if ($normalized -match '(?i)(output[-_ ]schema|json\s+schema|response[_ ]format|schema|스키마|구조화\s*출력)') { return 'CONTEXT_SCHEMA' }
+        if ($normalized -match '(?i)(responses[-_ ]lite|chatgpt\s+account|model|모델|지원하지|사용할\s*수\s*없)') { return 'CONTEXT_MODEL' }
+        if ($normalized -match '(?i)(config(?:uration)?|toml|설정|구성)') { return 'CONTEXT_CONFIG' }
+        if ($normalized -match '(?i)(panicked|panic|rust_backtrace|backtrace|utf-?8|unicode|char(?:acter)?\s+boundary|encoding|thread\s+["'']?main|패닉|인코딩|유니코드)') { return 'CONTEXT_RUNTIME' }
+        if ($normalized -match '(?i)(permission|access\s+denied|\bfile\b|\bdirectory\b|\bpath\b|\bread\b|\bwrite\b|\bcreate\b|\bopen\b|[a-z]:\\|enoent|eacces|eperm|파일|경로|디렉터리|폴더|권한|액세스|찾을\s*수\s*없)') { return 'CONTEXT_FILE' }
+        if ($normalized -match '(?i)(http|status|bad\s+request|request|response|요청|응답|상태)') { return 'CONTEXT_REQUEST' }
+        if ($normalized -match '(?i)(sandbox|restricted\s+token|CreateProcessAsUser|샌드박스|제한된\s*토큰)') { return 'CONTEXT_SANDBOX' }
+        if ($normalized -match '(?i)(stdin|prompt|terminal|tty|표준\s*입력|프롬프트|터미널)') { return 'CONTEXT_STDIN' }
+        if ($normalized -match '(?i)(usage:|for\s+more\s+information|argument|option|command|인수|인자|옵션|명령)') { return 'CONTEXT_CLI' }
+        if ($normalized -match '(?i)(environment|environment\s+variable|profile|home|환경\s*변수|환경|프로필)') { return 'CONTEXT_ENVIRONMENT' }
+        if ($normalized -match '(?i)(context\s+length|too\s+large|maximum\s+size|token\s+limit|크기|길이|너무\s*큼|토큰)') { return 'CONTEXT_LIMIT' }
+        if ($normalized -match '(?i)(node:|module|loader|npm|toolchain)') { return 'CONTEXT_TOOLCHAIN' }
+        if ($normalized -match '[가-힣]') { return 'CONTEXT_LOCALIZED' }
+        return 'UNKNOWN'
+    }
+    finally { $normalized = ''; $DiagnosticText = '' }
+}
+
+function Get-DuoForgeCodexErrorDiagnosticReasonInternal {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$JsonLines)
+
+    try {
+        foreach ($line in @($JsonLines -split "`r?`n")) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $event = $null
+            try { $event = ConvertTo-DuoForgeHashtable -InputObject ($line | ConvertFrom-Json -Depth 30 -ErrorAction Stop) }
+            catch { continue }
+            $eventType = [string](Get-DuoForgeObjectValue -Object $event -Name 'type' -Default '')
+            $message = ''
+            if ($eventType -eq 'error') {
+                $message = [string](Get-DuoForgeObjectValue -Object $event -Name 'message' -Default '')
+            }
+            elseif ($eventType -eq 'turn.failed') {
+                $errorValue = Get-DuoForgeObjectValue -Object $event -Name 'error'
+                if ($errorValue -is [System.Collections.IDictionary]) {
+                    $message = [string](Get-DuoForgeObjectValue -Object $errorValue -Name 'message' -Default '')
+                }
+            }
+            else { continue }
+            $reason = Get-DuoForgeProviderDiagnosticReasonInternal -DiagnosticText $message
+            $message = ''
+            $event = $null
+            if ($reason -ne 'UNKNOWN') { return $reason }
+        }
+        return 'UNKNOWN'
+    }
+    finally { $JsonLines = '' }
+}
+
 function Get-DuoForgeProviderFailureClassificationInternal {
     [CmdletBinding()]
     param(
@@ -311,7 +379,10 @@ function Get-DuoForgeProviderFailureClassificationInternal {
     $exitCodeValue = Get-DuoForgeObjectValue -Object $ProcessResult -Name 'exitCode'
     $exitCode = if ($null -eq $exitCodeValue) { $null } else { [int]$exitCodeValue }
     $errorCategory = [string](Get-DuoForgeObjectValue -Object $ProcessResult -Name 'errorCategory')
-    $diagnosticText = [string](Get-DuoForgeObjectValue -Object $ProcessResult -Name 'stderr')
+    $diagnosticReason = Get-DuoForgeProviderDiagnosticReasonInternal -DiagnosticText ([string](Get-DuoForgeObjectValue -Object $ProcessResult -Name 'stderr'))
+    if ($Provider -eq 'codex' -and $diagnosticReason -eq 'UNKNOWN') {
+        $diagnosticReason = Get-DuoForgeCodexErrorDiagnosticReasonInternal -JsonLines ([string](Get-DuoForgeObjectValue -Object $ProcessResult -Name 'stdout'))
+    }
     $processMetadata = Get-DuoForgeSafeProcessMetadataInternal -ProcessResult $ProcessResult
     try {
         if (-not $started -and $errorCategory -eq 'command-not-found') {
@@ -323,37 +394,38 @@ function Get-DuoForgeProviderFailureClassificationInternal {
         if ($timedOut) {
             return [ordered]@{ safeReason = 'TIMEOUT'; category = 'timeout'; code = 'DF-PROVIDER-TIMEOUT'; targetStatus = 'RESUMABLE_ERROR'; retryable = $true; message = "$Provider CLI 호출 시간이 초과되었습니다."; exitCode = $null; process = $processMetadata }
         }
-        if ($diagnosticText -match '(?i)(invalid_json_schema|invalid\s+(?:json\s+)?schema|schema.+(?:rejected|not\s+supported)|invalid\s+schema\s+for\s+response_format)') {
+        if ($diagnosticReason -eq 'SCHEMA_REJECTED') {
             return [ordered]@{ safeReason = 'SCHEMA_REJECTED'; category = 'schema-compatibility'; code = 'DF-PROVIDER-SCHEMA-REJECTED'; targetStatus = 'BLOCKED_PREFLIGHT'; retryable = $false; message = "$Provider 구조화 출력 스키마가 현재 CLI 또는 공급자 API와 호환되지 않습니다."; exitCode = $exitCode; process = $processMetadata }
         }
-        if ($diagnosticText -match '(?i)(reasoning\s+(?:effort|level).*(?:not\s+supported|unsupported|unavailable|invalid)|(?:not\s+supported|unsupported|invalid).+reasoning\s+(?:effort|level))') {
+        if ($diagnosticReason -eq 'REASONING_UNAVAILABLE') {
             return [ordered]@{ safeReason = 'REASONING_UNAVAILABLE'; category = 'reasoning-unavailable'; code = 'DF-PROVIDER-REASONING-UNAVAILABLE'; targetStatus = 'BLOCKED_PREFLIGHT'; retryable = $false; message = "${Provider}에서 선택한 추론 단계를 이 모델과 함께 사용할 수 없습니다."; exitCode = $exitCode; process = $processMetadata }
         }
-        if ($diagnosticText -match '(?i)(unsupported\s+value.+not\s+supported.+model|model.+configuration.+(?:not\s+supported|unsupported|invalid))') {
+        if ($diagnosticReason -eq 'MODEL_CONFIGURATION_UNAVAILABLE') {
             return [ordered]@{ safeReason = 'MODEL_CONFIGURATION_UNAVAILABLE'; category = 'model-configuration'; code = 'DF-PROVIDER-MODEL-CONFIGURATION'; targetStatus = 'BLOCKED_PREFLIGHT'; retryable = $false; message = "${Provider}에서 선택한 모델과 실행 설정 조합을 사용할 수 없습니다."; exitCode = $exitCode; process = $processMetadata }
         }
-        if ($diagnosticText -match '(?i)(model\s+.+(?:not\s+found|not\s+available|unavailable|not\s+supported|does\s+not\s+exist)|(?:do\s+not|don.t)\s+have\s+access\s+to\s+(?:the\s+)?model|invalid\s+model)') {
+        if ($diagnosticReason -eq 'MODEL_UNAVAILABLE') {
             return [ordered]@{ safeReason = 'MODEL_UNAVAILABLE'; category = 'model-unavailable'; code = 'DF-PROVIDER-MODEL-UNAVAILABLE'; targetStatus = 'BLOCKED_PREFLIGHT'; retryable = $false; message = "${Provider}에서 선택한 모델을 이 계정으로 호출할 수 없습니다."; exitCode = $exitCode; process = $processMetadata }
         }
-        if ($diagnosticText -match '(?i)(not\s+logged\s+in|login\s+required|please\s+(?:log\s*in|login)|unauthorized|authentication\s+failed|invalid\s+(?:credential|token)|expired\s+(?:token|session))') {
+        if ($diagnosticReason -eq 'AUTH') {
             return [ordered]@{ safeReason = 'AUTH'; category = 'authentication'; code = 'DF-PROVIDER-AUTH'; targetStatus = 'BLOCKED_PREFLIGHT'; retryable = $false; message = "$Provider 구독 인증을 다시 확인해야 합니다."; exitCode = $exitCode; process = $processMetadata }
         }
-        if ($diagnosticText -match '(?i)(unexpected\s+argument|unknown\s+(?:argument|option)|unrecognized\s+(?:argument|option)|invalid\s+value.+(?:argument|option))') {
+        if ($diagnosticReason -eq 'INVALID_OPTION') {
             return [ordered]@{ safeReason = 'INVALID_OPTION'; category = 'invalid-option'; code = 'DF-PROVIDER-INVALID-OPTION'; targetStatus = 'BLOCKED_PREFLIGHT'; retryable = $false; message = "$Provider CLI가 현재 실행 옵션을 지원하지 않습니다."; exitCode = $exitCode; process = $processMetadata }
         }
-        if ($diagnosticText -match "(?i)(usage\s+limit|quota|insufficient_quota|out\s+of\s+credits|plan\s+(?:usage\s+)?limit|limit\s+reached\s+for\s+your\s+plan|you(?:'|’)ve\s+hit\s+your\s+limit)") {
+        if ($diagnosticReason -eq 'QUOTA') {
             return [ordered]@{ safeReason = 'QUOTA'; category = 'subscription-quota'; code = 'DF-PROVIDER-QUOTA'; targetStatus = 'PAUSED_QUOTA'; retryable = $false; message = "$Provider 구독 사용 한도에 도달했습니다. API 과금 방식으로 자동 전환하지 않습니다."; exitCode = $exitCode; process = $processMetadata }
         }
-        if ($diagnosticText -match '(?i)(rate\s+limit|too\s+many\s+requests|temporarily\s+throttled)') {
+        if ($diagnosticReason -eq 'RATE_LIMIT') {
             return [ordered]@{ safeReason = 'RATE_LIMIT'; category = 'rate-limit'; code = 'DF-PROVIDER-RATE-LIMIT'; targetStatus = 'RESUMABLE_ERROR'; retryable = $true; message = "$Provider 요청 속도 제한이 감지되었습니다."; exitCode = $exitCode; process = $processMetadata }
         }
-        if ($diagnosticText -match '(?i)(network\s+(?:error|unavailable)|connection\s+(?:failed|refused|reset|timed\s*out)|name\s+resolution|dns\s+(?:error|failure)|service\s+unavailable|gateway\s+timeout|tls\s+(?:error|failure)|certificate\s+(?:error|failure))') {
+        if ($diagnosticReason -eq 'NETWORK') {
             return [ordered]@{ safeReason = 'NETWORK'; category = 'network'; code = 'DF-PROVIDER-NETWORK'; targetStatus = 'RESUMABLE_ERROR'; retryable = $true; message = "$Provider 네트워크 또는 서비스 연결에 실패했습니다."; exitCode = $exitCode; process = $processMetadata }
         }
-        return [ordered]@{ safeReason = 'UNKNOWN'; category = 'provider-process'; code = 'DF-PROVIDER-PROCESS'; targetStatus = 'RESUMABLE_ERROR'; retryable = $false; message = "$Provider CLI가 정상 완료되지 않았습니다. 종료 코드: $exitCode"; exitCode = $exitCode; process = $processMetadata }
+        $unknownCategory = if ($diagnosticReason -eq 'UNKNOWN') { 'provider-process' } else { 'provider-process-' + $diagnosticReason.ToLowerInvariant().Replace('_', '-') }
+        return [ordered]@{ safeReason = $diagnosticReason; category = $unknownCategory; code = 'DF-PROVIDER-PROCESS'; targetStatus = 'RESUMABLE_ERROR'; retryable = $false; message = "$Provider CLI가 정상 완료되지 않았습니다. 종료 코드: $exitCode"; exitCode = $exitCode; process = $processMetadata }
     }
     finally {
-        $diagnosticText = ''
+        $diagnosticReason = ''
         if ($ProcessResult -is [System.Collections.IDictionary]) {
             $ProcessResult['stdout'] = ''
             $ProcessResult['stderr'] = ''

@@ -454,6 +454,28 @@ function New-DuoForgeThinStagePromptInternal {
     $inventory = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $RunDirectory 'inputs\inventory.json'))
     $documents = @(Get-DuoForgePromptDocuments -RunDirectory $RunDirectory -Inventory $inventory)
     $priorArtifacts = @(Get-DuoForgePriorStageArtifacts -RunDirectory $RunDirectory -Graph $Graph -CurrentStep $Step)
+    $userDecisionRecords = @(Read-DuoForgeJsonLines -Path (Join-Path $RunDirectory 'decisions\user-answers.jsonl') -AllowMissing)
+    $userDecisions = @(Get-DuoForgeEffectiveUserDecisionsInternal -Records $userDecisionRecords | ForEach-Object {
+        $action = [string](Get-DuoForgeObjectValue -Object $_ -Name 'action' -Default '')
+        if ($action -eq 'ANSWER') {
+            [ordered]@{
+                kind = 'answer'
+                issueId = [string](Get-DuoForgeObjectValue -Object $_ -Name 'issueId' -Default '')
+                issueFingerprint = [string](Get-DuoForgeObjectValue -Object $_ -Name 'issueFingerprint' -Default '')
+                claim = [string](Get-DuoForgeObjectValue -Object $_ -Name 'claim' -Default '')
+                proposal = [string](Get-DuoForgeObjectValue -Object $_ -Name 'proposal' -Default '')
+                selectedOption = [string](Get-DuoForgeObjectValue -Object $_ -Name 'selectedOption' -Default '')
+            }
+        }
+        elseif ($action -eq 'CONSTRAINT') {
+            [ordered]@{
+                kind = 'constraint'
+                issueId = [string](Get-DuoForgeObjectValue -Object $_ -Name 'issueId' -Default '')
+                affectedTarget = [string](Get-DuoForgeObjectValue -Object $_ -Name 'affectedTarget' -Default '')
+                constraint = [string](Get-DuoForgeObjectValue -Object $_ -Name 'normalizedConstraint' -Default '')
+            }
+        }
+    } | Where-Object { $null -ne $_ })
     $priorOutputs = @($priorArtifacts | ForEach-Object {
         $result = Get-DuoForgeObjectValue -Object $_ -Name 'result' -Default ([ordered]@{})
         [ordered]@{
@@ -480,9 +502,11 @@ function New-DuoForgeThinStagePromptInternal {
         "primary.documents에 완성 문서 $outputCount 개를 순서대로 반환하세요."
     }
     $payload = [ordered]@{
+        decisionProjectionVersion = 'user-decisions-v1'
         task = Get-DuoForgeStageInstruction -Stage ([string]$Step.stage)
         inputs = @($documents | ForEach-Object { [ordered]@{ role = [string]$_.role; content = [string]$_.content } })
         priorOutputs = @($priorOutputs)
+        userDecisions = @($userDecisions)
     }
     $payloadJson = $payload | ConvertTo-Json -Depth 100 -Compress
     $prompt = @"
@@ -496,6 +520,7 @@ function New-DuoForgeThinStagePromptInternal {
 - 부가 정보는 metadata.summary, metadata.findings, metadata.openQuestions에만 넣으세요.
 - stage, provider, performedBy, 문서 ID, 쟁점 ID는 앱이 로컬에서 붙이므로 반환하지 마세요.
 - 부가 정보가 확실하지 않아도 primary의 유용한 문서나 승인 결과는 반드시 보존하세요.
+- userDecisions는 사용자가 확정한 구속력 있는 결정입니다. 문서와 검증에 반영하고 같은 결정을 다시 질문하지 마세요.
 
 <DUOFORGE_UNTRUSTED_DATA_JSON>
 $payloadJson

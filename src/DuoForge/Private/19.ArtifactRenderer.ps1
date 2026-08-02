@@ -667,7 +667,12 @@ function Render-DuoForgeThinFinalArtifactsInternal {
     }
 
     $issueStageResults = if ([string]$selected[0].stage -eq 'final-revision') { @($StageResults | Where-Object { [string]$_.stage -ne 'final-validation' }) } else { @($StageResults) }
-    $merged = Merge-DuoForgeStageIssues -StageResults $issueStageResults -WorkflowVersion workflow-v3
+    $userDecisionRecords = @(Read-DuoForgeJsonLines -Path (Join-Path $RunDirectory 'decisions\user-answers.jsonl') -AllowMissing)
+    $existingLedgerPath = Join-Path $RunDirectory 'issues.json'
+    $existingLedger = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $existingLedgerPath)
+    $decisionIssueIds = @($userDecisionRecords | Where-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'action' -Default '') -eq 'ANSWER' } | ForEach-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'issueId' -Default '') })
+    $preservedIssues = @($existingLedger.issues | Where-Object { [string]$_.issueId -in $decisionIssueIds })
+    $merged = Merge-DuoForgeStageIssues -StageResults $issueStageResults -UserDecisionRecords $userDecisionRecords -PreservedIssues $preservedIssues -WorkflowVersion workflow-v3
     $ledger = [ordered]@{ schemaVersion = 2; workflowVersion = 'workflow-v3'; issueSchemaVersion = 2; issues = @($merged.issues) }
     $null = Assert-DuoForgeIssueLedgerV2Internal -Issues @($merged.issues)
     Write-DuoForgeJsonAtomic -Path (Join-Path $RunDirectory 'issues.json') -Value $ledger

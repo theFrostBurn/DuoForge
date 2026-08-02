@@ -1457,9 +1457,8 @@ Test-Case '통합 복구 - 프로젝트 오류도 메뉴와 정확한 RECOVER �
     Assert-Equal $cliCalls.project 1
     Assert-Equal $cliCalls.schema 0
     Assert-Equal @($cliOutput | Where-Object { $_ -is [System.Collections.IDictionary] -and $_.Contains('action') }).Count 0
-    $cliResult = @($cliOutput | Where-Object { $_ -is [System.Collections.IDictionary] -and $_.Contains('recoveryKind') })[-1]
-    Assert-Equal $cliResult.recoveryKind 'project-contract'
-    Assert-Equal $cliResult.providerCalls 0
+    Assert-Equal @($cliOutput | Where-Object { $_ -is [System.Collections.IDictionary] }).Count 0
+    Assert-NotContainsText ($cliOutput | Out-String) 'project-contract'
 
     Assert-ThrowsCode {
         & $module {

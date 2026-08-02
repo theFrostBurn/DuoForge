@@ -370,7 +370,7 @@ source: key | line | dialog
 
 1. Codex doctor·모델 카탈로그·단계 실행은 동일한 `node.exe`와 `codex.js`, 인증 home과 정제된 자식 환경을 사용한다. 표시용 명령 이름이 같아도 실제 실행 파일이 다른 경로는 허용하지 않는다.
 2. 모델 카탈로그 가시성은 실제 호출 가능성의 증거가 아니며 doctor의 라이브 호출 가능성은 새 승인 실행이 성공하기 전까지 `UNVERIFIED`로 표시한다.
-3. 종료 코드가 0이 아닌 공급자 프로세스는 stderr만 메모리에서 고정 안전 사유로 분류하고 원문을 즉시 버린다. stdout은 오류 분류에 사용하지 않으며 두 원시 버퍼 모두 예외·로그·진단·상태에 전달하지 않는다.
+3. 종료 코드가 0이 아닌 공급자 프로세스는 stderr를 메모리에서 고정 안전 사유로 분류하고 원문을 즉시 버린다. stderr가 알려진 사유를 주지 못한 Codex 실패에만 stdout JSONL의 공식 fatal `error.message`와 `turn.failed.error.message`를 같은 고정 사유로 즉시 축약한다. `item.*`, 비공식 이벤트와 비JSON 내용은 무시하고 두 원시 버퍼 모두 반환 전에 비워 예외·로그·진단·상태에 전달하지 않는다.
 4. `MODEL_UNAVAILABLE`, `AUTH`, `INVALID_OPTION`, `SCHEMA_REJECTED`, `NETWORK`, `REASONING_UNAVAILABLE`, `MODEL_CONFIGURATION_UNAVAILABLE`과 기존 quota·rate limit·timeout·unknown을 합성 fixture로 검증한다.
 5. 저비용 LIVE 실행기는 관리자 호스트를 실패 폐쇄하고 일반 비관리자 PowerShell 7만 허용한다. 관리자 CUA 환경과 일반 호스트 검증을 같은 근거로 합치지 않는다.
 
@@ -629,14 +629,26 @@ source: key | line | dialog
 5. 프로젝트 계약 결함은 사용자 재시도 예산을 소비하지 않는다. workflow-v1/v2
    명령과 저장 실행은 호환 어댑터로 보존하며 v3로 묵시적으로 마이그레이션하지
    않는다.
+6. workflow-v3의 유효 사용자 결정을 통합·최종 검증·조건부 최종 수정 입력과
+   최종 쟁점 병합에 함께 적용한다. 동일 질문에 이미 유효한 답변이 있는데도
+   과거 결함으로 `QUESTION_LIMIT_REACHED`가 된 실행은 정확한 질문 계약 일치 때만
+   `RECOVER`로 0-call 준비하고, 독립 결과를 보존한 채 결정 영향 단계만 다시 연다.
+7. 최종 검증의 `approved=true`가 Critical 또는 차단 Major의 최종 수정 요구를
+   무효화하지 않게 한다. 세 번째 확인 뒤 새 차단 질문이 생긴 과거 실행은 사용자가
+   유효한 AI 권장안을 직접 선택했을 때만 `terminal-recommendation` 0-call 복구로
+   final-revision 한 번을 열고, 이 단계에는 실패 자동 재시도를 배정하지 않는다.
 
 완료 기준:
 
 - `얇은 자동 코어`, `통합 복구`, `단계 결과 계약 동등성` 집중 회귀가 통과한다.
+- 답변 뒤 integration·final-validation·조건부 final-revision만 다시 열리고,
+  승인 시 낡은 미완료 final-revision이 제거되며 동일 질문이 해결됨을 검증한다.
+- 승인과 함께 새 차단 질문이 생기면 권장안 선택 뒤 final-revision만 1회 열리고,
+  실패 시 추가 호출이 0회임을 검증한다.
 - 취소·오타·비대화형 무확인의 변경과 provider 호출은 0건이다.
 - 전체 PowerShell 7 오프라인 회귀와 `git diff --check`를 통과한다.
-- 실제 provider 호출과 `resume --live`는 별도의 신규 실행 승인 전까지 수행하지
-  않는다.
+- 실제 provider 호출과 `resume --live`는 별도의 신규 실행 승인 범위와 호출 상한
+  안에서만 수행한다.
 
 ## 모드 4 격리 게이트
 
