@@ -196,6 +196,15 @@ function Get-DuoForgeProgressRecordTargetLabelInternal {
 
     $targetLabel = Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId ([string](Get-DuoForgeObjectValue -Object $Record -Name 'targetDocumentId')) -Mode $Mode
     if (-not [string]::IsNullOrWhiteSpace($targetLabel)) { return $targetLabel }
+
+    $outputDocumentIds = @(
+        @(Get-DuoForgeObjectValue -Object $Record -Name 'outputDocumentIds' -Default @()) |
+            ForEach-Object { [string]$_ } |
+            Where-Object { $_ -in @('A', 'B', 'merged') } |
+            Select-Object -Unique
+    )
+    if ($outputDocumentIds.Count -eq 1) { return Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId $outputDocumentIds[0] -Mode $Mode }
+    if ($outputDocumentIds.Count -eq 2 -and 'A' -in $outputDocumentIds -and 'B' -in $outputDocumentIds) { return '문서 A/B' }
     if ($Mode -ne 'dual-document') { return '' }
 
     $documentIds = @(
@@ -324,7 +333,7 @@ function Get-DuoForgeProgressArtifactRecordInternal {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]$Step,
-        [Parameter(Mandatory)][ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion
+        [Parameter(Mandatory)][ValidateSet('workflow-v1', 'workflow-v2', 'workflow-v3')][string]$WorkflowVersion
     )
 
     if ([string]$Step.status -ne 'COMMITTED' -or [string]::IsNullOrWhiteSpace([string]$Step.artifactPath)) { return $null }
@@ -333,9 +342,17 @@ function Get-DuoForgeProgressArtifactRecordInternal {
     try {
         if ((Get-DuoForgeSha256 -Path ([string]$Step.artifactPath)) -ne [string]$Step.artifactHash) { return $null }
         $artifact = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path ([string]$Step.artifactPath))
+        $wrapperValidation = Test-DuoForgeStoredStageArtifactWrapperInternal -Wrapper $artifact -Step $Step
+        if (-not [bool]$wrapperValidation.valid) { return $null }
         $result = Get-DuoForgeObjectValue -Object $artifact -Name 'result'
         if ($null -eq $result) { return $null }
-        $null = Test-DuoForgeStageResultInternal -Result $result -ExpectedStage ([string]$Step.stage) -ExpectedProvider ([string]$Step.provider) -WorkflowVersion $WorkflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @()) -ThrowOnError
+        if ($WorkflowVersion -eq 'workflow-v3') {
+            $validation = Test-DuoForgeThinStoredStageResultInternal -Result $result -Step $Step
+            if (-not [bool]$validation.valid) { return $null }
+        }
+        else {
+            $null = Test-DuoForgeStageResultInternal -Result $result -ExpectedStage ([string]$Step.stage) -ExpectedProvider ([string]$Step.provider) -WorkflowVersion $WorkflowVersion -ExpectedTargetDocumentId (Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId') -ExpectedSourceDocumentIds @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @()) -ThrowOnError
+        }
     }
     catch { return $null }
 
@@ -361,6 +378,7 @@ function Get-DuoForgeProgressArtifactRecordInternal {
         stage = [string]$Step.stage
         targetDocumentId = [string](Get-DuoForgeObjectValue -Object $Step -Name 'targetDocumentId')
         sourceDocumentIds = @(Get-DuoForgeObjectValue -Object $Step -Name 'sourceDocumentIds' -Default @())
+        outputDocumentIds = @(Get-DuoForgeObjectValue -Object $Step -Name 'outputDocumentIds' -Default @())
         label = Get-DuoForgeProgressStageLabelInternal -Stage ([string]$Step.stage)
         summary = if ([string]$Step.stage -eq 'context-batch-analysis') { '나눈 문서의 분석 결과를 안전하게 확인하고 저장했습니다.' } else { ConvertTo-DuoForgeProgressTextInternal -Text ([string](Get-DuoForgeObjectValue -Object $result -Name 'summary')) -MaximumCharacters 4000 }
         issueCounts = $issueCounts
@@ -567,7 +585,7 @@ function Get-DuoForgeProgressCurrentLineInternal {
     if ($active.Count -gt 0) {
         $providerLabel = if ([string]$active[0].provider -eq 'codex') { 'Codex' } else { 'Claude' }
         $stageLabel = Get-DuoForgeProgressStageLabelInternal -Stage ([string]$active[0].stage)
-        $targetLabel = Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId ([string](Get-DuoForgeObjectValue -Object $active[0] -Name 'targetDocumentId')) -Mode ([string]$Snapshot.mode)
+        $targetLabel = Get-DuoForgeProgressRecordTargetLabelInternal -Record $active[0] -Mode ([string]$Snapshot.mode)
         $elapsed = if ($null -ne $ViewState -and $ViewState.Contains('providerElapsedSeconds')) { [Math]::Max(0, [int]$ViewState.providerElapsedSeconds) } else { 0 }
         $heartbeatFrameIndex = if ($null -ne $ViewState -and $ViewState.Contains('providerHeartbeatFrameIndex')) { [Math]::Max(0, [int]$ViewState.providerHeartbeatFrameIndex) } else { $elapsed * 2 }
         $asciiSpinner = $null -ne $ViewState -and -not [bool](Get-DuoForgeObjectValue -Object $ViewState -Name 'unicodeSpinner' -Default $true)
@@ -586,7 +604,8 @@ function Get-DuoForgeProgressCurrentLineInternal {
         $data = $Snapshot.lastEvent.data
         $provider = if ([string]$data.provider -eq 'codex') { 'Codex' } else { 'Claude' }
         $parts = @($provider, (Get-DuoForgeProgressStageLabelInternal -Stage ([string]$data.stage)))
-        $target = Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId ([string](Get-DuoForgeObjectValue -Object $data -Name 'targetDocumentId')) -Mode ([string]$Snapshot.mode)
+        $eventStep = @($Snapshot.steps | Where-Object { [string]$_.stepKey -eq [string](Get-DuoForgeObjectValue -Object $data -Name 'stepKey') } | Select-Object -First 1)
+        $target = if ($eventStep.Count -gt 0) { Get-DuoForgeProgressRecordTargetLabelInternal -Record $eventStep[0] -Mode ([string]$Snapshot.mode) } else { Get-DuoForgeProgressRecordTargetLabelInternal -Record $data -Mode ([string]$Snapshot.mode) }
         if (-not [string]::IsNullOrWhiteSpace($target)) { $parts += $target }
         $parts += Get-DuoForgeProgressRetryLabelInternal -RetryMode ([string](Get-DuoForgeObjectValue -Object $data -Name 'retryMode'))
         return '지금 작업 중  ↻ ' + ($parts -join ' · ')
@@ -595,7 +614,8 @@ function Get-DuoForgeProgressCurrentLineInternal {
         $data = $Snapshot.lastEvent.data
         $provider = if ([string]$data.provider -eq 'codex') { 'Codex' } else { 'Claude' }
         $parts = @($provider, (Get-DuoForgeProgressStageLabelInternal -Stage ([string]$data.stage)))
-        $target = Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId ([string](Get-DuoForgeObjectValue -Object $data -Name 'targetDocumentId')) -Mode ([string]$Snapshot.mode)
+        $eventStep = @($Snapshot.steps | Where-Object { [string]$_.stepKey -eq [string](Get-DuoForgeObjectValue -Object $data -Name 'stepKey') } | Select-Object -First 1)
+        $target = if ($eventStep.Count -gt 0) { Get-DuoForgeProgressRecordTargetLabelInternal -Record $eventStep[0] -Mode ([string]$Snapshot.mode) } else { Get-DuoForgeProgressRecordTargetLabelInternal -Record $data -Mode ([string]$Snapshot.mode) }
         if (-not [string]::IsNullOrWhiteSpace($target)) { $parts += $target }
         $parts += [string]$Snapshot.statusLabel
         $code = [string](Get-DuoForgeObjectValue -Object $data -Name 'code')
@@ -1043,6 +1063,36 @@ function ConvertTo-DuoForgeProgressColoredLineInternal {
     return $Line
 }
 
+function Invoke-DuoForgeProgressFrameFailoverInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][System.Collections.IDictionary]$View)
+
+    if ([bool](Get-DuoForgeObjectValue -Object $View -Name 'enteredAlternateScreen' -Default $false)) {
+        $escape = [char]27
+        try { [Console]::Write("$escape[0m$escape[?25h$escape[?1049l") } catch { }
+        $View.enteredAlternateScreen = $false
+    }
+    $View.mode = 'log'
+    $View.capabilityReason = 'frame-failure'
+    if ([bool](Get-DuoForgeObjectValue -Object $View -Name 'observerFailureReported' -Default $false)) { return }
+
+    $View.observerFailureCount = [int](Get-DuoForgeObjectValue -Object $View -Name 'observerFailureCount' -Default 0) + 1
+    $View.observerFailureCode = 'DF-PROGRESS-FRAME'
+    $View.observerFailureReported = $true
+    try { Write-Host '진행 화면을 유지할 수 없어 줄 단위 작업 기록으로 전환합니다.' -ForegroundColor Yellow } catch { }
+
+    $runDirectory = [string](Get-DuoForgeObjectValue -Object $View -Name 'runDirectory' -Default '')
+    $statePath = if ([string]::IsNullOrWhiteSpace($runDirectory)) { '' } else { Join-Path $runDirectory 'state.json' }
+    if (-not [string]::IsNullOrWhiteSpace($statePath) -and (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+        $status = 'RUNNING'
+        try { $status = [string](Get-DuoForgeObjectValue -Object (Read-DuoForgeJson -Path $statePath) -Name 'status' -Default 'RUNNING') } catch { }
+        Add-DuoForgeProgressRunEventInternal -RunDirectory $runDirectory -Type 'PROGRESS_OBSERVER_FAILED' -Status $status -Data ([ordered]@{
+            code = 'DF-PROGRESS-FRAME'
+            count = [int]$View.observerFailureCount
+        })
+    }
+}
+
 function Write-DuoForgeProgressFrameInternal {
     [CmdletBinding()]
     param([Parameter(Mandatory)][System.Collections.IDictionary]$View)
@@ -1068,14 +1118,8 @@ function Write-DuoForgeProgressFrameInternal {
         [Console]::Write($builder.ToString())
     }
     catch {
-        if ([bool]$View.enteredAlternateScreen) {
-            $escape = [char]27
-            try { [Console]::Write("$escape[0m$escape[?25h$escape[?1049l") } catch { }
-            $View.enteredAlternateScreen = $false
-        }
-        $View.mode = 'log'
-        Write-Host '진행 화면을 유지할 수 없어 줄 단위 작업 기록으로 전환합니다.' -ForegroundColor Yellow
-        Write-DuoForgeProgressLogEventInternal -View $View -Event $View.lastEvent
+        Invoke-DuoForgeProgressFrameFailoverInternal -View $View
+        try { Write-DuoForgeProgressLogEventInternal -View $View -Event $View.lastEvent } catch { Write-Verbose 'DuoForge 누적 진행 기록 전환 오류를 무시했습니다.' }
     }
 }
 
@@ -1100,7 +1144,7 @@ function Write-DuoForgeProgressLogEventInternal {
     $step = @($snapshot.steps | Where-Object { [string]$_.stepKey -eq $stepKey } | Select-Object -First 1)
     $label = if ($step.Count -gt 0) {
         $stepParts = @("R$([int]$step[0].round)", [string]$step[0].provider, (Get-DuoForgeProgressStageLabelInternal -Stage ([string]$step[0].stage)))
-        $stepTarget = Get-DuoForgeProgressTargetLabelInternal -TargetDocumentId ([string](Get-DuoForgeObjectValue -Object $step[0] -Name 'targetDocumentId')) -Mode ([string]$snapshot.mode)
+        $stepTarget = Get-DuoForgeProgressRecordTargetLabelInternal -Record $step[0] -Mode ([string]$snapshot.mode)
         if (-not [string]::IsNullOrWhiteSpace($stepTarget)) { $stepParts += $stepTarget }
         $stepParts -join ' '
     }
@@ -1352,6 +1396,7 @@ function New-DuoForgeProgressViewInternal {
     $convertToHashtableCommand = Get-Command -Name 'ConvertTo-DuoForgeHashtable' -CommandType Function -ErrorAction Stop
     $getObjectValueCommand = Get-Command -Name 'Get-DuoForgeObjectValue' -CommandType Function -ErrorAction Stop
     $controlInputCommand = Get-Command -Name 'Invoke-DuoForgeProgressControlInputInternal' -CommandType Function -ErrorAction Stop
+    $frameFailoverCommand = Get-Command -Name 'Invoke-DuoForgeProgressFrameFailoverInternal' -CommandType Function -ErrorAction Stop
     $writeFrameCommand = if ($null -ne $FrameWriter) { $FrameWriter } else { Get-Command -Name 'Write-DuoForgeProgressFrameInternal' -CommandType Function -ErrorAction Stop }
     $writeLogCommand = Get-Command -Name 'Write-DuoForgeProgressLogEventInternal' -CommandType Function -ErrorAction Stop
     $observer = {
@@ -1369,13 +1414,8 @@ function New-DuoForgeProgressViewInternal {
         if ([string]$view.mode -eq 'fullscreen') {
             try { & $writeFrameCommand $view }
             catch {
-                $view.observerFailureCount = [int]$view.observerFailureCount + 1
-                $view.observerFailureCode = 'DF-PROGRESS-FRAME'
-                $view.mode = 'log'
-                if (-not [bool]$view.observerFailureReported) {
-                    $view.observerFailureReported = $true
-                    & $writeLogCommand -View $view -Event ([ordered]@{ type = 'PROGRESS_OBSERVER_FAILED'; data = [ordered]@{ code = 'DF-PROGRESS-FRAME'; count = 1 } })
-                }
+                & $frameFailoverCommand -View $view
+                try { & $writeLogCommand -View $view -Event $view.lastEvent } catch { Write-Verbose 'DuoForge 누적 진행 기록 전환 오류를 무시했습니다.' }
             }
         }
         else { & $writeLogCommand -View $view -Event $view.lastEvent }
@@ -1389,7 +1429,7 @@ function New-DuoForgeProgressViewInternal {
             $view.enteredAlternateScreen = $true
         }
         catch {
-            $view.mode = 'log'
+            Invoke-DuoForgeProgressFrameFailoverInternal -View $view
         }
     }
     Invoke-DuoForgeProgressObserverInternal -Observer $view.observer -Type 'PROGRESS_INITIALIZED' -RunDirectory $RunDirectory

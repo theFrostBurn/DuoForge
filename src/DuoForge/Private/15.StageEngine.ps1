@@ -377,10 +377,9 @@ function Repair-DuoForgeCorruptedStageArtifactsInternal {
         else {
             try {
                 $wrapper = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $path)
+                $null = Test-DuoForgeStoredStageArtifactWrapperInternal -Wrapper $wrapper -Step $step -ThrowOnError
                 if ($workflowVersion -eq 'workflow-v3') {
-                    if ([int](Get-DuoForgeObjectValue -Object $wrapper.result -Name 'schemaVersion' -Default 0) -ne 3 -or [string]$wrapper.result.stage -ne [string]$step.stage -or [string]$wrapper.result.provider -ne [string]$step.provider) {
-                        throw (New-DuoForgeException -Code 'DF-STAGE-SCHEMA' -Message '저장된 얇은 단계 결과 계약이 일치하지 않습니다.')
-                    }
+                    $null = Test-DuoForgeThinStoredStageResultInternal -Result $wrapper.result -Step $step -ThrowOnError
                 }
                 else {
                     $issueTargets = if ($workflowVersion -eq 'workflow-v2') { Get-DuoForgeIssueTargetMapsInternal -RunDirectory $RunDirectory -Graph $Graph -ExcludeStepKey ([string]$step.stepKey) } else { $null }

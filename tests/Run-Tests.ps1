@@ -3185,6 +3185,138 @@ try {
         Assert-True ($tampered.latestStepKey -ne $tampered.finalStepKey)
     }
 
+    Test-Case 'workflow-v3 진행판은 첫 프레임과 검증된 완료 산출물을 실제 실행 스냅샷으로 렌더링한다' {
+        $caseRoot = Join-Path $tempRoot 'progress-frame-workflow-v3'
+        $workspace = Join-Path $caseRoot 'results'
+        $input = New-MarkdownFile -Path (Join-Path $caseRoot 'input\brief.md') -Text '# 진행판 v3 회귀 입력'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd -MaxRounds 1 -WorkflowVersion workflow-v3
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+
+        $initial = & $module {
+            param($directory)
+            $null = Initialize-DuoForgeStageGraph -RunDirectory $directory
+            $snapshot = Get-DuoForgeProgressSnapshotInternal -RunDirectory $directory
+            [ordered]@{
+                snapshot = $snapshot
+                frame = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 100 -Height 30)
+            }
+        } $run.runDirectory
+        Assert-Equal $initial.snapshot.totalSteps 4
+        Assert-Equal $initial.snapshot.committedSteps 0
+        Assert-ContainsText ($initial.frame -join "`n") 'AI 작업 0/4 저장 완료'
+
+        $completed = & $module {
+            param($directory)
+            $invoker = {
+                param($step)
+                if ([string]$step.stage -eq 'final-validation') {
+                    return [ordered]@{ primary = [ordered]@{ approved = $true }; metadata = [ordered]@{ summary = 'v3 최종 승인' } }
+                }
+                return [ordered]@{
+                    primary = [ordered]@{ documents = @($step.outputDocumentIds | ForEach-Object { '# v3 진행판 산출물' }) }
+                    metadata = [ordered]@{ summary = $(if ([string]$step.stage -eq 'integration') { 'v3 통합 완료' } else { 'v3 개별 결과 완료' }) }
+                }
+            }
+            $result = Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $invoker
+            $snapshot = Get-DuoForgeProgressSnapshotInternal -RunDirectory $directory
+            $finalStep = @($snapshot.steps | Where-Object { [string]$_.stage -eq 'final-validation' } | Select-Object -First 1)[0]
+            $logText = (& {
+                Write-DuoForgeProgressLogEventInternal -View ([ordered]@{ runDirectory = $directory }) -Event ([ordered]@{
+                    type = 'STAGE_COMMITTED'
+                    data = [ordered]@{ stepKey = [string]$finalStep.stepKey }
+                })
+            } 6>&1 | Out-String)
+            [ordered]@{
+                result = $result
+                snapshot = $snapshot
+                frame = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 100 -Height 30)
+                logText = $logText
+            }
+        } $run.runDirectory
+        Assert-Equal $completed.result.status 'COMPLETED'
+        Assert-Equal $completed.snapshot.committedSteps 4
+        Assert-Equal @($completed.snapshot.recentCommitted).Count 3
+        Assert-Equal $completed.snapshot.latest.summary 'v3 최종 승인'
+        Assert-ContainsText ($completed.frame -join "`n") 'AI 작업 4/4 완료'
+        Assert-ContainsText ($completed.frame -join "`n") 'v3 최종 승인'
+        Assert-ContainsText ($completed.frame -join "`n") '각자 결과 작성'
+        Assert-ContainsText ($completed.frame -join "`n") '결과 통합'
+        Assert-ContainsText ($completed.frame -join "`n") '공동 문서'
+        Assert-NotContainsText ($completed.frame -join "`n") 'independent-result'
+        Assert-NotContainsText ($completed.frame -join "`n") 'integration'
+        Assert-ContainsText $completed.logText '최종 확인 결과 저장 완료'
+        Assert-ContainsText $completed.logText 'v3 최종 승인'
+        Assert-NotContainsText $completed.logText 'final-validation'
+        $v3Labels = & $module {
+            [ordered]@{
+                independent = Get-DuoForgeDisplayStageLabelInternal -Stage 'independent-result'
+                integration = Get-DuoForgeDisplayStageLabelInternal -Stage 'integration'
+                finalRevision = Get-DuoForgeDisplayStageLabelInternal -Stage 'final-revision'
+                sharedTarget = Get-DuoForgeProgressRecordTargetLabelInternal -Record ([ordered]@{ outputDocumentIds = @('merged') }) -Mode 'shared-document'
+                mergeTarget = Get-DuoForgeProgressRecordTargetLabelInternal -Record ([ordered]@{ outputDocumentIds = @('merged') }) -Mode 'document-merge'
+                dualTarget = Get-DuoForgeProgressRecordTargetLabelInternal -Record ([ordered]@{ outputDocumentIds = @('A', 'B') }) -Mode 'dual-document'
+            }
+        }
+        Assert-Equal $v3Labels.independent '각자 결과 작성'
+        Assert-Equal $v3Labels.integration '결과 통합'
+        Assert-Equal $v3Labels.finalRevision '최종 문서 수정'
+        Assert-Equal $v3Labels.sharedTarget '공동 문서'
+        Assert-Equal $v3Labels.mergeTarget '합의 문서 C'
+        Assert-Equal $v3Labels.dualTarget '문서 A/B'
+        $sequenceContract = & $module {
+            $graph = New-DuoForgeStageGraph -Mode dual-document -MaxRounds 1 -WorkflowVersion workflow-v3
+            $step = $graph.steps[0]
+            $definition = Get-DuoForgeThinStageContractDefinitionInternal -Stage ([string]$step.stage) -OutputDocumentCount @($step.outputDocumentIds).Count
+            $stored = Complete-DuoForgeThinStageResultInternal -ProviderPayload ([ordered]@{
+                primary = [ordered]@{ documents = @('# 문서 A', '# 문서 B') }
+                metadata = [ordered]@{ summary = '계보 배열 검증' }
+            }) -Step $step -Definition $definition
+            $scalar = ConvertTo-DuoForgeHashtable -InputObject $stored
+            $scalar.sourceDocumentIds = 'A'
+            $ambiguous = ConvertTo-DuoForgeHashtable -InputObject $stored
+            $ambiguous.sourceDocumentIds = @('A B')
+            [ordered]@{
+                valid = (Test-DuoForgeThinStoredStageResultInternal -Result $stored -Step $step).valid
+                scalar = (Test-DuoForgeThinStoredStageResultInternal -Result $scalar -Step $step).valid
+                ambiguous = (Test-DuoForgeThinStoredStageResultInternal -Result $ambiguous -Step $step).valid
+            }
+        }
+        Assert-True ([bool]$sequenceContract.valid)
+        Assert-False ([bool]$sequenceContract.scalar)
+        Assert-False ([bool]$sequenceContract.ambiguous)
+
+        $invalidArtifact = & $module {
+            param($directory)
+            $graphPath = Join-Path $directory 'steps.json'
+            $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $graphPath)
+            $finalStep = @($graph.steps | Where-Object { [string]$_.stage -eq 'final-validation' } | Select-Object -First 1)[0]
+            $artifact = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path ([string]$finalStep.artifactPath))
+            $artifact.result.sourceDocumentIds = @('WRONG')
+            $artifact.result.summary = 'RAW-V3-PROGRESS-CANARY'
+            Write-DuoForgeJsonAtomic -Path ([string]$finalStep.artifactPath) -Value $artifact
+            $finalStep.artifactHash = Get-DuoForgeSha256 -Path ([string]$finalStep.artifactPath)
+            Write-DuoForgeJsonAtomic -Path $graphPath -Value $graph
+            $snapshot = Get-DuoForgeProgressSnapshotInternal -RunDirectory $directory
+            [ordered]@{
+                latestStepKey = [string]$snapshot.latest.stepKey
+                invalidStepKey = [string]$finalStep.stepKey
+                frame = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 100 -Height 30)
+            }
+        } $run.runDirectory
+        Assert-True ($invalidArtifact.latestStepKey -ne $invalidArtifact.invalidStepKey)
+        Assert-NotContainsText ($invalidArtifact.frame -join "`n") 'v3 최종 승인'
+        Assert-NotContainsText ($invalidArtifact.frame -join "`n") 'RAW-V3-PROGRESS-CANARY'
+        $repair = & $module {
+            param($directory)
+            $graph = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $directory 'steps.json'))
+            Repair-DuoForgeCorruptedStageArtifactsInternal -RunDirectory $directory -Graph $graph
+        } $run.runDirectory
+        Assert-True ([bool]$repair.repaired)
+        Assert-True ($invalidArtifact.invalidStepKey -in @($repair.invalidSteps))
+        Assert-Equal $repair.invalidReasons[$invalidArtifact.invalidStepKey] 'ARTIFACT_SCHEMA_INVALID'
+    }
+
     Test-Case '풀스크린 진행판은 실제 높이만큼 14단계 흐름과 안전한 최근 본문을 확장한다' {
         $surface = & $module {
             $graph = New-DuoForgeStageGraph -Mode dual-document -MaxRounds 2 -FirstSynthesizer alternate -ContextBatchCount 0 -ContextBatchDocumentIds @() -WorkflowVersion workflow-v2
@@ -3865,6 +3997,57 @@ try {
         Assert-True ([bool]$view.observerFailureReported)
         $safeState = '{0}|{1}|{2}' -f $view.mode, $view.observerFailureCode, $view.observerFailureCount
         Assert-NotContainsText $safeState 'RAW_PROGRESS_CANARY'
+    }
+
+    Test-Case '실제 진행판 렌더 실패는 화면 상태와 내구 이벤트를 고정 코드로 한 번만 전환한다' {
+        $caseRoot = Join-Path $tempRoot 'progress-default-writer-failure'
+        $workspace = Join-Path $caseRoot 'results'
+        $input = New-MarkdownFile -Path (Join-Path $caseRoot 'input\brief.md') -Text '# 실제 진행판 실패 회귀'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd -MaxRounds 1 -WorkflowVersion workflow-v3
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $failure = & $module {
+            param($directory)
+            $null = Initialize-DuoForgeStageGraph -RunDirectory $directory
+            $stepsPath = Join-Path $directory 'steps.json'
+            $originalSteps = [System.IO.File]::ReadAllText($stepsPath, [System.Text.UTF8Encoding]::new($false, $true))
+            $view = [ordered]@{
+                runDirectory = $directory
+                mode = 'fullscreen'
+                capabilityReason = 'ready'
+                enteredAlternateScreen = $false
+                lastEvent = [ordered]@{ type = 'PROGRESS_INITIALIZED'; data = [ordered]@{} }
+                observerFailureCount = 0
+                observerFailureCode = ''
+                observerFailureReported = $false
+            }
+            try {
+                Write-DuoForgeTextAtomic -Path $stepsPath -Text '{ RAW_PROGRESS_FRAME_CANARY'
+                $rendered = (& { Write-DuoForgeProgressFrameInternal -View $view } 6>&1 | Out-String)
+                Write-DuoForgeProgressFrameInternal -View $view
+            }
+            finally {
+                Write-DuoForgeTextAtomic -Path $stepsPath -Text $originalSteps
+            }
+            $events = @(Read-DuoForgeJsonLines -Path (Join-Path $directory 'events.jsonl'))
+            $failures = @($events | Where-Object { [string]$_.type -eq 'PROGRESS_OBSERVER_FAILED' })
+            [ordered]@{
+                view = $view
+                rendered = $rendered
+                failureEvents = @($failures)
+                allEvents = $events
+            }
+        } $run.runDirectory
+        Assert-Equal $failure.view.mode 'log'
+        Assert-Equal $failure.view.capabilityReason 'frame-failure'
+        Assert-Equal $failure.view.observerFailureCode 'DF-PROGRESS-FRAME'
+        Assert-Equal $failure.view.observerFailureCount 1
+        Assert-True ([bool]$failure.view.observerFailureReported)
+        Assert-Equal @($failure.failureEvents).Count 1
+        Assert-Equal $failure.failureEvents[0].data.code 'DF-PROGRESS-FRAME'
+        Assert-Equal $failure.failureEvents[0].data.count 1
+        Assert-NotContainsText ($failure.allEvents | ConvertTo-Json -Depth 20 -Compress) 'RAW_PROGRESS_FRAME_CANARY'
+        Assert-NotContainsText $failure.rendered 'RAW_PROGRESS_FRAME_CANARY'
     }
 
     Test-Case '같은 장벽의 양쪽 단계는 동일한 선행 산출물만 보고 순차 실행된다' {
@@ -5555,6 +5738,42 @@ try {
         Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'final\PRD.md') -PathType Leaf)
     }
 
+    Test-Case 'workflow-v3 추가 자료 역할은 세 문서 모드의 입력 계약을 보존한다' {
+        $caseRoot = Join-Path $tempRoot 'thin-core-evidence-roles'
+        $brief = New-MarkdownFile -Path (Join-Path $caseRoot 'shared\brief.md') -Text '# 공동 입력'
+        $documentA = New-MarkdownFile -Path (Join-Path $caseRoot 'documents-A\source.md') -Text '# 문서 A'
+        $documentB = New-MarkdownFile -Path (Join-Path $caseRoot 'documents-B\source.md') -Text '# 문서 B'
+        $surfaces = foreach ($mode in @('shared-document', 'document-merge', 'dual-document')) {
+            $workspace = Join-Path $caseRoot ("results-$mode")
+            $request = if ($mode -eq 'shared-document') {
+                New-TestStartRequest -Mode $mode -Brief $brief -Workspace $workspace -DocumentType prd -MaxRounds 1 -WorkflowVersion workflow-v3
+            }
+            else {
+                New-TestStartRequest -Mode $mode -DocumentA $documentA -DocumentB $documentB -Workspace $workspace -DocumentType custom -MaxRounds 1 -WorkflowVersion workflow-v3
+            }
+            $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+            Assert-True ([bool]$validation.valid) ("$mode 요청 검증 실패: " + (@($validation.errors | ForEach-Object { $_.message }) -join ', '))
+            $run = New-DuoForgeRun -ValidationResult $validation
+            & $module {
+                param($directory, $currentMode)
+                $inventory = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path (Join-Path $directory 'inputs\inventory.json'))
+                Add-DuoForgeEvidenceSnapshotRoleInternal -Inventory $inventory -WorkflowVersion workflow-v3 -SnapshotName 'E000001.md'
+                [ordered]@{
+                    mode = $currentMode
+                    shared = if ($currentMode -eq 'shared-document') { @($inventory.roles.shared.context) } else { @() }
+                    documentA = if ($currentMode -ne 'shared-document') { @($inventory.roles.documents.A.context) } else { @() }
+                    documentB = if ($currentMode -ne 'shared-document') { @($inventory.roles.documents.B.context) } else { @() }
+                }
+            } $run.runDirectory $mode
+        }
+        Assert-Equal @($surfaces).Count 3
+        Assert-True ('E000001.md' -in @($surfaces[0].shared))
+        foreach ($surface in @($surfaces | Where-Object { $_.mode -ne 'shared-document' })) {
+            Assert-True ('E000001.md' -in @($surface.documentA)) "$($surface.mode) 문서 A 역할에 추가 자료가 없습니다."
+            Assert-True ('E000001.md' -in @($surface.documentB)) "$($surface.mode) 문서 B 역할에 추가 자료가 없습니다."
+        }
+    }
+
     Test-Case '얇은 자동 코어 - 최종 검증의 중대한 지적만 반대 AI 수정 한 번을 추가한다' {
         $graph = & $module { New-DuoForgeStageGraph -Mode shared-document -MaxRounds 1 -FirstSynthesizer codex -WorkflowVersion workflow-v3 }
         $validationStep = @($graph.steps | Where-Object stage -eq 'final-validation')[0]
@@ -6173,6 +6392,38 @@ try {
         Assert-Equal $third.invoked 1
         $history = & $module { param($directory) Read-DuoForgeJsonLines -Path (Join-Path $directory 'control\pause-history.jsonl') } $run.runDirectory
         Assert-Equal @($history | Where-Object { $_.reason -eq 'pause-after-round' }).Count 2
+    }
+
+    Test-Case 'workflow-v3 pause-after-round는 통합 경계에서 한 번만 멈춘다' {
+        $caseRoot = Join-Path $tempRoot 'pause-round-workflow-v3'
+        $workspace = Join-Path $caseRoot 'results'
+        $input = New-MarkdownFile -Path (Join-Path $caseRoot 'input\brief.md') -Text '# v3 회차 경계'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd -MaxRounds 1 -WorkflowVersion workflow-v3 -PauseAfterRound $true
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $first = & $module {
+            param($directory)
+            $invoker = {
+                param($step)
+                if ([string]$step.stage -eq 'final-validation') { return [ordered]@{ primary = [ordered]@{ approved = $true }; metadata = [ordered]@{ summary = '승인' } } }
+                return [ordered]@{ primary = [ordered]@{ documents = @($step.outputDocumentIds | ForEach-Object { '# v3 회차 산출물' }) }; metadata = [ordered]@{ summary = '완료' } }
+            }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $invoker
+        } $run.runDirectory
+        Assert-Equal $first.status 'PAUSED_USER'
+        Assert-Equal $first.pausedReason 'pause-after-round'
+        Assert-Equal $first.checkpoint 'r01-codex-integration'
+        Assert-Equal $first.invoked 3
+
+        $second = & $module {
+            param($directory)
+            $invoker = { param($step) [ordered]@{ primary = [ordered]@{ approved = $true }; metadata = [ordered]@{ summary = '승인' } } }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $invoker
+        } $run.runDirectory
+        Assert-Equal $second.status 'COMPLETED' ($second | ConvertTo-Json -Depth 20 -Compress)
+        Assert-Equal $second.invoked 1
+        $history = & $module { param($directory) Read-DuoForgeJsonLines -Path (Join-Path $directory 'control\pause-history.jsonl') } $run.runDirectory
+        Assert-Equal @($history | Where-Object { $_.reason -eq 'pause-after-round' }).Count 1
     }
 
     Test-Case 'Codex 이벤트 파서는 명령 실행 이벤트를 거부한다' {

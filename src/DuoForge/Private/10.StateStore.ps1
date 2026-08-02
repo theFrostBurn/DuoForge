@@ -1060,7 +1060,7 @@ function Add-DuoForgeEvidenceSnapshotRoleInternal {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][System.Collections.IDictionary]$Inventory,
-        [Parameter(Mandatory)][ValidateSet('workflow-v1', 'workflow-v2')][string]$WorkflowVersion,
+        [Parameter(Mandatory)][ValidateSet('workflow-v1', 'workflow-v2', 'workflow-v3')][string]$WorkflowVersion,
         [Parameter(Mandatory)][string]$SnapshotName
     )
 
@@ -1076,15 +1076,15 @@ function Add-DuoForgeEvidenceSnapshotRoleInternal {
         $shared.context = @($shared.context | Where-Object { [string]$_ -ne $SnapshotName }) + @($SnapshotName)
         return
     }
-    if ($WorkflowVersion -eq 'workflow-v2') {
+    if ($WorkflowVersion -in @('workflow-v2', 'workflow-v3')) {
         $documents = Get-DuoForgeObjectValue -Object $roles -Name 'documents'
         if ($documents -isnot [System.Collections.IDictionary]) {
-            throw (New-DuoForgeException -Code 'DF-EVIDENCE-ROLE-CONTRACT' -Message 'workflow-v2 문서 A/B 역할을 찾을 수 없습니다.')
+            throw (New-DuoForgeException -Code 'DF-EVIDENCE-ROLE-CONTRACT' -Message '문서 A/B 역할을 찾을 수 없습니다.')
         }
         foreach ($documentId in @('A', 'B')) {
             $documentRole = Get-DuoForgeObjectValue -Object $documents -Name $documentId
             if ($documentRole -isnot [System.Collections.IDictionary]) {
-                throw (New-DuoForgeException -Code 'DF-EVIDENCE-ROLE-CONTRACT' -Message "workflow-v2 문서 $documentId 역할을 찾을 수 없습니다.")
+                throw (New-DuoForgeException -Code 'DF-EVIDENCE-ROLE-CONTRACT' -Message "문서 $documentId 역할을 찾을 수 없습니다.")
             }
             $documentRole.context = @($documentRole.context | Where-Object { [string]$_ -ne $SnapshotName }) + @($SnapshotName)
         }

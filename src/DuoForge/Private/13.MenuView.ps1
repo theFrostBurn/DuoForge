@@ -19,13 +19,16 @@ function Get-DuoForgeDisplayStageLabelInternal {
         'context-batch-analysis' { '나눈 문서 분석' }
         'independent-draft' { '각자 초안 작성' }
         'independent-merge-draft' { '각자 통합안 작성' }
+        'independent-result' { '각자 결과 작성' }
         'cross-review' { '서로의 초안 검토' }
         'author-response' { '검토 의견에 답변' }
         'joint-document-review' { '공동 문서 검토' }
         'document-review' { '두 문서 함께 검토' }
         'review-response' { '검토 의견 판단' }
         'synthesis' { '공동 문서 작성' }
+        'integration' { '결과 통합' }
         'final-validation' { '최종 확인' }
+        'final-revision' { '최종 문서 수정' }
         'owner-response' { '담당 문서 의견 답변' }
         'owned-document-revision' { '담당 문서 수정' }
         'document-revision' { '문서 수정' }

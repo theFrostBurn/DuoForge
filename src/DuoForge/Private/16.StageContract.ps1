@@ -574,6 +574,195 @@ function Test-DuoForgeQuestionRecommendationInternal {
     return $false
 }
 
+function Test-DuoForgeStoredStageArtifactWrapperInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Wrapper,
+        [Parameter(Mandatory)]$Step,
+        [switch]$ThrowOnError
+    )
+
+    $failures = [System.Collections.Generic.List[object]]::new()
+    $stored = if ($Wrapper -is [System.Collections.IDictionary]) { $Wrapper } else { ConvertTo-DuoForgeHashtable -InputObject $Wrapper }
+    if ($stored -isnot [System.Collections.IDictionary]) {
+        $failures.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-TYPE' -Path '$'))
+    }
+    else {
+        $expectedKeys = @('provider', 'result', 'round', 'schemaVersion', 'stage', 'stepKey')
+        if ((@($stored.Keys | ForEach-Object { [string]$_ } | Sort-Object) -join ',') -cne ($expectedKeys -join ',')) {
+            $failures.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-CONTRACT-MISMATCH' -Path '$'))
+        }
+        foreach ($field in @('stepKey', 'provider', 'stage')) {
+            if ([string](Get-DuoForgeObjectValue -Object $stored -Name $field -Default '') -cne [string](Get-DuoForgeObjectValue -Object $Step -Name $field -Default '')) {
+                $failures.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-CONTRACT-MISMATCH' -Path $field))
+            }
+        }
+        $storedSchema = Get-DuoForgeObjectValue -Object $stored -Name 'schemaVersion'
+        if (-not (Test-DuoForgeJsonIntegerInternal -Value $storedSchema) -or [int64]$storedSchema -ne 1) {
+            $failures.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-CONTRACT-MISMATCH' -Path 'schemaVersion'))
+        }
+        $storedRound = Get-DuoForgeObjectValue -Object $stored -Name 'round'
+        if (-not (Test-DuoForgeJsonIntegerInternal -Value $storedRound) -or [int64]$storedRound -ne [int64](Get-DuoForgeObjectValue -Object $Step -Name 'round' -Default 0)) {
+            $failures.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-CONTRACT-MISMATCH' -Path 'round'))
+        }
+        if ((Get-DuoForgeObjectValue -Object $stored -Name 'result') -isnot [System.Collections.IDictionary]) {
+            $failures.Add((New-DuoForgeThinValidationFailureInternal -Code 'DF-VAL-TYPE' -Path 'result'))
+        }
+    }
+
+    $validation = [ordered]@{ valid = $failures.Count -eq 0; failures = @($failures) }
+    if ($ThrowOnError -and -not [bool]$validation.valid) {
+        $exception = New-DuoForgeException -Code 'DF-STAGE-SCHEMA' -Message '저장된 단계 산출물 포장 계약이 일치하지 않습니다.'
+        $exception.Data['DuoForgeValidationFailures'] = @($failures)
+        throw $exception
+    }
+    return $validation
+}
+
+function Test-DuoForgeThinStoredStageResultInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Result,
+        [Parameter(Mandatory)]$Step,
+        [switch]$ThrowOnError
+    )
+
+    $failures = [System.Collections.Generic.List[object]]::new()
+    $stored = if ($Result -is [System.Collections.IDictionary]) { $Result } else { ConvertTo-DuoForgeHashtable -InputObject $Result }
+    $stepContract = if ($Step -is [System.Collections.IDictionary]) { $Step } else { ConvertTo-DuoForgeHashtable -InputObject $Step }
+    $addFailure = {
+        param([string]$Code, [string]$Path)
+        $failures.Add((New-DuoForgeThinValidationFailureInternal -Code $Code -Path $Path))
+    }
+
+    if ($stored -isnot [System.Collections.IDictionary]) {
+        & $addFailure 'DF-VAL-TYPE' '$'
+    }
+    else {
+        $expectedKeys = @(
+            'adoptions', 'documentOutputs', 'finalApproved', 'issueResponses', 'issues', 'metadataWarnings',
+            'openQuestions', 'performedBy', 'provider', 'round', 'schemaVersion', 'sourceDocumentIds', 'stage', 'summary'
+        ) | Sort-Object
+        if ((@($stored.Keys | ForEach-Object { [string]$_ } | Sort-Object) -join ',') -cne ($expectedKeys -join ',')) {
+            & $addFailure 'DF-VAL-CONTRACT-MISMATCH' '$'
+        }
+
+        $schemaVersion = Get-DuoForgeObjectValue -Object $stored -Name 'schemaVersion'
+        if (-not (Test-DuoForgeJsonIntegerInternal -Value $schemaVersion) -or [int64]$schemaVersion -ne 3) { & $addFailure 'DF-VAL-CONTRACT-MISMATCH' 'schemaVersion' }
+        foreach ($field in @('stage', 'provider')) {
+            if ([string](Get-DuoForgeObjectValue -Object $stored -Name $field -Default '') -cne [string](Get-DuoForgeObjectValue -Object $stepContract -Name $field -Default '')) {
+                & $addFailure 'DF-VAL-CONTRACT-MISMATCH' $field
+            }
+        }
+        $expectedPerformedBy = [string](Get-DuoForgeObjectValue -Object $stepContract -Name 'performedBy' -Default (Get-DuoForgeObjectValue -Object $stepContract -Name 'provider' -Default ''))
+        if ([string](Get-DuoForgeObjectValue -Object $stored -Name 'performedBy' -Default '') -cne $expectedPerformedBy) { & $addFailure 'DF-VAL-CONTRACT-MISMATCH' 'performedBy' }
+        $storedRound = Get-DuoForgeObjectValue -Object $stored -Name 'round'
+        if (-not (Test-DuoForgeJsonIntegerInternal -Value $storedRound) -or [int64]$storedRound -ne [int64](Get-DuoForgeObjectValue -Object $stepContract -Name 'round' -Default 0)) { & $addFailure 'DF-VAL-CONTRACT-MISMATCH' 'round' }
+        $sourceDocumentIdsValid = $stored.Contains('sourceDocumentIds') -and
+            $null -ne $stored['sourceDocumentIds'] -and $stored['sourceDocumentIds'] -isnot [string] -and $stored['sourceDocumentIds'] -is [System.Collections.IEnumerable] -and
+            $stepContract -is [System.Collections.IDictionary] -and $stepContract.Contains('sourceDocumentIds') -and
+            $null -ne $stepContract['sourceDocumentIds'] -and $stepContract['sourceDocumentIds'] -isnot [string] -and $stepContract['sourceDocumentIds'] -is [System.Collections.IEnumerable]
+        if ($sourceDocumentIdsValid) {
+            $actualSourceDocumentIds = @($stored['sourceDocumentIds'] | ForEach-Object { [string]$_ })
+            $expectedSourceDocumentIds = @($stepContract['sourceDocumentIds'] | ForEach-Object { [string]$_ })
+            $sourceDocumentIdsValid = $actualSourceDocumentIds.Count -eq $expectedSourceDocumentIds.Count
+            for ($index = 0; $sourceDocumentIdsValid -and $index -lt $actualSourceDocumentIds.Count; $index++) {
+                if ($actualSourceDocumentIds[$index] -cne $expectedSourceDocumentIds[$index]) { $sourceDocumentIdsValid = $false }
+            }
+        }
+        if (-not $sourceDocumentIdsValid) { & $addFailure 'DF-VAL-CONTRACT-MISMATCH' 'sourceDocumentIds' }
+
+        $outputIds = @()
+        if ($stepContract -is [System.Collections.IDictionary] -and $stepContract.Contains('outputDocumentIds')) {
+            $outputIds = @($stepContract['outputDocumentIds'])
+        }
+        if (-not $stored.Contains('documentOutputs') -or $null -eq $stored['documentOutputs'] -or $stored['documentOutputs'] -is [string] -or $stored['documentOutputs'] -isnot [System.Collections.IEnumerable]) {
+            & $addFailure 'DF-VAL-TYPE' 'documentOutputs'
+        }
+        else {
+            $documentOutputs = @($stored['documentOutputs'])
+            if ($documentOutputs.Count -ne $outputIds.Count) { & $addFailure 'DF-VAL-COUNT' 'documentOutputs' }
+            for ($index = 0; $index -lt $documentOutputs.Count; $index++) {
+                $document = $documentOutputs[$index]
+                $path = "documentOutputs[$index]"
+                if ($document -isnot [System.Collections.IDictionary]) { & $addFailure 'DF-VAL-TYPE' $path; continue }
+                if ((@($document.Keys | ForEach-Object { [string]$_ } | Sort-Object) -join ',') -cne 'content,documentId') { & $addFailure 'DF-VAL-CONTRACT-MISMATCH' $path }
+                if ($index -ge $outputIds.Count -or [string](Get-DuoForgeObjectValue -Object $document -Name 'documentId' -Default '') -cne [string]$outputIds[$index]) { & $addFailure 'DF-VAL-CONTRACT-MISMATCH' "$path.documentId" }
+                $content = Get-DuoForgeObjectValue -Object $document -Name 'content'
+                if ($content -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$content)) { & $addFailure 'DF-VAL-NONEMPTY' "$path.content" }
+            }
+        }
+
+        $summary = Get-DuoForgeObjectValue -Object $stored -Name 'summary'
+        if ($summary -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$summary)) { & $addFailure 'DF-VAL-NONEMPTY' 'summary' }
+        foreach ($field in @('issues', 'issueResponses', 'adoptions', 'openQuestions', 'metadataWarnings')) {
+            if (-not $stored.Contains($field) -or $null -eq $stored[$field] -or $stored[$field] -is [string] -or $stored[$field] -isnot [System.Collections.IEnumerable]) { & $addFailure 'DF-VAL-TYPE' $field }
+        }
+        if ($stored.Contains('issueResponses') -and @($stored['issueResponses']).Count -ne 0) { & $addFailure 'DF-VAL-COUNT' 'issueResponses' }
+        if ($stored.Contains('adoptions') -and @($stored['adoptions']).Count -ne 0) { & $addFailure 'DF-VAL-COUNT' 'adoptions' }
+
+        $issueKeys = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        $generation = [Math]::Max(1, [int](Get-DuoForgeObjectValue -Object $stepContract -Name 'inputGeneration' -Default 1))
+        $issuePrefix = 'LOCAL-R{0:D2}-{1}-{2}-G{3:D2}-' -f [int](Get-DuoForgeObjectValue -Object $stepContract -Name 'round' -Default 0), ([string](Get-DuoForgeObjectValue -Object $stepContract -Name 'provider' -Default '')).ToUpperInvariant(), ([string](Get-DuoForgeObjectValue -Object $stepContract -Name 'stage' -Default '')).ToUpperInvariant(), $generation
+        $allowedIssueTargets = if ($outputIds.Count -gt 0) { @($outputIds | ForEach-Object { [string]$_ }) } else { @('merged') }
+        foreach ($issue in @(Get-DuoForgeObjectValue -Object $stored -Name 'issues' -Default @())) {
+            if ($issue -isnot [System.Collections.IDictionary]) { & $addFailure 'DF-VAL-TYPE' 'issues'; continue }
+            if ((@($issue.Keys | ForEach-Object { [string]$_ } | Sort-Object) -join ',') -cne 'blockingProposal,category,claim,evidence,issueKey,proposal,requiresUser,severity,targetDocumentId') { & $addFailure 'DF-VAL-CONTRACT-MISMATCH' 'issues' }
+            $issueKey = [string](Get-DuoForgeObjectValue -Object $issue -Name 'issueKey' -Default '')
+            if ($issueKey -notmatch ('^' + [regex]::Escape($issuePrefix) + '\d{3,}$') -or -not $issueKeys.Add($issueKey)) { & $addFailure 'DF-VAL-CONTRACT-MISMATCH' 'issues.issueKey' }
+            if ([string](Get-DuoForgeObjectValue -Object $issue -Name 'severity' -Default '') -notin @('critical', 'major', 'minor')) { & $addFailure 'DF-VAL-CONTRACT-MISMATCH' 'issues.severity' }
+            foreach ($field in @('targetDocumentId', 'category', 'claim', 'proposal')) {
+                $value = Get-DuoForgeObjectValue -Object $issue -Name $field
+                if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$value)) { & $addFailure 'DF-VAL-NONEMPTY' "issues.$field" }
+            }
+            if ([string](Get-DuoForgeObjectValue -Object $issue -Name 'targetDocumentId' -Default '') -notin $allowedIssueTargets) { & $addFailure 'DF-VAL-CONTRACT-MISMATCH' 'issues.targetDocumentId' }
+            foreach ($field in @('requiresUser', 'blockingProposal')) {
+                if ((Get-DuoForgeObjectValue -Object $issue -Name $field) -isnot [bool]) { & $addFailure 'DF-VAL-TYPE' "issues.$field" }
+            }
+            if (-not $issue.Contains('evidence') -or $null -eq $issue['evidence'] -or $issue['evidence'] -is [string] -or $issue['evidence'] -isnot [System.Collections.IEnumerable] -or @($issue['evidence']).Count -ne 0) { & $addFailure 'DF-VAL-CONTRACT-MISMATCH' 'issues.evidence' }
+        }
+
+        foreach ($question in @(Get-DuoForgeObjectValue -Object $stored -Name 'openQuestions' -Default @())) {
+            if ($question -isnot [System.Collections.IDictionary]) { & $addFailure 'DF-VAL-TYPE' 'openQuestions'; continue }
+            if ((@($question.Keys | ForEach-Object { [string]$_ } | Sort-Object) -join ',') -cne 'issueKey,options,question,recommendedOption,title') { & $addFailure 'DF-VAL-CONTRACT-MISMATCH' 'openQuestions' }
+            $issueKey = [string](Get-DuoForgeObjectValue -Object $question -Name 'issueKey' -Default '')
+            $options = @(Get-DuoForgeObjectValue -Object $question -Name 'options' -Default @())
+            if (-not $issueKeys.Contains($issueKey)) { & $addFailure 'DF-VAL-CONTRACT-MISMATCH' 'openQuestions.issueKey' }
+            foreach ($field in @('title', 'question')) {
+                $value = Get-DuoForgeObjectValue -Object $question -Name $field
+                if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$value)) { & $addFailure 'DF-VAL-NONEMPTY' "openQuestions.$field" }
+            }
+            if ($options.Count -lt 2 -or $options.Count -gt 3 -or @(Get-DuoForgeQuestionOptionsForInteractionInternal -Options $options).Count -ne $options.Count) { & $addFailure 'DF-VAL-CONTRACT-MISMATCH' 'openQuestions.options' }
+            if (-not (Test-DuoForgeQuestionRecommendationInternal -RecommendedOption ([string](Get-DuoForgeObjectValue -Object $question -Name 'recommendedOption' -Default '')) -Options $options)) { & $addFailure 'DF-VAL-CONTRACT-MISMATCH' 'openQuestions.recommendedOption' }
+        }
+
+        $finalApproved = Get-DuoForgeObjectValue -Object $stored -Name 'finalApproved'
+        if ([string](Get-DuoForgeObjectValue -Object $stepContract -Name 'stage' -Default '') -eq 'final-validation') {
+            if ($finalApproved -isnot [bool]) { & $addFailure 'DF-VAL-TYPE' 'finalApproved' }
+        }
+        elseif ($null -ne $finalApproved) { & $addFailure 'DF-VAL-CONTRACT-MISMATCH' 'finalApproved' }
+
+        foreach ($warning in @(Get-DuoForgeObjectValue -Object $stored -Name 'metadataWarnings' -Default @())) {
+            if ($warning -isnot [System.Collections.IDictionary]) { & $addFailure 'DF-VAL-TYPE' 'metadataWarnings'; continue }
+            if ((@($warning.Keys | ForEach-Object { [string]$_ } | Sort-Object) -join ',') -cne 'code,count,expected,path') { & $addFailure 'DF-VAL-CONTRACT-MISMATCH' 'metadataWarnings' }
+            foreach ($field in @('code', 'path')) {
+                if ([string]::IsNullOrWhiteSpace([string](Get-DuoForgeObjectValue -Object $warning -Name $field -Default ''))) { & $addFailure 'DF-VAL-NONEMPTY' "metadataWarnings.$field" }
+            }
+            $count = Get-DuoForgeObjectValue -Object $warning -Name 'count'
+            if (-not (Test-DuoForgeJsonIntegerInternal -Value $count) -or [int64]$count -lt 1) { & $addFailure 'DF-VAL-CONTRACT-MISMATCH' 'metadataWarnings.count' }
+            if (-not $warning.Contains('expected') -or $null -eq $warning['expected'] -or $warning['expected'] -is [string] -or $warning['expected'] -isnot [System.Collections.IEnumerable]) { & $addFailure 'DF-VAL-TYPE' 'metadataWarnings.expected' }
+        }
+    }
+
+    $validation = [ordered]@{ valid = $failures.Count -eq 0; failures = @($failures) }
+    if ($ThrowOnError -and -not [bool]$validation.valid) {
+        $exception = New-DuoForgeException -Code 'DF-STAGE-SCHEMA' -Message '저장된 얇은 단계 결과 계약이 일치하지 않습니다.'
+        $exception.Data['DuoForgeValidationFailures'] = @($failures)
+        throw $exception
+    }
+    return $validation
+}
+
 function Get-DuoForgeIssueFingerprintInternal {
     [CmdletBinding()]
     param(

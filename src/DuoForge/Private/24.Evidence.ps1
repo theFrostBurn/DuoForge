@@ -82,7 +82,7 @@ function Add-DuoForgeIssueEvidenceInternal {
             Write-DuoForgeJsonAtomic -Path $inventoryPath -Value $inventory
 
             $manifest.inputSnapshotHashes = @($manifest.inputSnapshotHashes) + @($snapshotHash)
-            if ($workflowVersion -eq 'workflow-v2' -and [int]$manifest.schemaVersion -ge 4) {
+            if ($workflowVersion -in @('workflow-v2', 'workflow-v3') -and [int]$manifest.schemaVersion -ge 4) {
                 $manifest.roles = ConvertTo-DuoForgeHashtable -InputObject $inventory.roles
             }
             $manifest.updatedAt = Get-DuoForgeUtcNow
