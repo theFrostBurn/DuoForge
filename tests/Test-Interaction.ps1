@@ -1140,6 +1140,99 @@ Test-Case '홈 메뉴는 모든 작업 목록의 건수를 표시한다' {
     Assert-Equal @($homeCapture.items | Where-Object { [string]$_.label -eq '포기한 작업 관리 (1)' -and [string]$_.value -eq '5' }).Count 1
 }
 
+Test-Case '완료 결과 목록은 완료 상태별 분류와 빈 분류를 분리해 표시한다' {
+    $runs = @(
+        [ordered]@{ runId = 'completed-new'; name = '최근 완료 작업'; mode = 'shared-document'; status = 'COMPLETED'; updatedAt = '2026-08-04T03:00:00+00:00'; runDirectory = '' }
+        [ordered]@{ runId = 'question-limit'; name = '확인 종료 작업'; mode = 'dual-document'; status = 'QUESTION_LIMIT_REACHED'; updatedAt = '2026-08-04T02:00:00+00:00'; runDirectory = '' }
+        [ordered]@{ runId = 'completed-old'; name = '이전 완료 작업'; mode = 'document-merge'; status = 'COMPLETED'; updatedAt = '2026-08-04T01:00:00+00:00'; runDirectory = '' }
+    )
+    $capture = [ordered]@{ items = @() }
+    $menuInvoker = {
+        param($items, $title, $initialSelectedIndex, $returnTarget)
+        $capture.items = @($items)
+        return [ordered]@{ action = 'submit'; value = '2'; source = 'key'; returnTarget = $returnTarget }
+    }.GetNewClosure()
+
+    $selected = & $module {
+        param($runValues, $menu)
+        Select-DuoForgeInteractiveRun -Runs $runValues -Prompt '완료된 결과를 선택해 주세요.' -MenuInvoker $menu -GroupCompletionResults
+    } $runs $menuInvoker
+    $normalized = & $module { param($items) @(ConvertTo-DuoForgeMenuItemsInternal -Items $items) } $capture.items
+    $frames = & $module {
+        param($items)
+        $result = [ordered]@{}
+        foreach ($viewport in @(@(72, 20), @(80, 24), @(100, 30), @(120, 32))) {
+            $key = '{0}x{1}' -f $viewport[0], $viewport[1]
+            $result[$key] = @(New-DuoForgeMenuFrameInternal -Items $items -Title '완료된 결과를 선택해 주세요.' -SelectedIndex 0 -Width $viewport[0] -Height $viewport[1])
+        }
+        return $result
+    } $normalized
+
+    Assert-Equal $selected.runId 'question-limit' '분류 뒤 숫자 선택이 원래 실행 항목과 다르게 연결되었습니다.'
+    Assert-Equal @($capture.items).Count 4 '분류 헤더가 별도 선택 항목으로 추가되었습니다.'
+    Assert-Equal (@($capture.items[0].sectionLabelsBefore) -join '|') '완료 (2)'
+    Assert-Equal (@($capture.items[2].sectionLabelsBefore) -join '|') '일부 완료 (0)|확인 한도 도달 · 미완료 (1)'
+    Assert-Equal (@($capture.items | Select-Object -First 3 | ForEach-Object { @($_.shortcuts)[0] }) -join ',') '1,2,3'
+    foreach ($viewport in @(@(72, 20), @(80, 24), @(100, 30), @(120, 32))) {
+        $key = '{0}x{1}' -f $viewport[0], $viewport[1]
+        $frameText = @($frames[$key]) -join "`n"
+        Assert-ContainsText $frameText '── 완료 (2)'
+        Assert-ContainsText $frameText '── 일부 완료 (0)'
+        Assert-ContainsText $frameText '── 확인 한도 도달 · 미완료 (1)'
+        $maximumWidth = (@($frames[$key] | ForEach-Object { & $module { param($line) Get-DuoForgeProgressTextWidthInternal -Text ([string]$line) } $_ }) | Measure-Object -Maximum).Maximum
+        Assert-True ($maximumWidth -lt [int]$viewport[0]) "$key 완료 분류 목록이 화면 폭을 넘었습니다: $maximumWidth"
+    }
+
+    $keySequence = New-DuoForgeInteractionTestKeyReader -Keys @(
+        [ConsoleKeyInfo]::new([char]0, [ConsoleKey]::DownArrow, $false, $false, $false)
+        [ConsoleKeyInfo]::new([char]13, [ConsoleKey]::Enter, $false, $false, $false)
+    )
+    $cursorResult = & $module {
+        param($items, $keyReader)
+        Read-DuoForgeMenuInteractionInternal -Items $items -Title '완료된 결과를 선택해 주세요.' -ReturnTarget home -KeyReader $keyReader -FrameWriter { param($lines) } -CapabilityProbe { $true }
+    } $capture.items $keySequence.reader
+    Assert-Equal $cursorResult.value '1' '분류 헤더가 아래쪽 커서 이동의 선택 순서를 바꿨습니다.'
+
+    $completedOnlyCapture = [ordered]@{ items = @() }
+    $completedOnlyMenu = {
+        param($items, $title, $initialSelectedIndex, $returnTarget)
+        $completedOnlyCapture.items = @($items)
+        return [ordered]@{ action = 'back'; source = 'key'; returnTarget = $returnTarget }
+    }.GetNewClosure()
+    $null = & $module {
+        param($runValue, $menu)
+        Select-DuoForgeInteractiveRun -Runs @($runValue) -Prompt '완료된 결과를 선택해 주세요.' -MenuInvoker $menu -GroupCompletionResults
+    } $runs[0] $completedOnlyMenu
+    Assert-Equal (@($completedOnlyCapture.items[-1].sectionLabelsBefore) -join '|') '일부 완료 (0)|확인 한도 도달 · 미완료 (0)'
+    $completedOnlyFrame = & $module {
+        param($items)
+        $normalizedItems = @(ConvertTo-DuoForgeMenuItemsInternal -Items $items)
+        @(New-DuoForgeMenuFrameInternal -Items $normalizedItems -Title '완료된 결과를 선택해 주세요.' -SelectedIndex 0 -Width 80 -Height 24)
+    } $completedOnlyCapture.items
+    Assert-ContainsText ($completedOnlyFrame -join "`n") '── 확인 한도 도달 · 미완료 (0)'
+
+    $homeCapture = [ordered]@{ calls = 0; resultItems = @() }
+    $homeMenu = {
+        param($items, $title, $initialSelectedIndex, $returnTarget)
+        $homeCapture.calls++
+        if ($title -eq 'DuoForge') {
+            $value = if ($homeCapture.calls -eq 1) { '3' } else { 'exit' }
+            return [ordered]@{ action = 'submit'; value = $value; source = 'key'; returnTarget = $returnTarget }
+        }
+        if ($title -ne '완료된 결과를 선택해 주세요.') { throw "예상하지 않은 완료 결과 메뉴입니다: $title" }
+        $homeCapture.resultItems = @($items)
+        return [ordered]@{ action = 'back'; source = 'key'; returnTarget = $returnTarget }
+    }.GetNewClosure()
+    $null = & $module {
+        param($runValues, $menu)
+        $runsInvoker = { @($runValues) }.GetNewClosure()
+        Invoke-DuoForgeInteractiveHome -SetupInvoker { [ordered]@{ readyForDocumentModes = $true } } -RunsInvoker $runsInvoker -MenuInvoker $menu 6>$null
+    } $runs $homeMenu
+    Assert-Equal $homeCapture.calls 3 '홈의 완료 결과 선택이 분류 목록을 거쳐 홈으로 돌아오지 않았습니다.'
+    Assert-Equal (@($homeCapture.resultItems[0].sectionLabelsBefore) -join '|') '완료 (2)'
+    Assert-Equal (@($homeCapture.resultItems[2].sectionLabelsBefore) -join '|') '일부 완료 (0)|확인 한도 도달 · 미완료 (1)'
+}
+
 Test-Case '실패한 작업은 홈 전용 목록과 제한된 다시 시도 준비 동작에 나타난다' {
     $fixture = New-DuoForgeInteractionTestRun -Name 'failed-run-menu'
     $null = & $module {

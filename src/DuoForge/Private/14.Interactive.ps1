@@ -303,25 +303,48 @@ function Select-DuoForgeInteractiveRun {
         [AllowEmptyCollection()][Parameter(Mandatory)][object[]]$Runs,
         [Parameter(Mandatory)][string]$Prompt,
         [scriptblock]$InputReader,
-        [scriptblock]$MenuInvoker
+        [scriptblock]$MenuInvoker,
+        [switch]$GroupCompletionResults
     )
 
     if ($Runs.Count -eq 0) { Write-DuoForgeTextInternal '해당 실행이 없습니다.'; return $null }
+    $entries = [System.Collections.Generic.List[object]]::new()
+    $pendingSectionLabels = [System.Collections.Generic.List[string]]::new()
+    if ($GroupCompletionResults) {
+        $groups = @(
+            [ordered]@{ status = 'COMPLETED'; label = '완료' }
+            [ordered]@{ status = 'COMPLETED_PARTIAL'; label = '일부 완료' }
+            [ordered]@{ status = 'QUESTION_LIMIT_REACHED'; label = '확인 한도 도달 · 미완료' }
+        )
+        foreach ($group in $groups) {
+            $groupRuns = @($Runs | Where-Object { [string]$_.status -eq [string]$group.status })
+            $pendingSectionLabels.Add(('{0} ({1})' -f [string]$group.label, $groupRuns.Count))
+            for ($groupIndex = 0; $groupIndex -lt $groupRuns.Count; $groupIndex++) {
+                $sectionLabelsBefore = if ($groupIndex -eq 0) { @($pendingSectionLabels) } else { @() }
+                $entries.Add([ordered]@{ run = $groupRuns[$groupIndex]; sectionLabelsBefore = $sectionLabelsBefore })
+                if ($groupIndex -eq 0) { $pendingSectionLabels.Clear() }
+            }
+        }
+    }
+    else {
+        foreach ($run in $Runs) { $entries.Add([ordered]@{ run = $run; sectionLabelsBefore = @() }) }
+    }
     $items = [System.Collections.Generic.List[object]]::new()
-    for ($index = 0; $index -lt $Runs.Count; $index++) {
-        $run = $Runs[$index]
+    for ($index = 0; $index -lt $entries.Count; $index++) {
+        $run = $entries[$index].run
         $items.Add([ordered]@{
             value = [string]$index
             label = ('{0} · {1} · {2} · {3}' -f (Get-DuoForgeRunListMetadataInternal -Run $run), $run.name, (Get-DuoForgeDisplayModeLabelInternal -Mode ([string]$run.mode)), (Get-DuoForgeDisplayStateLabelInternal -Status ([string]$run.status)))
             shortcuts = @([string]($index + 1))
             enabled = $true
+            sectionLabelsBefore = @($entries[$index].sectionLabelsBefore)
         })
     }
-    $items.Add([ordered]@{ value = 'back'; label = '이전으로'; shortcuts = @('B'); enabled = $true })
+    $items.Add([ordered]@{ value = 'back'; label = '이전으로'; shortcuts = @('B'); enabled = $true; sectionLabelsBefore = @($pendingSectionLabels) })
     $choiceInteraction = Invoke-DuoForgeMenuInteractionInternal -Items @($items) -Title $Prompt -ReturnTarget home -CancelReturnTarget home -InterruptReturnTarget home -InputReader $InputReader -MenuInvoker $MenuInvoker
     if ([string]$choiceInteraction.action -ne 'submit') { return $null }
     $choice = [string]$choiceInteraction.value
-    return $Runs[[int]$choice]
+    return $entries[[int]$choice].run
 }
 
 function Invoke-DuoForgeInteractiveLiveResume {
@@ -2131,7 +2154,8 @@ function Invoke-DuoForgeInteractiveHome {
                     Write-DuoForgeTextInternal $emptyMessage
                     continue
                 }
-                $selected = Select-DuoForgeInteractiveRun -Runs $candidates -Prompt '작업을 선택해 주세요.' -InputReader $InputReader -MenuInvoker $MenuInvoker
+                $runPrompt = if ($choice -eq '3') { '완료된 결과를 선택해 주세요.' } else { '작업을 선택해 주세요.' }
+                $selected = Select-DuoForgeInteractiveRun -Runs $candidates -Prompt $runPrompt -InputReader $InputReader -MenuInvoker $MenuInvoker -GroupCompletionResults:($choice -eq '3')
                 if ($null -ne $selected) { $null = Invoke-DuoForgeInteractiveRun -RunRecord $selected -InputReader $InputReader -MenuInvoker $MenuInvoker }
             }
             '^(6)$' {

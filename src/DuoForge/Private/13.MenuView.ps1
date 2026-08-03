@@ -291,6 +291,11 @@ function ConvertTo-DuoForgeMenuItemsInternal {
     foreach ($item in $Items) {
         $value = [string](Get-DuoForgeObjectValue -Object $item -Name 'value' -Default (Get-DuoForgeObjectValue -Object $item -Name 'key'))
         $label = [string](Get-DuoForgeObjectValue -Object $item -Name 'label' -Default $value)
+        $sectionLabelsBefore = @(
+            @(Get-DuoForgeObjectValue -Object $item -Name 'sectionLabelsBefore' -Default @()) |
+                ForEach-Object { ConvertTo-DuoForgeProgressTextInternal -Text ([string]$_) -MaximumCharacters 600 } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        )
         $shortcuts = @(
             @(Get-DuoForgeObjectValue -Object $item -Name 'shortcuts' -Default @()) |
                 ForEach-Object { ([string]$_).Trim() } |
@@ -307,6 +312,7 @@ function ConvertTo-DuoForgeMenuItemsInternal {
             enabled = [bool](Get-DuoForgeObjectValue -Object $item -Name 'enabled' -Default $true)
             disabledReason = ConvertTo-DuoForgeProgressTextInternal -Text ([string](Get-DuoForgeObjectValue -Object $item -Name 'disabledReason')) -MaximumCharacters 600
             detail = ConvertTo-DuoForgeProgressTextInternal -Text ([string](Get-DuoForgeObjectValue -Object $item -Name 'detail')) -MaximumCharacters 600
+            sectionLabelsBefore = $sectionLabelsBefore
         })
     }
     return @($normalized)
@@ -342,8 +348,14 @@ function New-DuoForgeMenuFrameRowsInternal {
     }
     else {
         $selected = [Math]::Max(0, [Math]::Min($SelectedIndex, $Items.Count - 1))
+        $hasMenuContent = $false
         for ($index = 0; $index -lt $Items.Count; $index++) {
             $item = $Items[$index]
+            foreach ($sectionLabel in @($item.sectionLabelsBefore)) {
+                if ($hasMenuContent) { $rows.Add((New-DuoForgeDisplayRowInternal -Text '' -Role 'spacer')) }
+                foreach ($row in @(New-DuoForgeSectionRowsInternal -Title ([string]$sectionLabel) -Body '' -Layout $layout -Compact)) { $rows.Add($row) }
+                $hasMenuContent = $true
+            }
             $prefix = if ($index -eq $selected) { '> ' } else { '  ' }
             $shortcut = if (@($item.shortcuts).Count -gt 0) { '[{0}] ' -f [string]$item.shortcuts[0] } else { '' }
             $suffix = if ([bool]$item.enabled) { '' } else { ' · 비활성' }
@@ -367,6 +379,7 @@ function New-DuoForgeMenuFrameRowsInternal {
                 $reasonMaximumLines = if ($ExpandAllDetails) { 1000 } else { 3 }
                 foreach ($row in @(New-DuoForgeTextRowsInternal -Text $reason -Layout $layout -Indent 6 -MaximumLines $reasonMaximumLines -Role 'meta')) { $rows.Add($row) }
             }
+            $hasMenuContent = $true
         }
     }
     if (-not [string]::IsNullOrWhiteSpace($Message)) {
