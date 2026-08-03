@@ -784,20 +784,35 @@ try {
                     lines = $texts
                     maximumWidth = (@($texts | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text $_ }) | Measure-Object -Maximum).Maximum
                     fieldRows = @($texts | Where-Object { $_ -like '*diagnostics.jsonl*' -or $_ -like '*nested-folder*' })
+                    expectedPageBoundary = '━' * ($width - 1)
                 }
             }
             $asciiLayout = Get-DuoForgeDisplayLayoutInternal -Width 72 -Height 20 -Ascii -NoColor
             $asciiRows = @(
                 New-DuoForgePageHeaderRowsInternal -Title 'ASCII fallback' -Tag 'LIVE' -Layout $asciiLayout
+                New-DuoForgeSectionRowsInternal -Title '내부 구분' -Body '화면 시작 경계와 다른 가는 구분을 유지합니다.' -Layout $asciiLayout -First
                 New-DuoForgeNoticeRowsInternal -Kind success -Title '완료 ✓' -Message '↑/↓ · ● ◐ ○ ↻ › █░ …' -Layout $asciiLayout
             )
             $asciiText = (& { Write-DuoForgeDisplayRowsInternal -Rows $asciiRows -Layout $asciiLayout } 6>&1 | Out-String)
-            [ordered]@{ matrix = $matrix; asciiText = $asciiText }
+            $previousNoColor = [string]$env:NO_COLOR
+            try {
+                $env:NO_COLOR = '1'
+                $noColorLayout = Get-DuoForgeDisplayLayoutInternal -Width 72 -Height 24
+                $noColorRows = @(New-DuoForgePageHeaderRowsInternal -Title '무색 화면 경계' -Layout $noColorLayout)
+                $noColorText = (& { Write-DuoForgeDisplayRowsInternal -Rows $noColorRows -Layout $noColorLayout } 6>&1 | Out-String)
+            }
+            finally {
+                if ([string]::IsNullOrEmpty($previousNoColor)) { Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue }
+                else { $env:NO_COLOR = $previousNoColor }
+            }
+            [ordered]@{ matrix = $matrix; asciiText = $asciiText; noColorText = $noColorText }
         }
 
         foreach ($width in @(48, 72, 80, 100, 120)) {
             $entry = $surface.matrix[[string]$width]
             Assert-True ([int]$entry.maximumWidth -le ($width - 1)) "$width 열 renderer가 화면 폭을 넘었습니다."
+            Assert-Equal ([string]$entry.lines[0]) ([string]$entry.expectedPageBoundary) "$width 열 화면 시작 경계가 내부 구분선보다 강하게 표시되지 않았습니다."
+            Assert-True ([string]$entry.lines[1] -like '◆ DuoForge 표시 계약*') "$width 열 화면 제목에 시작 표식이 없습니다."
             Assert-ContainsText ($entry.lines -join "`n") '── 검증 대상'
             Assert-ContainsText ($entry.lines -join "`n") '섹션끝표식'
             Assert-ContainsText ($entry.lines -join "`n") '알림끝표식'
@@ -814,8 +829,10 @@ try {
             Assert-True ($continuationIndent -ge 13) "$width 열에서 hanging indent가 유지되지 않았습니다."
         }
         Assert-NotContainsText $surface.asciiText "`e["
-        foreach ($glyph in @('✓', '↑', '↓', '●', '◐', '○', '↻', '›', '█', '░', '…', '──', '─')) { Assert-NotContainsText $surface.asciiText $glyph }
-        foreach ($token in @('OK', 'Up/Down', '*', '~', 'o', '>', '#-', '...', '--')) { Assert-ContainsText $surface.asciiText $token }
+        Assert-NotContainsText $surface.noColorText "`e[" 'NO_COLOR 화면 시작 경계에 ANSI 코드가 남았습니다.'
+        Assert-ContainsText $surface.noColorText ('━' * 71) 'NO_COLOR에서 구조적인 화면 시작 경계가 사라졌습니다.'
+        foreach ($glyph in @('✓', '↑', '↓', '●', '◐', '○', '↻', '›', '█', '░', '…', '◆', '━', '──', '─')) { Assert-NotContainsText $surface.asciiText $glyph }
+        foreach ($token in @('OK', 'Up/Down', '*', '~', 'o', '>', '#-', '...', '--', ('=' * 71), '> ASCII fallback')) { Assert-ContainsText $surface.asciiText $token }
     }
 
     Test-Case '정보 블록과 다음 메뉴 사이에는 중복 없는 전환 여백 한 행을 둔다' {
@@ -837,18 +854,25 @@ try {
                 twice = @($twice | ForEach-Object { [string]$_.text })
                 regularMenu = @(New-DuoForgeMenuFrameInternal -Items $items -Title '다음 메뉴' -Width 72 -Height 20)
                 transitionMenus = $transitionMenus
+                expectedPageBoundary = '━' * 71
             }
         }
 
         Assert-Equal $surface.once.Count 2
         Assert-Equal ([string]$surface.once[-1]) ''
         Assert-Equal $surface.twice.Count 2 '이미 있는 전환 여백이 중복 추가되었습니다.'
+        Assert-Equal ([string]$surface.regularMenu[0]) ([string]$surface.expectedPageBoundary) '일반 메뉴가 강한 화면 시작 경계로 시작하지 않습니다.'
+        Assert-True ([string]$surface.regularMenu[1] -like '◆ 다음 메뉴*') '일반 메뉴 제목에 화면 시작 표식이 없습니다.'
         foreach ($height in @(20, 23)) {
             $menu = @($surface.transitionMenus[[string]$height])
+            Assert-True ([string]$menu[0] -like '── 다음 메뉴*') "72x$height 전환 메뉴가 앞 정보 블록에 속한 내부 섹션으로 표시되지 않습니다."
+            Assert-False ([string]$menu[0] -eq [string]$surface.expectedPageBoundary) "72x$height 전환 메뉴가 같은 화면 안에서 강한 시작 경계를 중복했습니다."
             Assert-False ([string]::IsNullOrWhiteSpace([string]$menu[-2])) "72x$height compact 전환 메뉴의 푸터 앞 압축이 유지되지 않았습니다."
         }
         foreach ($height in @(24, 32)) {
             $menu = @($surface.transitionMenus[[string]$height])
+            Assert-True ([string]$menu[0] -like '── 다음 메뉴*') "72x$height 전환 메뉴가 앞 정보 블록에 속한 내부 섹션으로 표시되지 않습니다."
+            Assert-False ([string]$menu[0] -eq [string]$surface.expectedPageBoundary) "72x$height 전환 메뉴가 같은 화면 안에서 강한 시작 경계를 중복했습니다."
             Assert-Equal ([string]$menu[-2]) '' "72x$height 전환 메뉴의 마지막 항목과 푸터 사이 빈 행이 없습니다."
         }
     }
@@ -2620,10 +2644,10 @@ try {
         }
 
         $secondOption = [Array]::FindIndex([string[]]$rendered.explanation, [Predicate[string]]{ param($line) $line.Trim() -eq '선택 B' })
-        $secondRecord = [Array]::FindIndex([string[]]$rendered.explanation, [Predicate[string]]{ param($line) $line -eq 'D-002 · 검토 설명' })
+        $secondRecord = [Array]::FindIndex([string[]]$rendered.explanation, [Predicate[string]]{ param($line) $line.Trim() -eq '◆ D-002 · 검토 설명' })
         $secondError = [Array]::FindIndex([string[]]$rendered.validation, [Predicate[string]]{ param($line) $line.Trim() -eq '두 번째 검증 오류' })
         Assert-True ($secondOption -gt 0 -and [string]::IsNullOrWhiteSpace([string]$rendered.explanation[$secondOption - 1])) '선택지 비교 항목 사이 여백이 없습니다.'
-        Assert-True ($secondRecord -gt 0 -and [string]::IsNullOrWhiteSpace([string]$rendered.explanation[$secondRecord - 1])) '설명 기록 사이 여백이 없습니다.'
+        Assert-True ($secondRecord -gt 1 -and [string]$rendered.explanation[$secondRecord - 1] -match '^━+$' -and [string]::IsNullOrWhiteSpace([string]$rendered.explanation[$secondRecord - 2])) '설명 기록 사이의 여백과 화면 시작 경계가 없습니다.'
         Assert-True ($secondError -gt 0 -and [string]::IsNullOrWhiteSpace([string]$rendered.validation[$secondError - 1])) '검증 오류 사이 여백이 없습니다.'
     }
 
@@ -7200,6 +7224,8 @@ try {
                         height = $height
                         selectedIndex = $selectedIndex
                         cardLines = @($cardRows | ForEach-Object { [string]$_.text })
+                        cardFirstLineWidth = Get-DuoForgeProgressTextWidthInternal -Text ([string]$cardRows[0].text)
+                        menuLines = @($menuLines)
                         lines = @($allLines)
                         maximumWidth = (@($allLines | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) }) | Measure-Object -Maximum).Maximum
                     }
@@ -7314,6 +7340,15 @@ try {
         foreach ($frame in @($cardResult.frames)) {
             Assert-True ($frame.lines.Count -le [int]$frame.height) "$($frame.width)x$($frame.height) 질문 카드가 화면 높이를 넘었습니다."
             Assert-True ([int]$frame.maximumWidth -lt [int]$frame.width) "$($frame.width)x$($frame.height) 질문 카드가 화면 폭을 넘었습니다."
+            if ([int]$frame.height -le 23) {
+                Assert-True ([string]$frame.cardLines[0] -like '━━ ◆ *') "$($frame.width)x$($frame.height) compact 질문 카드에 한 행 화면 시작 경계가 없습니다."
+                Assert-Equal ([int]$frame.cardFirstLineWidth) ([int]$frame.width - 1) "$($frame.width)x$($frame.height) compact 화면 시작 경계가 전폭을 사용하지 않습니다."
+            }
+            else {
+                Assert-Equal ([string]$frame.cardLines[0]) ('━' * ([int]$frame.width - 1)) "$($frame.width)x$($frame.height) 질문 카드에 화면 시작 경계가 없습니다."
+            }
+            Assert-True ([string]$frame.menuLines[0] -like '── 승인 요청*') "$($frame.width)x$($frame.height) 답변 메뉴가 질문 카드의 내부 섹션으로 묶이지 않았습니다."
+            Assert-False ([string]$frame.menuLines[0] -eq ('━' * ([int]$frame.width - 1))) "$($frame.width)x$($frame.height) 질문 카드와 답변 메뉴 사이에 강한 화면 경계가 중복되었습니다."
             Assert-True (@($frame.lines | Where-Object { $_ -like '*핵심 내용*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 확인할 핵심 내용이 보이지 않습니다."
             Assert-True (@($frame.lines | Where-Object { $_ -like '*AI*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 AI 처리 흐름이 보이지 않습니다."
             Assert-True (@($frame.lines | Where-Object { $_ -like '*요청*' }).Count -gt 0) "$($frame.width)x$($frame.height)에서 사용자 요청이 보이지 않습니다."
@@ -7334,6 +7369,7 @@ try {
         foreach ($frame in @($cardResult.detailFrames)) {
             $detailText = $frame.lines -join ' '
             Assert-True ([int]$frame.maximumWidth -lt [int]$frame.width) "$($frame.width)x$($frame.height) 질문 전체 내용이 화면 폭을 넘었습니다."
+            Assert-Equal ([string]$frame.lines[0]) ('━' * ([int]$frame.width - 1)) "$($frame.width)x$($frame.height) 질문 전체 보기에 화면 시작 경계가 없습니다."
             Assert-ContainsText $detailText '핵심쟁점끝표식' "$($frame.width)x$($frame.height) 전체 보기에서 핵심 쟁점 끝이 잘렸습니다."
             Assert-ContainsText $detailText '제안끝표식' "$($frame.width)x$($frame.height) 전체 보기에서 제안 방향 끝이 잘렸습니다."
             Assert-ContainsText $detailText '요청끝표식' "$($frame.width)x$($frame.height) 전체 보기에서 요청 내용 끝이 잘렸습니다."
@@ -7347,6 +7383,7 @@ try {
         foreach ($frame in @($cardResult.alternativeFrames)) {
             Assert-True ($frame.lines.Count -le [int]$frame.height) "$($frame.width)x$($frame.height) 추가 검토 메뉴가 화면 높이를 넘었습니다."
             Assert-True ([int]$frame.maximumWidth -lt [int]$frame.width) "$($frame.width)x$($frame.height) 추가 검토 메뉴가 화면 폭을 넘었습니다."
+            Assert-Equal ([string]$frame.lines[0]) ('━' * ([int]$frame.width - 1)) "$($frame.width)x$($frame.height) 추가 검토 메뉴에 화면 시작 경계가 없습니다."
             $alternativeText = $frame.lines -join ' '
             foreach ($expected in @('질문 내용 전체 보기', '한 토론 회차 더 진행', '상세 설명', '양쪽 의견과 장단점 비교')) {
                 Assert-ContainsText $alternativeText $expected "$($frame.width)x$($frame.height) 추가 검토 메뉴에서 '$expected' 항목이 보이지 않습니다."

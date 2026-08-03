@@ -295,7 +295,12 @@ function New-DuoForgeMenuFrameRowsInternal {
     $layout = Get-DuoForgeDisplayLayoutInternal -Width $Width -Height $Height -Ascii:$Ascii -NoColor
     $rows = [System.Collections.Generic.List[object]]::new()
     if (-not [string]::IsNullOrWhiteSpace($Title)) {
-        foreach ($row in @(New-DuoForgePageHeaderRowsInternal -Title $Title -Layout $layout -NoTrailingSpacer:([bool]$layout.compact -or $ContextTransition))) { $rows.Add($row) }
+        if ($ContextTransition) {
+            foreach ($row in @(New-DuoForgeSectionRowsInternal -Title $Title -Body '' -Layout $layout -First -Compact)) { $rows.Add($row) }
+        }
+        else {
+            foreach ($row in @(New-DuoForgePageHeaderRowsInternal -Title $Title -Layout $layout -NoTrailingSpacer:([bool]$layout.compact))) { $rows.Add($row) }
+        }
     }
     if ($Items.Count -eq 0) {
         foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind info -Title '선택할 수 있는 항목이 없습니다.' -Layout $layout)) { $rows.Add($row) }

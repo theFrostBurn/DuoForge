@@ -956,8 +956,8 @@ function New-DuoForgeInteractiveQuestionCardRowsInternal {
     $denseExpandedHeader = $Height -eq 32
     $denseSections = $Height -le 27
     if ($Height -le 23) {
-        # 20~23행에서는 요청 종류가 바로 아래 메뉴 제목에 반복되므로 한 줄 식별자만 남긴다.
-        & $append @(New-DuoForgeTextRowsInternal -Text $header -Layout $layout -MaximumLines 1 -Role 'page')
+        # 20~23행에서는 제목을 굵은 시작선 안에 넣어 화면 경계를 보존하면서 한 행만 사용한다.
+        & $append @(New-DuoForgePageHeaderRowsInternal -Title $header -Layout $layout -NoTrailingSpacer -InlineCompact)
     }
     else {
         & $append @(New-DuoForgePageHeaderRowsInternal -Title $header -Tag ([string]$Presentation.requestKind) -Layout $layout -NoTrailingSpacer:($denseSections -or $denseExpandedHeader))

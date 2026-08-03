@@ -29,6 +29,8 @@ function Get-DuoForgeDisplayLayoutInternal {
         compact = $Height -le 23
         unicode = $unicode
         color = $supportsColor
+        pageMark = if ($unicode) { '◆' } else { '>' }
+        pageDivider = if ($unicode) { '━' } else { '=' }
         sectionMark = if ($unicode) { '──' } else { '--' }
         divider = if ($unicode) { '─' } else { '-' }
         successMark = if ($unicode) { '✓' } else { 'OK' }
@@ -86,6 +88,8 @@ function ConvertTo-DuoForgeDisplayFallbackTextInternal {
 
     if ([bool]$Layout.unicode) { return $Text }
     return $Text `
+        -replace '◆', '>' `
+        -replace '━', '=' `
         -replace '──', '--' `
         -replace '─', '-' `
         -replace '✓', 'OK' `
@@ -201,17 +205,39 @@ function New-DuoForgePageHeaderRowsInternal {
         [Parameter(Mandatory)][string]$Title,
         [AllowEmptyString()][string]$Tag = '',
         [Parameter(Mandatory)][System.Collections.IDictionary]$Layout,
-        [switch]$NoTrailingSpacer
+        [switch]$NoTrailingSpacer,
+        [switch]$InlineCompact
     )
 
     $rows = [System.Collections.Generic.List[object]]::new()
-    foreach ($row in @(New-DuoForgeTextRowsInternal -Text $Title -Layout $Layout -MaximumLines 2 -Role 'page')) { $rows.Add($row) }
+    if ($InlineCompact) {
+        $inlinePrefix = "{0}{0} {1} " -f [string]$Layout.pageDivider, [string]$Layout.pageMark
+        $inlinePrefixWidth = Get-DuoForgeProgressTextWidthInternal -Text $inlinePrefix
+        $titleWidth = [Math]::Max(1, [int]$Layout.lineWidth - $inlinePrefixWidth - 2)
+        $inlineTitle = Limit-DuoForgeProgressTextInternal -Text $Title -Width $titleWidth
+        $inlineText = $inlinePrefix + $inlineTitle
+        $remainingWidth = [Math]::Max(0, [int]$Layout.lineWidth - (Get-DuoForgeProgressTextWidthInternal -Text $inlineText))
+        if ($remainingWidth -gt 1) { $inlineText += ' ' + ([string]$Layout.pageDivider * ($remainingWidth - 1)) }
+        elseif ($remainingWidth -eq 1) { $inlineText += [string]$Layout.pageDivider }
+        $rows.Add((New-DuoForgeDisplayRowInternal -Text $inlineText -Role 'page'))
+        if (-not $NoTrailingSpacer) { $rows.Add((New-DuoForgeDisplayRowInternal -Text '' -Role 'spacer')) }
+        return @($rows)
+    }
+
+    $dividerWidth = [Math]::Max(1, [int]$Layout.lineWidth)
+    $rows.Add((New-DuoForgeDisplayRowInternal -Text ([string]$Layout.pageDivider * $dividerWidth) -Role 'page'))
+    $titlePrefix = "{0} " -f [string]$Layout.pageMark
+    $titlePrefixWidth = Get-DuoForgeProgressTextWidthInternal -Text $titlePrefix
+    $titleWidth = [Math]::Max(1, [int]$Layout.lineWidth - $titlePrefixWidth)
+    $titleLines = @(Split-DuoForgeDisplayTextInternal -Text $Title -Width $titleWidth -MaximumLines 2)
+    for ($titleIndex = 0; $titleIndex -lt $titleLines.Count; $titleIndex++) {
+        $prefix = if ($titleIndex -eq 0) { $titlePrefix } else { ' ' * $titlePrefixWidth }
+        $rows.Add((New-DuoForgeDisplayRowInternal -Text ($prefix + [string]$titleLines[$titleIndex]) -Role 'page'))
+    }
     if (-not [string]::IsNullOrWhiteSpace($Tag)) {
         $tagText = if ($Tag -match '^<.*>$') { $Tag } else { "<$Tag>" }
-        foreach ($row in @(New-DuoForgeTextRowsInternal -Text $tagText -Layout $Layout -MaximumLines 1 -Role 'tag')) { $rows.Add($row) }
+        foreach ($row in @(New-DuoForgeTextRowsInternal -Text $tagText -Layout $Layout -Indent $titlePrefixWidth -MaximumLines 1 -Role 'tag')) { $rows.Add($row) }
     }
-    $dividerWidth = [Math]::Max(1, [int]$Layout.lineWidth)
-    $rows.Add((New-DuoForgeDisplayRowInternal -Text ([string]$Layout.divider * $dividerWidth) -Role 'divider'))
     if (-not $NoTrailingSpacer) { $rows.Add((New-DuoForgeDisplayRowInternal -Text '' -Role 'spacer')) }
     return @($rows)
 }
