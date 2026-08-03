@@ -637,6 +637,184 @@ function New-DuoForgeOpenQuestionsMarkdown {
     return ($lines -join [Environment]::NewLine) + [Environment]::NewLine
 }
 
+function ConvertTo-DuoForgeReviewInlineTextInternal {
+    [CmdletBinding()]
+    param(
+        $Value,
+        [string]$Default = '기록 없음'
+    )
+
+    $text = ([string]$Value -replace '\s+', ' ').Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) { return $Default }
+    return $text
+}
+
+function Get-DuoForgeReviewTargetLabelInternal {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$DocumentId)
+
+    switch ($DocumentId) {
+        'A' { return '문서 A′' }
+        'B' { return '문서 B′' }
+        'brief' { return '공동 문서' }
+        'merged' { return '최종 문서' }
+        default { return '최종 문서' }
+    }
+}
+
+function Get-DuoForgeReviewDispositionLabelInternal {
+    [CmdletBinding()]
+    param([AllowEmptyString()][string]$Disposition)
+
+    switch ($Disposition) {
+        'ACCEPTED' { return '채택' }
+        'PARTIALLY_ACCEPTED' { return '일부 채택' }
+        'REJECTED' { return '거절' }
+        'DEFERRED' { return '보류' }
+        'NEEDS_EVIDENCE' { return '근거 필요' }
+        'ASK_USER' { return '사용자 결정 필요' }
+        default { return '기록됨' }
+    }
+}
+
+function New-DuoForgeThinReviewReportMarkdownInternal {
+    [CmdletBinding()]
+    param(
+        [ValidateSet('shared-document', 'document-merge', 'dual-document')][Parameter(Mandatory)][string]$Mode,
+        [AllowEmptyCollection()][Parameter(Mandatory)][object[]]$StageResults,
+        [AllowEmptyCollection()][Parameter(Mandatory)][object[]]$Issues
+    )
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add('# 검토 보고서')
+    $lines.Add('')
+    $lines.Add('이 보고서는 검증·커밋된 단계 상태, 정규 쟁점 기록과 유효한 사용자 결정만 요약합니다. 입력 문서 본문, 프롬프트, 원시 공급자 출력과 모델 응답 원문은 포함하지 않습니다.')
+    $lines.Add('')
+    $lines.Add('## 검토 결과 요약')
+    $lines.Add('')
+    $independentCount = @($StageResults | Where-Object { [string]$_.stage -eq 'independent-result' }).Count
+    $integrationCount = @($StageResults | Where-Object { [string]$_.stage -eq 'integration' }).Count
+    $validation = @($StageResults | Where-Object { [string]$_.stage -eq 'final-validation' } | Select-Object -Last 1)
+    $revisionCount = @($StageResults | Where-Object { [string]$_.stage -eq 'final-revision' }).Count
+    $resolvedCount = @($Issues | Where-Object { [string]$_.resolutionStatus -in @('RESOLVED', 'SUPERSEDED') }).Count
+    $openCount = @($Issues).Count - $resolvedCount
+    $blockingCount = @($Issues | Where-Object { [bool]$_.blocking -and [string]$_.resolutionStatus -notin @('RESOLVED', 'SUPERSEDED') }).Count
+    $validationStatus = if ($validation.Count -eq 1 -and [bool](Get-DuoForgeObjectValue -Object $validation[0].result -Name 'finalApproved' -Default $false)) {
+        '승인'
+    }
+    elseif ($validation.Count -eq 1 -and $revisionCount -gt 0) {
+        '수정 필요 판정 뒤 최종 수정 수행'
+    }
+    elseif ($validation.Count -eq 1) {
+        '수정 필요'
+    }
+    else {
+        '검증 기록 없음'
+    }
+    $lines.Add("- 독립 검토: ${independentCount}개 완료")
+    $lines.Add("- 통합 결과: ${integrationCount}개 완료")
+    $lines.Add("- 최종 검증: $validationStatus")
+    $lines.Add("- 최종 수정: $(if ($revisionCount -gt 0) { '수행됨' } else { '수행하지 않음' })")
+    $lines.Add("- 정규 쟁점: 전체 $(@($Issues).Count)개 · 해결 ${resolvedCount}개 · 미해결 ${openCount}개 · 차단 ${blockingCount}개")
+    $lines.Add('')
+
+    $lines.Add('## 주요 결정과 이유')
+    $lines.Add('')
+    $decisionCount = 0
+    foreach ($issue in @($Issues)) {
+        $responses = Get-DuoForgeObjectValue -Object $issue -Name 'responses' -Default ([ordered]@{})
+        $userResponses = @(if ($responses -is [System.Collections.IDictionary] -and $responses.Contains('user')) { @($responses.user) })
+        $effectiveDecisions = if ($userResponses.Count -gt 0) {
+            @(Get-DuoForgeEffectiveUserDecisionsInternal -Records $userResponses | Where-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'action' -Default '') -eq 'ANSWER' })
+        }
+        else {
+            @()
+        }
+        foreach ($decision in $effectiveDecisions) {
+            $decisionCount++
+            $target = Get-DuoForgeReviewTargetLabelInternal -DocumentId ([string](Get-DuoForgeObjectValue -Object $issue -Name 'targetDocumentId' -Default 'merged'))
+            $claim = ConvertTo-DuoForgeReviewInlineTextInternal -Value (Get-DuoForgeObjectValue -Object $issue -Name 'claim' -Default '')
+            $selected = ConvertTo-DuoForgeReviewInlineTextInternal -Value (Get-DuoForgeObjectValue -Object $decision -Name 'selectedOption' -Default '')
+            $lines.Add("- ${target}: $claim")
+            $lines.Add("  - 결정: $selected")
+            $lines.Add('  - 이유: 사용자 확인에서 해당 선택을 확정했습니다.')
+        }
+    }
+    if ($decisionCount -eq 0) {
+        $lines.Add('검증·커밋된 기록에서 별도의 사용자 결정이 확인되지 않았습니다.')
+    }
+    $lines.Add('')
+
+    $lines.Add('## 채택·거절한 제안과 반영 위치')
+    $lines.Add('')
+    $adoptionCount = 0
+    foreach ($issue in @($Issues)) {
+        $records = @(Get-DuoForgeObjectValue -Object $issue -Name 'adoptions' -Default @())
+        if ($records.Count -eq 0) {
+            $records = @((Get-DuoForgeObjectValue -Object $issue -Name 'editorialDecisions' -Default @()) | Where-Object {
+                [string](Get-DuoForgeObjectValue -Object $_ -Name 'disposition' -Default '') -in @('ACCEPTED', 'PARTIALLY_ACCEPTED', 'REJECTED')
+            })
+        }
+        foreach ($record in $records) {
+            $adoptionCount++
+            $targetId = [string](Get-DuoForgeObjectValue -Object $record -Name 'targetDocumentId' -Default (Get-DuoForgeObjectValue -Object $issue -Name 'targetDocumentId' -Default 'merged'))
+            $target = Get-DuoForgeReviewTargetLabelInternal -DocumentId $targetId
+            $proposal = ConvertTo-DuoForgeReviewInlineTextInternal -Value (Get-DuoForgeObjectValue -Object $issue -Name 'proposal' -Default '')
+            $disposition = Get-DuoForgeReviewDispositionLabelInternal -Disposition ([string](Get-DuoForgeObjectValue -Object $record -Name 'disposition' -Default ''))
+            $rationale = ConvertTo-DuoForgeReviewInlineTextInternal -Value (Get-DuoForgeObjectValue -Object $record -Name 'rationale' -Default '')
+            $locations = @((Get-DuoForgeObjectValue -Object $record -Name 'locations' -Default @()) | ForEach-Object { ConvertTo-DuoForgeReviewInlineTextInternal -Value $_ } | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+            $locationText = if ($locations.Count -gt 0) { $locations -join ', ' } else { '해당 없음' }
+            $lines.Add("- ${target}: $proposal")
+            $lines.Add("  - 처리: $disposition")
+            $lines.Add("  - 이유: $rationale")
+            $lines.Add("  - 반영 위치: $locationText")
+        }
+    }
+    if ($adoptionCount -eq 0) {
+        $lines.Add('검증·커밋된 기록에 명시적인 채택·거절 및 반영 위치가 없습니다. 최종 문서 본문을 다시 해석해 반영 여부를 추정하지 않습니다.')
+    }
+    $lines.Add('')
+
+    if ($Mode -eq 'document-merge') {
+        $lines.Add('## 문서 A/B 출처 추적')
+        $lines.Add('')
+        $lines.Add('| 출처 | 최종 대상 | 확인된 사용 방식 |')
+        $lines.Add('|---|---|---|')
+        $integration = @($StageResults | Where-Object { [string]$_.stage -eq 'integration' } | Select-Object -Last 1)
+        $sourceIds = if ($integration.Count -eq 1) { @($integration[0].sourceDocumentIds | Where-Object { [string]$_ -in @('A', 'B') } | Sort-Object -Unique) } else { @() }
+        foreach ($sourceId in $sourceIds) {
+            $sourceLabel = if ([string]$sourceId -eq 'A') { '문서 A' } else { '문서 B' }
+            $lines.Add("| $sourceLabel | 최종 문서 | 통합 결과의 검증된 입력 계보 |")
+        }
+        if ($sourceIds.Count -eq 0) {
+            $lines.Add('| - | 최종 문서 | 확인 가능한 A/B 입력 계보 기록 없음 |')
+        }
+        $lines.Add('')
+        $lines.Add('개별 제안의 출처는 명시적인 구조화 기록이 있을 때만 확정하며, 최종 문서 본문에서 역추정하지 않습니다.')
+        $lines.Add('')
+    }
+
+    if ($Mode -eq 'dual-document') {
+        $lines.Add('## 개선된 A/B 차이 비교')
+        $lines.Add('')
+        $lines.Add('| 결과 문서 | 생성 상태 | 전체 쟁점 | 해결 | 미해결 | 차단 |')
+        $lines.Add('|---|---|---:|---:|---:|---:|')
+        foreach ($documentId in @('A', 'B')) {
+            $documentIssues = @($Issues | Where-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'targetDocumentId' -Default '') -eq $documentId })
+            $documentResolved = @($documentIssues | Where-Object { [string]$_.resolutionStatus -in @('RESOLVED', 'SUPERSEDED') }).Count
+            $documentBlocking = @($documentIssues | Where-Object { [bool]$_.blocking -and [string]$_.resolutionStatus -notin @('RESOLVED', 'SUPERSEDED') }).Count
+            $documentOpen = $documentIssues.Count - $documentResolved
+            $label = if ($documentId -eq 'A') { '문서 A′' } else { '문서 B′' }
+            $lines.Add("| $label | 생성됨 | $($documentIssues.Count) | $documentResolved | $documentOpen | $documentBlocking |")
+        }
+        $lines.Add('')
+        $lines.Add('비교는 정규 쟁점 기록의 차이만 집계하며, 두 최종 문서 본문이나 모델 응답 원문을 보고서에 다시 싣지 않습니다.')
+        $lines.Add('')
+    }
+
+    return ($lines -join [Environment]::NewLine) + [Environment]::NewLine
+}
+
 function Render-DuoForgeThinFinalArtifactsInternal {
     [CmdletBinding()]
     param(
@@ -677,9 +855,17 @@ function Render-DuoForgeThinFinalArtifactsInternal {
     $null = Assert-DuoForgeIssueLedgerV2Internal -Issues @($merged.issues)
     Write-DuoForgeJsonAtomic -Path (Join-Path $RunDirectory 'issues.json') -Value $ledger
     Write-DuoForgeJsonAtomic -Path (Join-Path $RunDirectory 'decisions\pending.json') -Value ([ordered]@{ schemaVersion = 1; questions = @($merged.questions) })
+    $reviewPath = Join-Path $finalDirectory 'REVIEW_REPORT.md'
+    Write-DuoForgeTextAtomic -Path $reviewPath -Text (New-DuoForgeThinReviewReportMarkdownInternal -Mode ([string]$Manifest.mode) -StageResults $StageResults -Issues @($merged.issues))
+    $files.Add($reviewPath)
     $questionsPath = Join-Path $finalDirectory 'OPEN_QUESTIONS.md'
-    Write-DuoForgeTextAtomic -Path $questionsPath -Text (New-DuoForgeOpenQuestionsMarkdown -Questions @($merged.questions) -Issues @($merged.issues))
-    $files.Add($questionsPath)
+    if (@($merged.questions).Count -gt 0) {
+        Write-DuoForgeTextAtomic -Path $questionsPath -Text (New-DuoForgeOpenQuestionsMarkdown -Questions @($merged.questions) -Issues @($merged.issues))
+        $files.Add($questionsPath)
+    }
+    elseif (Test-Path -LiteralPath $questionsPath -PathType Leaf) {
+        Remove-Item -LiteralPath $questionsPath -Force
+    }
 
     $statePath = Join-Path $RunDirectory 'state.json'
     $state = ConvertTo-DuoForgeHashtable -InputObject (Read-DuoForgeJson -Path $statePath)

@@ -163,6 +163,27 @@ function New-MarkdownFile {
     return $Path
 }
 
+function Assert-TestArtifactIndexMatchesFiles {
+    param(
+        [Parameter(Mandatory)][string]$FinalDirectory,
+        [Parameter(Mandatory)][string[]]$ExpectedIndexedFiles
+    )
+
+    $indexPath = Join-Path $FinalDirectory 'artifacts.json'
+    Assert-True (Test-Path -LiteralPath $indexPath -PathType Leaf) 'artifacts.json이 없습니다.'
+    $actualNames = @(Get-ChildItem -LiteralPath $FinalDirectory -File | ForEach-Object Name | Sort-Object)
+    $expectedNames = @($ExpectedIndexedFiles + @('artifacts.json') | Sort-Object)
+    Assert-Equal ($actualNames -join ',') ($expectedNames -join ',') 'final 폴더의 실제 파일 목록이 다릅니다.'
+
+    $index = Get-Content -LiteralPath $indexPath -Raw | ConvertFrom-Json -Depth 20
+    Assert-Equal (@($index.files | ForEach-Object name | Sort-Object) -join ',') (@($ExpectedIndexedFiles | Sort-Object) -join ',') 'artifacts.json의 파일 목록이 다릅니다.'
+    foreach ($entry in @($index.files)) {
+        $path = Join-Path $FinalDirectory ([string]$entry.name)
+        $expectedHash = 'sha256:' + (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        Assert-Equal ([string]$entry.sha256) $expectedHash "$($entry.name)의 인덱스 해시가 실제 파일과 다릅니다."
+    }
+}
+
 function Get-TestPromptPriorArtifactStepKeys {
     param([Parameter(Mandatory)][string]$PromptText)
 
@@ -5924,6 +5945,156 @@ try {
         Assert-True (Test-Path -LiteralPath (Join-Path $run.runDirectory 'final\PRD.md') -PathType Leaf)
     }
 
+    Test-Case 'workflow-v3 검토 보고서 - 공동 문서는 공통 검토 절만 만들고 질문 없는 파일 구조와 인덱스를 일치시킨다' {
+        $caseRoot = Join-Path $tempRoot 'thin-review-shared'
+        $workspace = Join-Path $caseRoot 'results'
+        $brief = New-MarkdownFile -Path (Join-Path $caseRoot 'input\brief.md') -Text '# 공동 문서 입력 본문 비노출 표식'
+        $request = New-TestStartRequest -Mode shared-document -Brief $brief -Workspace $workspace -DocumentType prd -MaxRounds 1 -WorkflowVersion workflow-v3 -FirstSynthesizer codex
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $execution = & $module {
+            param($directory)
+            $invoker = {
+                param($step)
+                if ([string]$step.stage -eq 'final-validation') {
+                    return [ordered]@{ primary = [ordered]@{ approved = $true }; metadata = [ordered]@{ summary = '최종 검증 승인' } }
+                }
+                return [ordered]@{
+                    primary = [ordered]@{ documents = @($step.outputDocumentIds | ForEach-Object { '# 공동 최종 문서 원문 비노출 표식' }) }
+                    metadata = [ordered]@{ summary = "검토 요약 $($step.stage)" }
+                }
+            }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $invoker
+        } $run.runDirectory
+        Assert-Equal $execution.status 'COMPLETED' ($execution | ConvertTo-Json -Depth 20 -Compress)
+
+        $finalDirectory = Join-Path $run.runDirectory 'final'
+        $report = Get-Content -LiteralPath (Join-Path $finalDirectory 'REVIEW_REPORT.md') -Raw
+        Assert-ContainsText $report '# 검토 보고서'
+        Assert-ContainsText $report '## 검토 결과 요약'
+        Assert-ContainsText $report '## 주요 결정과 이유'
+        Assert-ContainsText $report '## 채택·거절한 제안과 반영 위치'
+        Assert-NotContainsText $report '## 문서 A/B 출처 추적'
+        Assert-NotContainsText $report '## 개선된 A/B 차이 비교'
+        Assert-NotContainsText $report '공동 문서 입력 본문 비노출 표식'
+        Assert-NotContainsText $report '공동 최종 문서 원문 비노출 표식'
+        Assert-NotContainsText $report '검토 요약 independent-result'
+        Assert-False (Test-Path -LiteralPath (Join-Path $finalDirectory 'OPEN_QUESTIONS.md'))
+        foreach ($legacyName in @('DEBATE_SUMMARY.md', 'DECISIONS.md', 'source-trace.md', 'comparison.md', 'adoption-log.md')) {
+            Assert-False (Test-Path -LiteralPath (Join-Path $finalDirectory $legacyName)) "workflow-v3가 $legacyName 별도 파일을 만들었습니다."
+        }
+        Assert-TestArtifactIndexMatchesFiles -FinalDirectory $finalDirectory -ExpectedIndexedFiles @('PRD.md', 'REVIEW_REPORT.md')
+    }
+
+    Test-Case 'workflow-v3 검토 보고서 - 문서 통합은 A/B 출처 추적 절만 추가하고 질문 없는 파일 구조와 인덱스를 일치시킨다' {
+        $caseRoot = Join-Path $tempRoot 'thin-review-merge'
+        $workspace = Join-Path $caseRoot 'results'
+        $documentA = New-MarkdownFile -Path (Join-Path $caseRoot 'A\source.md') -Text '# 문서 A 입력 본문 비노출 표식'
+        $documentB = New-MarkdownFile -Path (Join-Path $caseRoot 'B\source.md') -Text '# 문서 B 입력 본문 비노출 표식'
+        $request = New-TestStartRequest -Mode document-merge -DocumentA $documentA -DocumentB $documentB -Workspace $workspace -DocumentType custom -MaxRounds 1 -WorkflowVersion workflow-v3 -FirstSynthesizer codex
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $execution = & $module {
+            param($directory)
+            $invoker = {
+                param($step)
+                if ([string]$step.stage -eq 'final-validation') {
+                    return [ordered]@{ primary = [ordered]@{ approved = $true }; metadata = [ordered]@{ summary = '최종 검증 승인' } }
+                }
+                $metadata = if ([string]$step.stage -eq 'integration') {
+                    [ordered]@{
+                        summary = '검토 요약 integration'
+                        findings = @([ordered]@{ category = 'trace'; severity = 'minor'; claim = 'A/B 통합 계보를 확인합니다.'; proposal = '두 입력 계보를 함께 유지합니다.'; requiresUser = $false; blockingProposal = $false; documentIndex = 0 })
+                        openQuestions = @()
+                    }
+                }
+                else {
+                    [ordered]@{ summary = "검토 요약 $($step.stage)" }
+                }
+                return [ordered]@{
+                    primary = [ordered]@{ documents = @($step.outputDocumentIds | ForEach-Object { '# 통합 최종 문서 원문 비노출 표식' }) }
+                    metadata = $metadata
+                }
+            }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $invoker
+        } $run.runDirectory
+        Assert-Equal $execution.status 'COMPLETED' ($execution | ConvertTo-Json -Depth 20 -Compress)
+
+        $finalDirectory = Join-Path $run.runDirectory 'final'
+        $report = Get-Content -LiteralPath (Join-Path $finalDirectory 'REVIEW_REPORT.md') -Raw
+        Assert-ContainsText $report '## 검토 결과 요약'
+        Assert-ContainsText $report '## 주요 결정과 이유'
+        Assert-ContainsText $report '## 채택·거절한 제안과 반영 위치'
+        Assert-ContainsText $report '## 문서 A/B 출처 추적'
+        Assert-ContainsText $report '| 문서 A | 최종 문서 | 통합 결과의 검증된 입력 계보 |'
+        Assert-ContainsText $report '| 문서 B | 최종 문서 | 통합 결과의 검증된 입력 계보 |'
+        Assert-ContainsText $report '정규 쟁점: 전체 1개'
+        Assert-ContainsText $report '명시적인 채택·거절 및 반영 위치가 없습니다.'
+        Assert-NotContainsText $report '## 개선된 A/B 차이 비교'
+        Assert-NotContainsText $report '문서 A 입력 본문 비노출 표식'
+        Assert-NotContainsText $report '문서 B 입력 본문 비노출 표식'
+        Assert-NotContainsText $report '통합 최종 문서 원문 비노출 표식'
+        Assert-NotContainsText $report '검토 요약 integration'
+        Assert-False (Test-Path -LiteralPath (Join-Path $finalDirectory 'OPEN_QUESTIONS.md'))
+        Assert-TestArtifactIndexMatchesFiles -FinalDirectory $finalDirectory -ExpectedIndexedFiles @('FINAL.md', 'REVIEW_REPORT.md')
+    }
+
+    Test-Case 'workflow-v3 검토 보고서 - 문서별 개선은 A′/B′ 비교 절만 추가하고 질문 없는 파일 구조와 인덱스를 일치시킨다' {
+        $caseRoot = Join-Path $tempRoot 'thin-review-dual'
+        $workspace = Join-Path $caseRoot 'results'
+        $documentA = New-MarkdownFile -Path (Join-Path $caseRoot 'A\source.md') -Text '# 문서 A 입력 본문 비노출 표식'
+        $documentB = New-MarkdownFile -Path (Join-Path $caseRoot 'B\source.md') -Text '# 문서 B 입력 본문 비노출 표식'
+        $request = New-TestStartRequest -Mode dual-document -DocumentA $documentA -DocumentB $documentB -Workspace $workspace -DocumentType custom -MaxRounds 1 -WorkflowVersion workflow-v3 -FirstSynthesizer codex
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+        $execution = & $module {
+            param($directory)
+            $invoker = {
+                param($step)
+                if ([string]$step.stage -eq 'final-validation') {
+                    return [ordered]@{ primary = [ordered]@{ approved = $true }; metadata = [ordered]@{ summary = '최종 검증 승인' } }
+                }
+                $metadata = if ([string]$step.stage -eq 'integration') {
+                    [ordered]@{
+                        summary = '검토 요약 integration'
+                        findings = @(
+                            [ordered]@{ category = 'difference'; severity = 'minor'; claim = '문서 A 개선 관점을 확인합니다.'; proposal = '문서 A 계보를 유지합니다.'; requiresUser = $false; blockingProposal = $false; documentIndex = 0 },
+                            [ordered]@{ category = 'difference'; severity = 'minor'; claim = '문서 B 개선 관점을 확인합니다.'; proposal = '문서 B 계보를 유지합니다.'; requiresUser = $false; blockingProposal = $false; documentIndex = 1 }
+                        )
+                        openQuestions = @()
+                    }
+                }
+                else {
+                    [ordered]@{ summary = "검토 요약 $($step.stage)" }
+                }
+                return [ordered]@{
+                    primary = [ordered]@{ documents = @($step.outputDocumentIds | ForEach-Object { "# 문서 $_ 최종 원문 비노출 표식" }) }
+                    metadata = $metadata
+                }
+            }
+            Invoke-DuoForgeStageEngine -RunDirectory $directory -ProviderInvoker $invoker
+        } $run.runDirectory
+        Assert-Equal $execution.status 'COMPLETED' ($execution | ConvertTo-Json -Depth 20 -Compress)
+
+        $finalDirectory = Join-Path $run.runDirectory 'final'
+        $report = Get-Content -LiteralPath (Join-Path $finalDirectory 'REVIEW_REPORT.md') -Raw
+        Assert-ContainsText $report '## 검토 결과 요약'
+        Assert-ContainsText $report '## 주요 결정과 이유'
+        Assert-ContainsText $report '## 채택·거절한 제안과 반영 위치'
+        Assert-ContainsText $report '## 개선된 A/B 차이 비교'
+        Assert-ContainsText $report '| 문서 A′ | 생성됨 | 1 | 0 | 1 | 0 |'
+        Assert-ContainsText $report '| 문서 B′ | 생성됨 | 1 | 0 | 1 | 0 |'
+        Assert-ContainsText $report '명시적인 채택·거절 및 반영 위치가 없습니다.'
+        Assert-NotContainsText $report '## 문서 A/B 출처 추적'
+        Assert-NotContainsText $report '문서 A 입력 본문 비노출 표식'
+        Assert-NotContainsText $report '문서 B 입력 본문 비노출 표식'
+        Assert-NotContainsText $report '문서 A 최종 원문 비노출 표식'
+        Assert-NotContainsText $report '문서 B 최종 원문 비노출 표식'
+        Assert-NotContainsText $report '검토 요약 integration'
+        Assert-False (Test-Path -LiteralPath (Join-Path $finalDirectory 'OPEN_QUESTIONS.md'))
+        Assert-TestArtifactIndexMatchesFiles -FinalDirectory $finalDirectory -ExpectedIndexedFiles @('document-A-final.md', 'document-B-final.md', 'REVIEW_REPORT.md')
+    }
+
     Test-Case 'workflow-v3 추가 자료 역할은 세 문서 모드의 입력 계약을 보존한다' {
         $caseRoot = Join-Path $tempRoot 'thin-core-evidence-roles'
         $brief = New-MarkdownFile -Path (Join-Path $caseRoot 'shared\brief.md') -Text '# 공동 입력'
@@ -6049,6 +6220,9 @@ try {
         Assert-Equal $first.calls.Count 5
         $pending = Get-Content -LiteralPath (Join-Path $run.runDirectory 'decisions\pending.json') -Raw | ConvertFrom-Json -Depth 50
         Assert-Equal @($pending.questions).Count 1
+        $waitingFinalDirectory = Join-Path $run.runDirectory 'final'
+        Assert-True (Test-Path -LiteralPath (Join-Path $waitingFinalDirectory 'OPEN_QUESTIONS.md') -PathType Leaf)
+        Assert-TestArtifactIndexMatchesFiles -FinalDirectory $waitingFinalDirectory -ExpectedIndexedFiles @('FINAL.md', 'OPEN_QUESTIONS.md', 'REVIEW_REPORT.md')
         $answer = Set-DuoForgeIssueAnswer -RunId $run.runId -IssueId ([string]$pending.questions[0].issueKey) -Choice A -ResultsRoot $workspace
         Assert-Equal (@($answer.resetSteps | Sort-Object) -join ',') 'r01-claude-final-validation,r01-codex-final-revision,r01-codex-integration'
         $resetGraph = Get-Content -LiteralPath (Join-Path $run.runDirectory 'steps.json') -Raw | ConvertFrom-Json -Depth 50
@@ -6089,6 +6263,11 @@ try {
         Assert-Equal $resolved[0].resolutionStatus 'RESOLVED'
         Assert-False ([bool]$resolved[0].blocking)
         Assert-ContainsText (Get-Content -LiteralPath (Join-Path $run.runDirectory 'final\FINAL.md') -Raw) '결정 반영 합의 문서'
+        Assert-False (Test-Path -LiteralPath (Join-Path $run.runDirectory 'final\OPEN_QUESTIONS.md')) '답변 완료 뒤 이전 질문 파일이 남았습니다.'
+        Assert-TestArtifactIndexMatchesFiles -FinalDirectory (Join-Path $run.runDirectory 'final') -ExpectedIndexedFiles @('FINAL.md', 'REVIEW_REPORT.md')
+        $reviewReport = Get-Content -LiteralPath (Join-Path $run.runDirectory 'final\REVIEW_REPORT.md') -Raw
+        Assert-ContainsText $reviewReport '## 주요 결정과 이유'
+        Assert-ContainsText $reviewReport '권장 방향 반영'
         $nonDecisionSurfaces = @(
             (Get-Content -LiteralPath (Join-Path $run.runDirectory 'state.json') -Raw),
             (Get-Content -LiteralPath (Join-Path $run.runDirectory 'steps.json') -Raw),

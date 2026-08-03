@@ -110,9 +110,9 @@
 
 신규 문서 작업을 `workflow-v3/thin-core-v1`으로 전환했다. 양쪽 독립 결과 2회, 통합 1회, 반대 AI 최종 검증 1회를 기본으로 사용하고 차단 지적이 있을 때만 최종 수정 1회를 연다. 공급자 출력 계약과 runtime 검증을 하나의 정규 정의에서 생성하며 유효한 주 문서는 보존한 채 잘못된 부가 메타데이터만 격리한다. `RECOVER`는 정확한 실패·질문 계약이 일치할 때만 provider 0-call로 결정 영향 단계 또는 마지막 최종 수정 한 번을 준비한다. 세부 계약은 `docs/IMPLEMENTATION_PLAN.md` 슬라이스 23과 `require/PRD.md` 9.7을 따른다.
 
-### workflow-v3 부속 추적 산출물 — 미충족
+### workflow-v3 통합 검토 보고서 — 완료
 
-현재 workflow-v3 렌더러는 모드 1·2의 문서 유형별 최종 문서 또는 모드 3의 `document-A-final.md`·`document-B-final.md`와 `OPEN_QUESTIONS.md`, `artifacts.json`만 생성한다. 보존된 실제 `document-merge` 완료 실행에서도 이 세 파일만 확인됐다. PRD가 요구하는 모드 2의 `source-trace.md`, 공통 `DEBATE_SUMMARY.md`·`DECISIONS.md`, 모드 3의 `comparison.md`·`adoption-log.md`는 v3 경로에 구현되지 않았다. 핵심 문서 생성은 동작하지만 추적성 산출물 계약은 미충족이며, 수정 범위와 순서는 아직 다음 구현 계획으로 합의하지 않았다.
+workflow-v3의 여러 사람용 부속 결과를 `REVIEW_REPORT.md` 하나로 통합했다. 공통 검토 결과, 주요 결정과 이유, 명시적인 채택·거절 및 반영 위치를 기록하고 `document-merge`에만 A/B 출처 계보, `dual-document`에만 A′/B′ 정규 쟁점 비교를 추가한다. 기록이 없는 채택 여부나 반영 위치는 최종 문서 본문에서 추정하지 않는다. 실제 미결정 질문이 있을 때만 `OPEN_QUESTIONS.md`를 만들고 `artifacts.json`은 실제 생성 파일과 SHA-256을 나열하는 내부 인덱스로 유지한다. 세 작업 유형의 주입 invoker 회귀, 질문 생성·답변 뒤 제거, 인덱스 해시와 비노출 경계를 검증하며 workflow-v1/v2의 기존 출력과 재개 계약은 변경하지 않는다.
 
 ### 진행·복구·완료 화면 정돈 — 완료
 
