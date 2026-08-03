@@ -709,6 +709,56 @@ try {
         Assert-True ('AllowEmptyStringAttribute' -in @($surface.cursorRendererLineAttributes)) '제목과 안내 사이의 빈 줄이 커서 렌더러 바인딩에서 거부되었습니다.'
     }
 
+    Test-Case '작업 선택 목록은 상태 시각으로 같은 이름을 구분한다' {
+        $surface = & $module {
+            param($fixtureRoot)
+            $runs = @(
+                [ordered]@{ runId = 'run-20260802-171822-578c53'; name = '같은 작업'; mode = 'document-merge'; status = 'RESUMABLE_ERROR'; statusAt = '2026-08-02T08:18:35.6892445+00:00'; updatedAt = '2026-08-02T08:19:35.6892445+00:00' }
+                [ordered]@{ runId = 'run-20260802-171458-8df694'; name = '같은 작업'; mode = 'document-merge'; status = 'RESUMABLE_ERROR'; updatedAt = '2026-08-02T08:16:26.2070041+00:00' }
+                [ordered]@{ runId = 'run-20260803-040145-3aba76'; name = '같은 작업'; mode = 'document-merge'; status = 'COMPLETED'; updatedAt = '2026-08-03T12:16:51.3286081+00:00' }
+            )
+            [System.IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
+            $eventsPath = Join-Path $fixtureRoot 'events.jsonl'
+            Add-DuoForgeJsonLine -Path $eventsPath -Value ([ordered]@{ at = '2026-08-02T08:18:35.6892445+00:00'; type = 'STATE_CHANGED'; status = 'RESUMABLE_ERROR'; data = [ordered]@{} })
+            Add-DuoForgeJsonLine -Path $eventsPath -Value ([ordered]@{ at = '2026-08-02T08:19:35.6892445+00:00'; type = 'RECOVERY_PREPARED'; status = 'RESUMABLE_ERROR'; data = [ordered]@{} })
+            $capture = [ordered]@{ items = @() }
+            $menuInvoker = {
+                param($items)
+                $capture.items = @($items)
+                return [ordered]@{ action = 'back'; source = 'key' }
+            }.GetNewClosure()
+            $null = Select-DuoForgeInteractiveRun -Runs $runs -Prompt '작업을 선택해 주세요.' -MenuInvoker $menuInvoker
+            $normalized = @(ConvertTo-DuoForgeMenuItemsInternal -Items @($capture.items))
+            $frames = foreach ($width in @(72, 80, 100, 120)) {
+                $lines = @(New-DuoForgeMenuFrameInternal -Items $normalized -Title '작업을 선택해 주세요.' -SelectedIndex 0 -Width $width -Height 24)
+                [ordered]@{
+                    width = $width
+                    lines = $lines
+                    maximumWidth = (@($lines | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) }) | Measure-Object -Maximum).Maximum
+                }
+            }
+            [ordered]@{
+                labels = @($capture.items | Select-Object -First 3 | ForEach-Object { [string]$_.label })
+                expectedFailureTimes = @(
+                    ([DateTimeOffset]::Parse([string]$runs[0].statusAt)).ToLocalTime().ToString('yyyy.MM.dd HH:mm:ss')
+                    ([DateTimeOffset]::Parse([string]$runs[1].updatedAt)).ToLocalTime().ToString('yyyy.MM.dd HH:mm:ss')
+                )
+                expectedCompletedTime = ([DateTimeOffset]::Parse([string]$runs[2].updatedAt)).ToLocalTime().ToString('yyyy.MM.dd HH:mm:ss')
+                resolvedStatusAt = Get-DuoForgeRunStatusAtInternal -RunDirectory $fixtureRoot -Status 'RESUMABLE_ERROR' -Fallback '2026-08-02T08:19:35.6892445+00:00'
+                frames = @($frames)
+            }
+        } (Join-Path $tempRoot 'run-list-status-at')
+
+        Assert-ContainsText $surface.labels[0] ('오류 시각 ' + $surface.expectedFailureTimes[0])
+        Assert-ContainsText $surface.labels[1] ('오류 시각 ' + $surface.expectedFailureTimes[1])
+        Assert-ContainsText $surface.labels[2] ('완료 시각 ' + $surface.expectedCompletedTime)
+        Assert-True ($surface.labels[0] -ne $surface.labels[1]) '같은 이름과 상태의 작업 행이 여전히 서로 구분되지 않습니다.'
+        Assert-Equal ([DateTimeOffset]$surface.resolvedStatusAt).ToUniversalTime().ToString('O') '2026-08-02T08:18:35.6892445+00:00' '복구 준비 시각이 실제 오류 상태 진입 시각을 덮었습니다.'
+        foreach ($frame in @($surface.frames)) {
+            Assert-True ([int]$frame.maximumWidth -lt [int]$frame.width) "$($frame.width)x24 작업 목록이 화면 폭을 넘었습니다."
+        }
+    }
+
     Test-Case '커서 메뉴는 선택 항목과 하위 설명의 색을 분리하고 무색 구분을 보존한다' {
         $surface = & $module {
             $items = @(ConvertTo-DuoForgeMenuItemsInternal -Items @(

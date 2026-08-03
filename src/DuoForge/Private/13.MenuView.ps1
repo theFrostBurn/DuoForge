@@ -132,6 +132,41 @@ function Get-DuoForgeDisplayStateLabelInternal {
     }
 }
 
+function Get-DuoForgeRunListMetadataInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Run)
+
+    $status = [string](Get-DuoForgeObjectValue -Object $Run -Name 'status')
+    $timeLabel = switch ($status) {
+        { $_ -in @('COMPLETED', 'COMPLETED_PARTIAL') } { '완료'; break }
+        'QUESTION_LIMIT_REACHED' { '종료' }
+        'RESUMABLE_ERROR' { '오류' }
+        { $_ -in @('FAILED_STAGE', 'SOURCE_DRIFT') } { '실패'; break }
+        'CANCELLED' { '포기' }
+        default { '최근 변경' }
+    }
+
+    $timeText = '기록 없음'
+    $updatedAt = Get-DuoForgeObjectValue -Object $Run -Name 'statusAt' -Default (Get-DuoForgeObjectValue -Object $Run -Name 'updatedAt')
+    if ($null -ne $updatedAt -and -not [string]::IsNullOrWhiteSpace([string]$updatedAt)) {
+        try {
+            $timestamp = if ($updatedAt -is [DateTimeOffset]) {
+                [DateTimeOffset]$updatedAt
+            }
+            elseif ($updatedAt -is [DateTime]) {
+                [DateTimeOffset]([DateTime]$updatedAt)
+            }
+            else {
+                [DateTimeOffset]::Parse([string]$updatedAt, [Globalization.CultureInfo]::InvariantCulture)
+            }
+            $timeText = $timestamp.ToLocalTime().ToString('yyyy.MM.dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture)
+        }
+        catch { $timeText = '기록 없음' }
+    }
+
+    return ('{0} 시각 {1}' -f $timeLabel, $timeText)
+}
+
 function Get-DuoForgeDisplaySeverityLabelInternal {
     [CmdletBinding()]
     param([AllowEmptyString()][Parameter(Mandatory)][string]$Severity)

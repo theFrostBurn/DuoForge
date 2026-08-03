@@ -1113,6 +1113,33 @@ Test-Case '작업 메뉴와 홈은 포기와 영구 삭제를 별도 항목으�
     Assert-Equal @($homeCapture.items | Where-Object { [string]$_.label -eq '실행 환경 확인, 로그인 및 설정' -and [string]$_.value -eq '6' }).Count 1
 }
 
+Test-Case '홈 메뉴는 모든 작업 목록의 건수를 표시한다' {
+    $homeCapture = [ordered]@{ items = $null }
+    $homeMenu = {
+        param($items, $title, $initialSelectedIndex, $returnTarget, $cancelReturnTarget, $interruptReturnTarget)
+        $homeCapture.items = @($items)
+        return [ordered]@{ action = 'submit'; value = 'exit'; source = 'line'; returnTarget = $returnTarget }
+    }.GetNewClosure()
+    $runs = @(
+        [ordered]@{ runId = 'active'; name = '진행 작업'; mode = 'shared-document'; status = 'PAUSED_USER'; updatedAt = ''; runDirectory = '' }
+        [ordered]@{ runId = 'completed'; name = '완료 작업'; mode = 'shared-document'; status = 'COMPLETED'; updatedAt = ''; runDirectory = '' }
+        [ordered]@{ runId = 'partial'; name = '일부 완료 작업'; mode = 'shared-document'; status = 'COMPLETED_PARTIAL'; updatedAt = ''; runDirectory = '' }
+        [ordered]@{ runId = 'question-limit'; name = '확인 종료 작업'; mode = 'shared-document'; status = 'QUESTION_LIMIT_REACHED'; updatedAt = ''; runDirectory = '' }
+        [ordered]@{ runId = 'failed'; name = '실패 작업'; mode = 'shared-document'; status = 'FAILED_STAGE'; updatedAt = ''; runDirectory = '' }
+        [ordered]@{ runId = 'cancelled'; name = '포기 작업'; mode = 'shared-document'; status = 'CANCELLED'; updatedAt = ''; runDirectory = '' }
+    )
+    $null = & $module {
+        param($runValues, $menuInvoker)
+        $runsInvoker = { @($runValues) }.GetNewClosure()
+        Invoke-DuoForgeInteractiveHome -SetupInvoker { [ordered]@{ readyForDocumentModes = $true } } -RunsInvoker $runsInvoker -MenuInvoker $menuInvoker 6>$null
+    } $runs $homeMenu
+
+    Assert-Equal @($homeCapture.items | Where-Object { [string]$_.label -eq '진행 중인 작업 보기 (1)' -and [string]$_.value -eq '2' }).Count 1
+    Assert-Equal @($homeCapture.items | Where-Object { [string]$_.label -eq '완료된 결과 보기 (3)' -and [string]$_.value -eq '3' }).Count 1
+    Assert-Equal @($homeCapture.items | Where-Object { [string]$_.label -eq '실패한 작업 확인 (1)' -and [string]$_.value -eq '4' }).Count 1
+    Assert-Equal @($homeCapture.items | Where-Object { [string]$_.label -eq '포기한 작업 관리 (1)' -and [string]$_.value -eq '5' }).Count 1
+}
+
 Test-Case '실패한 작업은 홈 전용 목록과 제한된 다시 시도 준비 동작에 나타난다' {
     $fixture = New-DuoForgeInteractionTestRun -Name 'failed-run-menu'
     $null = & $module {

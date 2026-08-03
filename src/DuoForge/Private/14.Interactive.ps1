@@ -312,7 +312,7 @@ function Select-DuoForgeInteractiveRun {
         $run = $Runs[$index]
         $items.Add([ordered]@{
             value = [string]$index
-            label = ('{0} · {1} · {2}' -f $run.name, (Get-DuoForgeDisplayModeLabelInternal -Mode ([string]$run.mode)), (Get-DuoForgeDisplayStateLabelInternal -Status ([string]$run.status)))
+            label = ('{0} · {1} · {2} · {3}' -f (Get-DuoForgeRunListMetadataInternal -Run $run), $run.name, (Get-DuoForgeDisplayModeLabelInternal -Mode ([string]$run.mode)), (Get-DuoForgeDisplayStateLabelInternal -Status ([string]$run.status)))
             shortcuts = @([string]($index + 1))
             enabled = $true
         })
@@ -2093,13 +2093,14 @@ function Invoke-DuoForgeInteractiveHome {
         } | ForEach-Object { [string]$_.runId })
         $failedLikeRunIds = @($runtimeLimitedRunIds + $recoveryRequiredRunIds | Sort-Object -Unique)
         $activeCount = @($runs | Where-Object { $_.status -notin @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED', 'FAILED_STAGE', 'SOURCE_DRIFT', 'CANCELLED') -and [string]$_.runId -notin $failedLikeRunIds }).Count
+        $completedCount = @($runs | Where-Object { $_.status -in @('COMPLETED', 'COMPLETED_PARTIAL', 'QUESTION_LIMIT_REACHED') }).Count
         $failedCount = @($runs | Where-Object { $_.status -in $failedStates -or [string]$_.runId -in $failedLikeRunIds }).Count
         $abandonedCount = @($runs | Where-Object { $_.status -eq 'CANCELLED' }).Count
         Write-DuoForgeDisplaySpacerInternal
         $choiceInteraction = Invoke-DuoForgeMenuInteractionInternal -Title 'DuoForge' -ReturnTarget shell -CancelReturnTarget shell -InterruptReturnTarget shell -Footer '↑/↓ 이동 · Home/End · Enter 선택 · Esc/Q 종료' -InputReader $InputReader -MenuInvoker $MenuInvoker -Items @(
             [ordered]@{ value = '1'; label = '새 작업 시작'; shortcuts = @('1'); enabled = $true }
             [ordered]@{ value = '2'; label = "진행 중인 작업 보기 ($activeCount)"; shortcuts = @('2'); enabled = $true }
-            [ordered]@{ value = '3'; label = '완료된 결과 보기'; shortcuts = @('3'); enabled = $true }
+            [ordered]@{ value = '3'; label = "완료된 결과 보기 ($completedCount)"; shortcuts = @('3'); enabled = $true }
             [ordered]@{ value = '4'; label = "실패한 작업 확인 ($failedCount)"; shortcuts = @('4'); enabled = $true }
             [ordered]@{ value = '5'; label = "포기한 작업 관리 ($abandonedCount)"; shortcuts = @('5'); enabled = $true }
             [ordered]@{ value = '6'; label = '실행 환경 확인, 로그인 및 설정'; shortcuts = @('6'); enabled = $true }

@@ -1286,6 +1286,38 @@ function Get-DuoForgeRunInternal {
     }
 }
 
+function Get-DuoForgeRunStatusAtInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$RunDirectory,
+        [AllowEmptyString()][Parameter(Mandatory)][string]$Status,
+        [AllowNull()]$Fallback
+    )
+
+    try {
+        $events = @(Read-DuoForgeJsonLines -Path (Join-Path $RunDirectory 'events.jsonl') -AllowMissing)
+        $statusEvents = @()
+        if ($Status -in @('RESUMABLE_ERROR', 'FAILED_STAGE')) {
+            $statusEvents = @($events | Where-Object {
+                [string](Get-DuoForgeObjectValue -Object $_ -Name 'status') -eq $Status -and
+                [string](Get-DuoForgeObjectValue -Object $_ -Name 'type') -in @('STAGE_FAILED', 'FINAL_ARTIFACTS_FAILED', 'COMPLETED_OUTPUT_CORRUPTION_DETECTED')
+            })
+        }
+        if ($statusEvents.Count -eq 0) {
+            $statusEvents = @($events | Where-Object {
+                [string](Get-DuoForgeObjectValue -Object $_ -Name 'status') -eq $Status -and
+                [string](Get-DuoForgeObjectValue -Object $_ -Name 'type') -eq 'STATE_CHANGED'
+            })
+        }
+        if ($statusEvents.Count -gt 0) {
+            $eventAt = Get-DuoForgeObjectValue -Object $statusEvents[-1] -Name 'at'
+            if ($null -ne $eventAt -and -not [string]::IsNullOrWhiteSpace([string]$eventAt)) { return $eventAt }
+        }
+    }
+    catch { }
+    return $Fallback
+}
+
 function Get-DuoForgeRunsInternal {
     [CmdletBinding()]
     param([string]$ResultsRoot)
@@ -1306,6 +1338,7 @@ function Get-DuoForgeRunsInternal {
                     name = $manifest.name
                     mode = $state.mode
                     status = $state.status
+                    statusAt = Get-DuoForgeRunStatusAtInternal -RunDirectory $directory.FullName -Status ([string]$state.status) -Fallback $state.updatedAt
                     updatedAt = $state.updatedAt
                     runDirectory = $directory.FullName
                 }
