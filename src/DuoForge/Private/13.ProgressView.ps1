@@ -260,6 +260,65 @@ function Get-DuoForgeProgressDiagnosticReferenceInternal {
     return [ordered]@{ code = $code; diagnosticId = $diagnosticId; diagnosticsPath = $diagnosticsPath; diagnosticWarningCode = $warningCode }
 }
 
+function Test-DuoForgeProgressWarningEventInternal {
+    [CmdletBinding()]
+    param([AllowNull()]$Event)
+
+    if ($null -eq $Event) { return $false }
+    return [string](Get-DuoForgeObjectValue -Object $Event -Name 'type' -Default '') -in @('STAGE_INTERRUPTED_RECOVERED', 'STAGE_RETRY_SCHEDULED')
+}
+
+function New-DuoForgeProgressAlertInternal {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Event)
+
+    if (-not (Test-DuoForgeProgressWarningEventInternal -Event $Event)) { return $null }
+    $type = [string](Get-DuoForgeObjectValue -Object $Event -Name 'type' -Default '')
+    $data = Get-DuoForgeObjectValue -Object $Event -Name 'data' -Default ([ordered]@{})
+    $stepKey = ConvertTo-DuoForgeDiagnosticTokenInternal -Value (Get-DuoForgeObjectValue -Object $data -Name 'stepKey') -MaximumLength 160
+    $codeFallback = if ($type -eq 'STAGE_INTERRUPTED_RECOVERED') { 'DF-STAGE-INTERRUPTED' } else { 'DF-UNEXPECTED' }
+    $code = ConvertTo-DuoForgeDiagnosticTokenInternal -Value (Get-DuoForgeObjectValue -Object $data -Name 'code') -Fallback $codeFallback -MaximumLength 80
+    $message = if ($type -eq 'STAGE_INTERRUPTED_RECOVERED') {
+        '이전에 중단된 단계를 안전하게 복구했습니다.'
+    }
+    else {
+        (Get-DuoForgeDiagnosticPublicSummaryInternal -Code $code) + ' · 다시 시도 중'
+    }
+    return [ordered]@{
+        id = '{0}|{1}|{2}' -f $type, $stepKey, $code
+        type = $type
+        stepKey = $stepKey
+        code = $code
+        message = $message
+    }
+}
+
+function Update-DuoForgeProgressAlertsInternal {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][System.Collections.IDictionary]$View,
+        [Parameter(Mandatory)]$Event
+    )
+
+    $alerts = @()
+    if ($View.Contains('recentAlerts') -and $null -ne $View.recentAlerts) { $alerts = @($View.recentAlerts) }
+    $type = [string](Get-DuoForgeObjectValue -Object $Event -Name 'type' -Default '')
+    $data = Get-DuoForgeObjectValue -Object $Event -Name 'data' -Default ([ordered]@{})
+    $stepKey = [string](Get-DuoForgeObjectValue -Object $data -Name 'stepKey' -Default '')
+
+    if ($type -in @('STAGE_COMMITTED', 'STAGE_FAILED') -and -not [string]::IsNullOrWhiteSpace($stepKey)) {
+        $View.recentAlerts = @($alerts | Where-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'stepKey' -Default '') -cne $stepKey })
+        return
+    }
+    if (-not (Test-DuoForgeProgressWarningEventInternal -Event $Event)) { return }
+
+    $alert = New-DuoForgeProgressAlertInternal -Event $Event
+    if ($null -eq $alert) { return }
+    $alertId = [string]$alert.id
+    $alerts = @($alerts | Where-Object { [string](Get-DuoForgeObjectValue -Object $_ -Name 'id' -Default '') -cne $alertId }) + @($alert)
+    $View.recentAlerts = @($alerts | Select-Object -Last 3)
+}
+
 function Get-DuoForgeProgressBarrierStatusInternal {
     [CmdletBinding()]
     param([AllowEmptyCollection()][Parameter(Mandatory)][object[]]$Steps)
@@ -853,7 +912,14 @@ function New-DuoForgeProgressFrameInternal {
     if ($screenMode -notin @('overview', 'detail') -or $recentCommitted.Count -eq 0) { $screenMode = 'overview' }
     if ($null -ne $ViewState) { $ViewState.screenMode = $screenMode }
 
-    $diagnosticReference = Get-DuoForgeProgressDiagnosticReferenceInternal -Source $(if ($null -ne $ViewState -and $ViewState.Contains('diagnosticId')) { $ViewState } else { $Snapshot.lastEvent }) -RunDirectory ([string](Get-DuoForgeObjectValue -Object $Snapshot -Name 'runDirectory'))
+    $viewHasDiagnostic = $null -ne $ViewState -and $ViewState.Contains('diagnosticId') -and -not [string]::IsNullOrWhiteSpace([string]$ViewState.diagnosticId)
+    $lastEventIsWarning = Test-DuoForgeProgressWarningEventInternal -Event $Snapshot.lastEvent
+    $diagnosticReference = if ($lastEventIsWarning -and -not $viewHasDiagnostic) {
+        $null
+    }
+    else {
+        Get-DuoForgeProgressDiagnosticReferenceInternal -Source $(if ($viewHasDiagnostic) { $ViewState } else { $Snapshot.lastEvent }) -RunDirectory ([string](Get-DuoForgeObjectValue -Object $Snapshot -Name 'runDirectory'))
+    }
     $diagnosticLines = [System.Collections.Generic.List[string]]::new()
     if ($null -ne $diagnosticReference) {
         $summary = Get-DuoForgeDiagnosticPublicSummaryInternal -Code ([string]$diagnosticReference.code)
@@ -867,6 +933,14 @@ function New-DuoForgeProgressFrameInternal {
         if ([string]$diagnosticReference.diagnosticWarningCode -eq 'DF-DIAGNOSTIC-WRITE') {
             foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '기록 상태' -Value '진단 기록 실패 · DF-DIAGNOSTIC-WRITE' -Layout $displayLayout -Indent 2 -KeyWidth 10 -Role 'warning')) { $diagnosticLines.Add([string]$row.text) }
         }
+    }
+    $progressAlerts = @()
+    if ($null -ne $ViewState -and $ViewState.Contains('recentAlerts') -and $null -ne $ViewState.recentAlerts) {
+        $progressAlerts = @($ViewState.recentAlerts)
+    }
+    if ($progressAlerts.Count -eq 0 -and $lastEventIsWarning) {
+        $fallbackAlert = New-DuoForgeProgressAlertInternal -Event $Snapshot.lastEvent
+        if ($null -ne $fallbackAlert) { $progressAlerts = @($fallbackAlert) }
     }
     $finalMessage = if ($null -ne $ViewState -and $ViewState.Contains('finalMessage')) { [string]$ViewState.finalMessage } else { '' }
     $issueSummary = if ([string]$Snapshot.status -eq 'RUNNING') {
@@ -889,6 +963,15 @@ function New-DuoForgeProgressFrameInternal {
     $tailLines = [System.Collections.Generic.List[string]]::new()
     if ($diagnosticLines.Count -gt 0) { $tailLines.Add((New-DuoForgeProgressSectionLineInternal -Title '작업 오류' -Width $lineWidth)) }
     foreach ($line in $diagnosticLines) { $tailLines.Add([string]$line) }
+    if ($progressAlerts.Count -gt 0) {
+        $tailLines.Add((New-DuoForgeProgressSectionLineInternal -Title '최근 알림' -Width $lineWidth))
+        foreach ($alert in @($progressAlerts | Select-Object -Last 2)) {
+            $alertText = '{0} · {1}' -f [string](Get-DuoForgeObjectValue -Object $alert -Name 'message' -Default ''), [string](Get-DuoForgeObjectValue -Object $alert -Name 'code' -Default '')
+            foreach ($line in @(Split-DuoForgeProgressTextInternal -Text $alertText -Width ([Math]::Max(4, $lineWidth - 2)) -MaximumLines 2)) {
+                $tailLines.Add(('↻ {0}' -f [string]$line))
+            }
+        }
+    }
     if (-not [string]::IsNullOrWhiteSpace($finalMessage)) {
         foreach ($row in @(New-DuoForgeTextRowsInternal -Text $finalMessage -Layout $displayLayout -MaximumLines 3 -Role 'text')) { $tailLines.Add([string]$row.text) }
     }
@@ -1176,7 +1259,8 @@ function Write-DuoForgeProgressLogEventInternal {
     }
     if ($eventRows.Count -gt 0) { Write-DuoForgeDisplayRowsInternal -Rows @(Add-DuoForgeTrailingSpacerRowInternal -Rows @($eventRows)) -Layout $layout }
     if ($type -in @('STAGE_RETRY_SCHEDULED', 'STAGE_FAILED', 'STAGE_INTERRUPTED_RECOVERED', 'FINAL_ARTIFACTS_FAILED')) {
-        Write-DuoForgeDiagnosticReferenceInternal -Source $data -RunDirectory ([string]$View.runDirectory)
+        $diagnosticKind = if ($type -in @('STAGE_RETRY_SCHEDULED', 'STAGE_INTERRUPTED_RECOVERED')) { 'warning' } else { 'error' }
+        Write-DuoForgeDiagnosticReferenceInternal -Source $data -RunDirectory ([string]$View.runDirectory) -Kind $diagnosticKind
     }
 }
 
@@ -1391,11 +1475,13 @@ function New-DuoForgeProgressViewInternal {
         observerFailureCount = 0
         observerFailureCode = ''
         observerFailureReported = $false
+        recentAlerts = @()
         closed = $false
     }
     $convertToHashtableCommand = Get-Command -Name 'ConvertTo-DuoForgeHashtable' -CommandType Function -ErrorAction Stop
     $getObjectValueCommand = Get-Command -Name 'Get-DuoForgeObjectValue' -CommandType Function -ErrorAction Stop
     $controlInputCommand = Get-Command -Name 'Invoke-DuoForgeProgressControlInputInternal' -CommandType Function -ErrorAction Stop
+    $updateAlertsCommand = Get-Command -Name 'Update-DuoForgeProgressAlertsInternal' -CommandType Function -ErrorAction Stop
     $frameFailoverCommand = Get-Command -Name 'Invoke-DuoForgeProgressFrameFailoverInternal' -CommandType Function -ErrorAction Stop
     $writeFrameCommand = if ($null -ne $FrameWriter) { $FrameWriter } else { Get-Command -Name 'Write-DuoForgeProgressFrameInternal' -CommandType Function -ErrorAction Stop }
     $writeLogCommand = Get-Command -Name 'Write-DuoForgeProgressLogEventInternal' -CommandType Function -ErrorAction Stop
@@ -1410,6 +1496,7 @@ function New-DuoForgeProgressViewInternal {
             $view.providerElapsedSeconds = [int](& $getObjectValueCommand -Object $event.data -Name 'elapsedSeconds' -Default 0)
             $view.providerHeartbeatFrameIndex = [int](& $getObjectValueCommand -Object $event.data -Name 'heartbeatFrameIndex' -Default ($view.providerElapsedSeconds * 2))
         }
+        & $updateAlertsCommand -View $view -Event $view.lastEvent
         & $controlInputCommand -View $view -KeyReader $KeyReader -PauseRequester $PauseRequester
         if ([string]$view.mode -eq 'fullscreen') {
             try { & $writeFrameCommand $view }

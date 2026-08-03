@@ -3317,6 +3317,118 @@ try {
         Assert-Equal $repair.invalidReasons[$invalidArtifact.invalidStepKey] 'ARTIFACT_SCHEMA_INVALID'
     }
 
+    Test-Case '복구와 자동 재시도는 노란 최근 알림으로 남고 단계 종료에서 해제된다' {
+        $caseRoot = Join-Path $tempRoot 'progress-persistent-warning'
+        $workspace = Join-Path $caseRoot 'results'
+        $input = New-MarkdownFile -Path (Join-Path $caseRoot 'input\brief.md') -Text '# 진행 알림 수명 회귀'
+        $request = New-TestStartRequest -Mode shared-document -Brief $input -Workspace $workspace -DocumentType prd -MaxRounds 1 -WorkflowVersion workflow-v3
+        $validation = Test-DuoForgeStartRequest -Request $request -DoctorReport (New-FakeDoctor) -Config (New-TestConfig -ResultsRoot $workspace)
+        $run = New-DuoForgeRun -ValidationResult $validation
+
+        $surface = & $module {
+            param($directory)
+            $null = Initialize-DuoForgeStageGraph -RunDirectory $directory
+            $snapshot = Get-DuoForgeProgressSnapshotInternal -RunDirectory $directory
+            $step = $snapshot.steps[0]
+            $view = [ordered]@{ recentAlerts = @(); providerElapsedSeconds = 0 }
+            $recovery = [ordered]@{
+                type = 'STAGE_INTERRUPTED_RECOVERED'
+                data = [ordered]@{
+                    stepKey = [string]$step.stepKey
+                    provider = [string]$step.provider
+                    stage = [string]$step.stage
+                    code = 'DF-STAGE-INTERRUPTED'
+                    diagnosticId = 'diag-safe-recovery'
+                    diagnosticsLocation = 'run'
+                    diagnosticsRelativePath = 'diagnostics.jsonl'
+                }
+            }
+            Update-DuoForgeProgressAlertsInternal -View $view -Event $recovery
+            $snapshot.lastEvent = $recovery
+            $recoveryFrame = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 100 -Height 30 -ViewState $view)
+            $recoveryColored = @($recoveryFrame | ForEach-Object { ConvertTo-DuoForgeProgressColoredLineInternal -Line ([string]$_) })
+            $recoveryLog = (& { Write-DuoForgeProgressLogEventInternal -View ([ordered]@{ runDirectory = $directory }) -Event $recovery } 6>&1 | Out-String)
+
+            $refresh = [ordered]@{ type = 'PROGRESS_REFRESHED'; data = [ordered]@{} }
+            Update-DuoForgeProgressAlertsInternal -View $view -Event $refresh
+            $snapshot.lastEvent = $refresh
+            $refreshFrame = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 100 -Height 30 -ViewState $view)
+            $sizedFrames = foreach ($size in @(@(72, 20), @(80, 24), @(100, 30), @(120, 32))) {
+                $width = [int]$size[0]
+                $height = [int]$size[1]
+                $frame = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width $width -Height $height -ViewState $view)
+                [ordered]@{
+                    width = $width
+                    height = $height
+                    frame = $frame
+                    widths = @($frame | ForEach-Object { Get-DuoForgeProgressTextWidthInternal -Text ([string]$_) })
+                }
+            }
+
+            $commit = [ordered]@{ type = 'STAGE_COMMITTED'; data = [ordered]@{ stepKey = [string]$step.stepKey } }
+            Update-DuoForgeProgressAlertsInternal -View $view -Event $commit
+            $snapshot.lastEvent = $commit
+            $committedFrame = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 100 -Height 30 -ViewState $view)
+
+            $retry = [ordered]@{
+                type = 'STAGE_RETRY_SCHEDULED'
+                data = [ordered]@{
+                    stepKey = [string]$step.stepKey
+                    provider = [string]$step.provider
+                    stage = [string]$step.stage
+                    code = 'DF-PROVIDER-TIMEOUT'
+                    retryMode = 'STANDARD_RETRY'
+                    diagnosticId = 'diag-safe-timeout'
+                    diagnosticsLocation = 'run'
+                    diagnosticsRelativePath = 'diagnostics.jsonl'
+                }
+            }
+            Update-DuoForgeProgressAlertsInternal -View $view -Event $retry
+            $snapshot.lastEvent = $retry
+            $retryFrame = @(New-DuoForgeProgressFrameInternal -Snapshot $snapshot -Width 100 -Height 30 -ViewState $view)
+            $retryLog = (& { Write-DuoForgeProgressLogEventInternal -View ([ordered]@{ runDirectory = $directory }) -Event $retry } 6>&1 | Out-String)
+
+            $failed = [ordered]@{ type = 'STAGE_FAILED'; data = [ordered]@{ stepKey = [string]$step.stepKey; code = 'DF-PROVIDER-TIMEOUT' } }
+            Update-DuoForgeProgressAlertsInternal -View $view -Event $failed
+            [ordered]@{
+                recoveryFrame = $recoveryFrame
+                recoveryColored = $recoveryColored
+                recoveryLog = $recoveryLog
+                refreshFrame = $refreshFrame
+                sizedFrames = @($sizedFrames)
+                committedFrame = $committedFrame
+                retryFrame = $retryFrame
+                retryLog = $retryLog
+                alertsAfterFailure = @($view.recentAlerts)
+            }
+        } $run.runDirectory
+
+        foreach ($frame in @($surface.recoveryFrame, $surface.refreshFrame)) {
+            Assert-ContainsText ($frame -join "`n") '최근 알림'
+            Assert-ContainsText ($frame -join "`n") '이전에 중단된 단계를 안전하게 복구했습니다.'
+            Assert-ContainsText ($frame -join "`n") 'DF-STAGE-INTERRUPTED'
+            Assert-NotContainsText ($frame -join "`n") '작업 오류'
+            Assert-NotContainsText ($frame -join "`n") '오류 코드'
+        }
+        Assert-True (@($surface.recoveryColored | Where-Object { ([string]$_).Contains("`e[33m", [StringComparison]::Ordinal) -and ([string]$_).Contains('이전에 중단된 단계', [StringComparison]::Ordinal) }).Count -gt 0)
+        Assert-Equal @($surface.recoveryColored | Where-Object { ([string]$_).Contains("`e[31m", [StringComparison]::Ordinal) }).Count 0
+        Assert-ContainsText $surface.recoveryLog '주의 코드'
+        Assert-NotContainsText $surface.recoveryLog '오류 코드'
+        foreach ($sized in @($surface.sizedFrames)) {
+            Assert-True (@($sized.frame).Count -le ([int]$sized.height - 1)) "$($sized.width)x$($sized.height) 알림 프레임이 높이를 넘었습니다."
+            Assert-Equal @($sized.widths | Where-Object { [int]$_ -gt ([int]$sized.width - 1) }).Count 0 "$($sized.width)x$($sized.height) 알림 프레임이 폭을 넘었습니다."
+            Assert-ContainsText ($sized.frame -join "`n") '최근 알림'
+            Assert-ContainsText ($sized.frame -join "`n") 'DF-STAGE-INTERRUPTED'
+        }
+        Assert-NotContainsText ($surface.committedFrame -join "`n") '이전에 중단된 단계를 안전하게 복구했습니다.'
+        Assert-ContainsText ($surface.retryFrame -join "`n") 'AI 답변을 기다릴 수 있는 시간이 지났습니다.'
+        Assert-ContainsText ($surface.retryFrame -join "`n") '다시 시도 중'
+        Assert-NotContainsText ($surface.retryFrame -join "`n") '작업 오류'
+        Assert-ContainsText $surface.retryLog '주의 코드'
+        Assert-NotContainsText $surface.retryLog '오류 코드'
+        Assert-Equal @($surface.alertsAfterFailure).Count 0
+    }
+
     Test-Case '풀스크린 진행판은 실제 높이만큼 14단계 흐름과 안전한 최근 본문을 확장한다' {
         $surface = & $module {
             $graph = New-DuoForgeStageGraph -Mode dual-document -MaxRounds 2 -FirstSynthesizer alternate -ContextBatchCount 0 -ContextBatchDocumentIds @() -WorkflowVersion workflow-v2

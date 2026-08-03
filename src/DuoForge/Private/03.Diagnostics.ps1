@@ -303,7 +303,8 @@ function Write-DuoForgeDiagnosticReferenceInternal {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]$Source,
-        [string]$RunDirectory
+        [string]$RunDirectory,
+        [ValidateSet('error', 'warning')][string]$Kind = 'error'
     )
 
     $code = ConvertTo-DuoForgeDiagnosticTokenInternal -Value (Get-DuoForgeObjectValue -Object $Source -Name 'code') -Fallback 'DF-UNEXPECTED'
@@ -316,9 +317,11 @@ function Write-DuoForgeDiagnosticReferenceInternal {
     $rows = [System.Collections.Generic.List[object]]::new()
     $publicSummary = [string](Get-DuoForgeObjectValue -Object $Source -Name 'publicSummary' -Default '')
     if ([string]::IsNullOrWhiteSpace($publicSummary)) { $publicSummary = Get-DuoForgeDiagnosticPublicSummaryInternal -Code $code }
-    foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind error -Title $publicSummary -NextAction '오류 코드와 진단 ID를 확인하고, 진단 파일이 있으면 지원 요청에 함께 제공해 주세요.' -Layout $layout)) { $rows.Add($row) }
+    $nextAction = if ($Kind -eq 'warning') { 'AI 작업은 계속됩니다. 반복되거나 최종 실패로 바뀌면 진단 참조를 확인해 주세요.' } else { '오류 코드와 진단 ID를 확인하고, 진단 파일이 있으면 지원 요청에 함께 제공해 주세요.' }
+    foreach ($row in @(New-DuoForgeNoticeRowsInternal -Kind $Kind -Title $publicSummary -NextAction $nextAction -Layout $layout)) { $rows.Add($row) }
     foreach ($row in @(New-DuoForgeSectionRowsInternal -Title '진단 참조' -Body '' -Layout $layout)) { $rows.Add($row) }
-    foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '오류 코드' -Value $code -Layout $layout -KeyWidth 12 -Role 'error')) { $rows.Add($row) }
+    $codeLabel = if ($Kind -eq 'warning') { '주의 코드' } else { '오류 코드' }
+    foreach ($row in @(New-DuoForgeFieldRowsInternal -Label $codeLabel -Value $code -Layout $layout -KeyWidth 12 -Role $Kind)) { $rows.Add($row) }
     if (-not [string]::IsNullOrWhiteSpace($diagnosticId)) {
         foreach ($row in @(New-DuoForgeFieldRowsInternal -Label '진단 ID' -Value $diagnosticId -Layout $layout -KeyWidth 12 -Role 'meta')) { $rows.Add($row) }
     }
