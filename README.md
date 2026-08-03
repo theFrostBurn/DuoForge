@@ -1,14 +1,14 @@
 # DuoForge
 
-DuoForge는 Codex와 Claude가 불변 입력 스냅샷을 검토하고 토론하도록 조율하는 Windows 로컬 우선 CLI다. 문서 A/B는 공급자 소유권이 아닌 안정적인 문서 계보이며, Codex와 Claude는 교체 가능한 검토자·응답자·편집자·합성자·검증자다.
+DuoForge는 Codex와 Claude가 불변 입력 스냅샷을 검토하고 합의 문서를 만들도록 조율하는 Windows 로컬 우선 CLI다. 문서 A/B는 공급자 소유권이 아닌 안정적인 문서 계보이며, Codex와 Claude는 교체 가능한 작성자·통합 담당·검증자다.
 
-현재 저장소는 PRD v1.11의 문서 모드 확장 Beta 1차 완료본이다. 공통 안전 기반, 실행별 안전 진단, 필수 모델·분석 깊이 선택, 실행 계획, 불변 스냅샷, 구조화 토론 단계, 재개 가능한 상태 저장, 키보드 메뉴와 LIVE 토론 진행판, 쟁점 설명·근거 추가·사용자 결정과 최종 산출물 렌더링을 제공한다.
+현재 저장소는 PRD v1.11의 문서 모드 확장 Beta 구현본이다. 신규 문서 작업은 `workflow-v3/thin-core-v1`을 사용해 양쪽 AI의 독립 결과, 지정 통합, 반대 AI의 최종 검증과 필요한 경우에만 수행하는 최종 수정으로 진행한다. 공통 안전 기반, 실행별 안전 진단, 필수 모델·분석 깊이 선택, 불변 스냅샷, 재개 가능한 상태 저장, 키보드 메뉴와 LIVE 진행판, 쟁점 설명·근거 추가·사용자 결정, 통합 복구와 최종 산출물 렌더링을 제공한다.
 
 | 화면 모드 | 내부 ID | 입력 | 결과 | 상태 |
 |---|---|---|---|---|
-| 1. 컨셉으로 공동 문서 만들기 | `shared-document` | brief 또는 컨셉 C | 공동 문서 C' | 실제 E2E 통과 (`AWAITING_USER`) |
-| 2. 두 문서를 하나로 합의하기 | `document-merge` | 문서 A/B | 합의 문서 C와 출처 추적표 | 실제 E2E 통과 (`AWAITING_USER`) |
-| 3. 두 문서를 각각 개선하기 | `dual-document` | 문서 A/B | 개선 문서 A'/B'와 채택 기록 | 실제 E2E 통과 (`AWAITING_USER`) |
+| 1. 컨셉으로 공동 문서 만들기 | `shared-document` | brief 또는 컨셉 C | 공동 문서 C' | 활성 (`workflow-v3`, 요약·결정 기록 미구현) |
+| 2. 두 문서를 하나로 합의하기 | `document-merge` | 문서 A/B | 합의 문서 C | 활성 (`workflow-v3` 완료 실행 확인, 출처 추적표 미구현) |
+| 3. 두 문서를 각각 개선하기 | `dual-document` | 문서 A/B | 개선 문서 A'/B' | 활성 (`workflow-v3`, 비교·채택 기록 미구현) |
 | 4. 두 프로젝트 비교하기 | `dual-project-audit` | 프로젝트 A/B | 비교 보고서 | 격리 실패로 비활성 |
 
 모드 4는 Windows 격리 후보가 범위 밖 읽기와 자식 프로세스 차단에 실패하여 `DF-PREFLIGHT-3A-ISOLATION`으로 입력 전송과 모델 호출 전에 차단된다. 사용자 확인으로 이 게이트를 열 수 없다.
@@ -46,7 +46,7 @@ DuoForge는 Codex와 Claude가 불변 입력 스냅샷을 검토하고 토론하
   --claude-model "opus" `
   --claude-effort "high" `
   --type "prd" `
-  --max-rounds 2 `
+  --max-rounds 1 `
   --pause-after-round `
   --plan-only
 ```
@@ -59,35 +59,36 @@ DuoForge는 Codex와 Claude가 불변 입력 스냅샷을 검토하고 토론하
   --document-b ".\docs-b\PRD.md" `
   --codex-model "gpt-5.6-sol" --codex-effort "high" `
   --claude-model "opus" --claude-effort "high" `
-  --type "prd" --max-rounds 2 --plan-only
+  --type "prd" --max-rounds 1 --plan-only
 
 .\duoforge.cmd start dual-document `
   --document-a ".\docs-a\PRD.md" `
   --document-b ".\docs-b\PRD.md" `
   --codex-model "gpt-5.6-sol" --codex-effort "high" `
   --claude-model "opus" --claude-effort "high" `
-  --type "prd" --max-rounds 2 --plan-only
+  --type "prd" --max-rounds 1 --plan-only
 ```
 
 모드 2·3은 문서 A/B의 폴더가 같거나 중첩되면 보조 Markdown 문맥이 섞이지 않도록 시작 전에 차단한다. 정규 보조 문맥 옵션은 `--document-a-context`와 `--document-b-context`다. 기존 `--codex`/`--claude`, `--codex-context`/`--claude-context`는 각각 A/B로 변환하고 사용 중단 예정 경고를 남기지만, 신규 실행 기록에는 정규 `documentA/documentB`, `documentAContext/documentBContext` 의미만 사용한다. 정규 옵션과 별칭이 서로 다른 경로를 지정하거나 알 수 없는 CLI 옵션이 들어오면 시작 전에 실패 폐쇄한다.
 
-`--plan-only`는 AI 작업이나 작업 기록을 만들지 않고 선택한 모델·분석 깊이, 확인·전송 범위와 최대 AI 요청 횟수만 보여준다. 네 선택 옵션은 생략할 수 없으며, 대화형 메뉴의 권장 항목은 처음 강조될 뿐 `Enter` 또는 단축키로 확정하기 전에는 선택값이 생기지 않는다.
+`--plan-only`는 AI 작업이나 작업 기록을 만들지 않고 선택한 모델·분석 깊이, 확인·전송 범위와 최대 AI 요청 횟수만 보여준다. 네 AI 선택 옵션은 생략할 수 없으며, 대화형 메뉴의 권장 항목은 처음 강조될 뿐 `Enter` 또는 단축키로 확정하기 전에는 선택값이 생기지 않는다. 신규 `workflow-v3`는 하나의 고정 그래프를 사용하므로 `--max-rounds`는 `1`만 허용한다.
 
-신규 실행은 `workflow-v2`와 문서 계보 A/B, 단계 작업자 `performedBy`를 분리해 기록한다. `workflowVersion`이 없는 기존 실행은 `workflow-v1`로 읽으며 기존 단계 그래프, `owner-response`/`owned-document-revision`, 파일명과 프롬프트 의미를 묵시적으로 바꾸거나 재작성하지 않는다.
+신규 실행은 `workflow-v3/thin-core-v1`과 문서 계보 A/B를 기록한다. 기본 그래프는 Codex·Claude 독립 결과 각 1회, 지정 통합 담당 1회, 반대 AI 최종 검증 1회로 총 4회이며, Critical 또는 차단 Major 지적이 있을 때만 통합 담당의 최종 수정 1회를 추가한다. 공급자가 반환하지 않아도 되는 단계·작업자·문서·쟁점 식별 정보는 실행 그래프와 출력 슬롯을 기준으로 앱이 로컬에서 부착한다.
 
-신규 저장 세대는 `manifest.json` schema 4와 `state.json`, `inputs/inventory.json`, `issues.json` schema 2를 `duoforge-run-v2` 계약으로 묶는다. manifest의 입력은 문서 본문이나 원본 경로가 아니라 스냅샷 이름과 SHA-256만 기록하며, 역할은 inventory의 `roles.documents.A/B`와 일치해야 한다. 저장 파일의 버전·역할이나 manifest에서 계산한 단계 그래프의 작업자·대상·출처·의존성이 섞이면 공급자 호출 전에 `DF-RUN-STORAGE-CONTRACT`으로 차단한다. 기존 workflow-v1과 초기 workflow-v2 저장 세대는 해당 세대 그대로 읽고 재작성하지 않는다.
+신규 저장 세대는 `manifest.json` schema 5와 `duoforge-run-v3`, `steps.json` schema 3, 단계 그래프·결과 schema 3 계약을 사용한다. `state.json`, `inputs/inventory.json`, `issues.json`은 schema 2로 묶고 프롬프트 계약은 `duoforge-thin-stage-v1`로 고정한다. manifest의 입력은 문서 본문이나 원본 경로가 아니라 스냅샷 이름과 SHA-256만 기록하며, 역할은 inventory의 `roles.documents.A/B`와 일치해야 한다. 저장 파일의 버전·역할이나 계산된 단계 그래프가 섞이면 공급자 호출 전에 `DF-RUN-STORAGE-CONTRACT`으로 차단한다. `workflowVersion`이 없는 기존 실행은 `workflow-v1`로 읽고 기존 workflow-v1/v2 저장 실행은 원래 그래프와 계약으로만 조회·복구하며 묵시적으로 v3로 변환하지 않는다.
 
 workflow-v2 쟁점은 검토자의 평가 `reviewerVerdicts`, 실제 편집 판단 `editorialDecisions`, 반영 기록 `adoptions`를 분리한다. 검토 동의만으로 쟁점을 해결하지 않으며, 수용 판단은 실제 반영 위치가 있어야 하고 거부 판단도 구체적인 편집 판단과 이유가 있어야 `RESOLVED`가 될 수 있다. 단계별 대상·출처 허용 행렬과 전역 고유 `issueKey` 계약은 A/B 계보 충돌, 중복 정의와 dangling 참조를 저장 전에 차단한다.
 
-완료 산출물은 실행 폴더의 `final` 아래에 생성된다.
+완료 산출물은 실행 폴더의 `final` 아래에 생성된다. 현재 workflow-v3 렌더러의 실제 출력은 다음과 같다.
 
-- 모드 1: 문서 유형별 최종 문서, `DEBATE_SUMMARY.md`, `DECISIONS.md`, `OPEN_QUESTIONS.md`
-- 모드 2: 합의 문서 C, `source-trace.md`, `DEBATE_SUMMARY.md`, `DECISIONS.md`, `OPEN_QUESTIONS.md`
-- 모드 3: `document-A-final.md`, `document-B-final.md`, `comparison.md`, `adoption-log.md`, `OPEN_QUESTIONS.md`
+- 모드 1·2: 문서 유형별 최종 문서, `OPEN_QUESTIONS.md`, `artifacts.json`
+- 모드 3: `document-A-final.md`, `document-B-final.md`, `OPEN_QUESTIONS.md`, `artifacts.json`
+
+PRD가 요구하는 `source-trace.md`, `DEBATE_SUMMARY.md`, `DECISIONS.md`, `comparison.md`, `adoption-log.md`는 workflow-v3 렌더러에 아직 구현되지 않았다. 따라서 모드 2·3의 핵심 문서는 생성되지만 부속 추적 산출물 계약은 미충족 상태다. 저장된 workflow-v1/v2 실행은 당시 그래프와 렌더러 계약에 따라 기존 부속 산출물을 계속 조회·복구한다.
 
 ## 실행 데이터
 
-기본 실행 기록과 최종 산출물은 저장소의 `results\<run-id>`에 생성된다. `results/`는 Git에서 제외되지만 재개·질문·근거 추가와 결과 열기에 필요한 실제 사용자 데이터이므로 캐시처럼 일괄 삭제하면 안 된다. 테스트 실행기는 별도 테스트 이름의 결과 루트를 사용하며, 저장소에는 완료 판정 요약과 재현 가능한 현재 workflow-v2 검증 경로만 유지한다.
+기본 실행 기록과 최종 산출물은 저장소의 `results\<run-id>`에 생성된다. `results/`는 Git에서 제외되지만 재개·질문·근거 추가와 결과 열기에 필요한 실제 사용자 데이터이므로 캐시처럼 일괄 삭제하면 안 된다. 테스트 실행기는 별도 테스트 이름의 결과 루트를 사용하며, 저장소에는 완료 판정 요약과 재현 가능한 오프라인 회귀 및 명시적 동의가 필요한 라이브 검증 경로만 유지한다.
 
 오류가 발생하면 해당 실행 폴더의 `diagnostics.jsonl`에 진단 행을 append한다. 아직 run이 없거나 run 파일에 쓸 수 없으면 `%LOCALAPPDATA%\DuoForge\diagnostics\<diagnostic-id>\diagnostics.jsonl`로 폴백하며, 테스트·격리 환경에서는 `DUOFORGE_DATA_ROOT`가 같은 기준 루트를 대체한다. writer가 두 위치 모두 실패해도 원래 DF 오류와 상태는 유지하고 `DF-DIAGNOSTIC-WRITE` 경고만 추가한다. 오류가 없는 실행에는 빈 진단 파일을 만들지 않는다.
 
@@ -118,17 +119,18 @@ Claude CLI는 계정별 `/model` 전체 행을 기계 판독 목록으로 내보
 .\duoforge.cmd answer --run "run-20260727-..." --issue "D-001" --choice "2" --replace
 .\duoforge.cmd constraint --run "run-20260727-..." --issue "D-001" --text "개인정보는 국내에만 저장한다."
 .\duoforge.cmd constraint --run "run-20260727-..." --issue "D-001" --text "개인정보는 국내에만 저장한다." --confirm
-.\duoforge.cmd extend-round --run "run-20260727-..."
 .\duoforge.cmd resume --run "run-20260727-..." --live
 ```
 
-질문 카드는 우선순위 순으로 한 번에 최대 3개만 표시한다. 각 질문은 작은 터미널에서도 섹션 제목과 2칸 들여쓴 본문을 다른 행으로 유지하며 `현재 상태 → 핵심 쟁점 → AI 검토와 문서 처리 → 사용자에게 요청하는 것 → 선택 결과` 순서로 설명한다. 승인·방향 선택·자료 요청 중 무엇이 필요한지 먼저 밝히고, 화면 높이가 남으면 핵심 쟁점·제안 방향·요청 내용에 여러 줄을 우선 배분한다. 그래도 긴 내용은 `[M] 자세히 보기·추가 검토 → 질문 내용 전체 보기`에서 저장·검증된 질문, 쟁점, AI 검토, 요청과 선택 결과를 줄이지 않고 터미널 스크롤로 읽은 뒤 결정 화면으로 돌아올 수 있다. `[M]`에는 추가 토론·AI 상세 설명·양쪽 의견 비교만 두고, 직접 답변과 여러 질문의 공통 전제는 `[O] 선택지에 없는 내 의견 직접 입력`으로 통합한다. 이 화면에도 원시 출력, 생성 중 텍스트, 전체 문서, 프롬프트와 모델 응답 원문은 표시하지 않는다. 한 질문의 답을 저장하면 남은 질문 목록을 바로 이어서 보여주고, 중간에 나가도 `사용자 요청으로 멈춤` 작업 메뉴의 `남은 질문에 답하기 (N)`으로 다시 들어갈 수 있다. 미답변 질문이 있으면 `답변 반영하고 AI 작업 계속하기`는 이유와 함께 비활성화한다. 화면에는 현재 사용자 확인 단계를 `1/3`처럼 표시하고, `3/3`에서는 이번 답변 뒤 새 질문이 생겨도 다시 묻지 않는다고 알린다. 문서 계보는 `문서 A/문서 B/최종 문서`, 사용자 선택은 `1안/2안/3안`, AI 작업자는 `Codex/Claude`로 표기를 분리한다. 신규 AI 질문은 실제로 선택할 수 있는 서로 다른 대안 두세 개만 허용하며, 권장안은 그중 하나를 가리켜야 한다. 스키마 설명이나 자리 표시가 선택지로 반환되면 저장 전에 형식 복구 대상으로 처리한다. 질문의 첫 선택 화면에서 `[O]`를 고르면 직접 쓴 내용을 `이 질문의 주관식 답변`으로 확정하거나 `여러 질문에 공통 전제`로 추가할 수 있다. 주관식 답변은 현재 질문을 답변 완료로 처리하고, 공통 전제는 객관식·주관식 답변과 함께 두 AI의 마지막 문서·검증 단계에 적용하되 현재 질문을 미답변으로 남긴다. 두 경로 모두 미리보기 뒤 정확한 `APPLY` 확인이 필요하며, 기존 답변 변경 화면에서도 같은 동작을 제공한다. 답변·공통 전제·추가 자료를 저장한 뒤에는 내부 단계 ID 대신 다시 진행할 관련 AI 작업 수를 보여준다. 이전 답변 변경 목록은 대상 문서·질문 제목·현재 답변을 함께 보여주고, 항목을 고르면 원래 질문·핵심 쟁점·현재 답변을 독립 섹션의 전체 본문으로 새 선택지보다 먼저 다시 보여준다. 신규 답변 기록에는 질문 제목과 문장을 함께 보존하며, 이 필드가 없는 기존 실행은 저장된 쟁점과 선택지로 질문을 복원했다는 안내를 표시한다. 화면과 신규 CLI 예시는 숫자 선택을 사용하지만 기존 `--choice A/B/C`도 같은 내부 결정 코드로 계속 읽는다. 답변 변경은 `--replace`로 이력을 남기며, 자유 제약은 미리보기를 확인한 뒤 `--confirm`으로 적용한다. 세 번째 라운드는 최대 AI 요청 횟수를 먼저 검사한 뒤 `extend-round`로 추가한다. 최신 사용자 답변과 공통 전제는 양쪽 최종 단계에 구속력 있게 주입되고 과거 라운드의 동일 질문은 최종 병합에서 확정 처리된다. 서로 양립할 수 없거나 안전하게 반영할 수 없으면 AI는 이를 조용히 무시하지 않고 새 확인 사항으로 알려야 한다. 반드시 해결해야 하는 항목은 보류할 수 없고, 중요 항목의 일부 완료 보류는 대화형 확인 또는 명시적인 `--confirm-partial`이 필요하다.
+`extend-round`는 기존 workflow-v1/v2 저장 실행의 호환 명령이다. 신규 workflow-v3 작업에는 추가 자동 토론 라운드를 열지 않는다.
+
+질문 카드는 우선순위 순으로 한 번에 최대 3개만 표시한다. 각 질문은 작은 터미널에서도 섹션 제목과 2칸 들여쓴 본문을 다른 행으로 유지하며 `현재 상태 → 핵심 쟁점 → AI 검토와 문서 처리 → 사용자에게 요청하는 것 → 선택 결과` 순서로 설명한다. 승인·방향 선택·자료 요청 중 무엇이 필요한지 먼저 밝히고, 화면 높이가 남으면 핵심 쟁점·제안 방향·요청 내용에 여러 줄을 우선 배분한다. 그래도 긴 내용은 `[M] 자세히 보기·추가 검토 → 질문 내용 전체 보기`에서 저장·검증된 질문, 쟁점, AI 검토, 요청과 선택 결과를 줄이지 않고 터미널 스크롤로 읽은 뒤 결정 화면으로 돌아올 수 있다. `[M]`에는 추가 토론·AI 상세 설명·양쪽 의견 비교만 두고, 직접 답변과 여러 질문의 공통 전제는 `[O] 선택지에 없는 내 의견 직접 입력`으로 통합한다. 이 화면에도 원시 출력, 생성 중 텍스트, 전체 문서, 프롬프트와 모델 응답 원문은 표시하지 않는다. 한 질문의 답을 저장하면 남은 질문 목록을 바로 이어서 보여주고, 중간에 나가도 `사용자 요청으로 멈춤` 작업 메뉴의 `남은 질문에 답하기 (N)`으로 다시 들어갈 수 있다. 미답변 질문이 있으면 `답변 반영하고 AI 작업 계속하기`는 이유와 함께 비활성화한다. 화면에는 현재 사용자 확인 단계를 `1/3`처럼 표시하고, `3/3`에서는 이번 답변 뒤 새 질문이 생겨도 다시 묻지 않는다고 알린다. 문서 계보는 `문서 A/문서 B/최종 문서`, 사용자 선택은 `1안/2안/3안`, AI 작업자는 `Codex/Claude`로 표기를 분리한다. 신규 AI 질문은 실제로 선택할 수 있는 서로 다른 대안 두세 개만 허용하며, 권장안은 그중 하나를 가리켜야 한다. 스키마 설명이나 자리 표시가 선택지로 반환되면 저장 전에 형식 복구 대상으로 처리한다. 질문의 첫 선택 화면에서 `[O]`를 고르면 직접 쓴 내용을 `이 질문의 주관식 답변`으로 확정하거나 `여러 질문에 공통 전제`로 추가할 수 있다. 주관식 답변은 현재 질문을 답변 완료로 처리하고, 공통 전제는 객관식·주관식 답변과 함께 통합·최종 검증·필요한 최종 수정에 적용하되 현재 질문을 미답변으로 남긴다. 두 경로 모두 미리보기 뒤 정확한 `APPLY` 확인이 필요하며, 기존 답변 변경 화면에서도 같은 동작을 제공한다. 답변·공통 전제·추가 자료를 저장한 뒤에는 내부 단계 ID 대신 다시 진행할 관련 AI 작업 수를 보여준다. 이전 답변 변경 목록은 대상 문서·질문 제목·현재 답변을 함께 보여주고, 항목을 고르면 원래 질문·핵심 쟁점·현재 답변을 독립 섹션의 전체 본문으로 새 선택지보다 먼저 다시 보여준다. 신규 답변 기록에는 질문 제목과 문장을 함께 보존하며, 이 필드가 없는 기존 실행은 저장된 쟁점과 선택지로 질문을 복원했다는 안내를 표시한다. 화면과 신규 CLI 예시는 숫자 선택을 사용하지만 기존 `--choice A/B/C`도 같은 내부 결정 코드로 계속 읽는다. 답변 변경은 `--replace`로 이력을 남기며, 자유 제약은 미리보기를 확인한 뒤 `--confirm`으로 적용한다. 최신 사용자 답변과 공통 전제는 결정에 영향받는 workflow-v3 단계와 최종 쟁점 병합에 구속력 있게 적용되고 이미 답한 동일 질문은 되살리지 않는다. 서로 양립할 수 없거나 안전하게 반영할 수 없으면 AI는 이를 조용히 무시하지 않고 새 확인 사항으로 알려야 한다. 반드시 해결해야 하는 항목은 보류할 수 없고, 중요 항목의 일부 완료 보류는 대화형 확인 또는 명시적인 `--confirm-partial`이 필요하다.
 
 모든 사람용 터미널 화면은 같은 읽기 문법을 사용한다. 독립된 화면과 메뉴는 터미널 폭에 맞춘 굵은 시작선과 `◆ 제목`으로 시작하므로, 스크롤 이력에서는 다음 굵은 선 직전까지를 하나의 화면 묶음으로 읽을 수 있다. 큰 섹션은 `── 제목`, 본문은 2칸, 하위 본문은 4칸 들여쓴다. 긴 경로·설명·명령·키-값은 `WindowWidth - 1` 안에서 공백 우선으로 줄바꿈하며 이어진 줄은 값 또는 본문 시작 열에 맞춘다. 큰 섹션 사이는 기본 한 줄을 비우되 20~23행의 작은 화면은 공백을 줄이고 섹션 표식을 유지한다. 정보·상태·경고 카드에 바로 이어지는 선택 메뉴는 굵은 시작선을 반복하지 않고 `── 메뉴 제목`으로 같은 화면 안에 묶으며, 작은 화면에서는 메뉴 내부 설명이나 푸터 여백을 줄여 전체 높이를 지킨다. 색상과 Unicode를 쓸 수 없는 환경에서도 `=` 시작선, `> 제목`, `--` 내부 섹션과 `OK`, `X`, `!`, `i` 표식으로 같은 위계·상태·다음 행동을 읽을 수 있다. 이 문법은 사람용 출력에만 적용되며 `--json`, 저장 JSON·JSONL과 생성된 최종 Markdown은 바꾸지 않는다.
 
 호출당 크기를 넘는 Markdown의 신규 실행은 `context-plan` schema 2의 결정론적 의미 배치를 사용한다. ATX/Setext 제목과 제목 경로, 서문, 완결된 문단·목록·표·fenced code를 먼저 보존하고, 하나의 의미 단위가 상한을 넘을 때만 문단·줄·UTF-8 안전 바이트 순서로 폴백한다. XML escape 뒤 실제 전송 바이트도 분할 시점에 계산하므로 특수문자가 많은 CORE는 의미 경계를 가능한 한 보존하면서 호출 상한 안으로 더 나뉜다. 각 팩의 `DOCUMENT_MAP`, `BEFORE`, `AFTER`는 위치와 연결을 위한 `context-only` 영역이고 `CORE`만 사실 분석과 근거에 사용할 수 있다. 완성 프롬프트 크기는 실행 생성 시점과 각 단계 소비 시점에 모두 검증한다.
 
-신규 `duoforge-stage-v5` 실행은 원문이 호출 한도의 30%를 넘으면 문맥 배치를 사용해 이후 계보·결정·지시문 공간을 예약한다. 문서별 최종 확인은 모든 보이는 선행 산출물의 SHA-256을 먼저 검증하되, 요청에는 대상 최신 문서와 그 대상의 쟁점·응답·채택·질문만 넣는다. 비대상 문서와 반복된 과거 문서·요약은 전송하지 않으며 투영 산출물은 50%, 사용자 결정·근거 메타데이터는 12.5% 예산을 넘으면 공급자 호출 전에 실패 폐쇄한다.
+저장된 workflow-v2의 `duoforge-stage-v5` 실행은 원문이 호출 한도의 30%를 넘으면 문맥 배치를 사용해 이후 계보·결정·지시문 공간을 예약한다. 문서별 최종 확인은 모든 보이는 선행 산출물의 SHA-256을 먼저 검증하되, 요청에는 대상 최신 문서와 그 대상의 쟁점·응답·채택·질문만 넣는다. 비대상 문서와 반복된 과거 문서·요약은 전송하지 않으며 투영 산출물은 50%, 사용자 결정·근거 메타데이터는 12.5% 예산을 넘으면 공급자 호출 전에 실패 폐쇄한다. 신규 workflow-v3는 별도의 `duoforge-thin-stage-v1` 계약을 사용한다.
 
 기존 v4 실행이 AI 호출 전에 `DF-PROMPT-SIZE-LIMIT`로 멈추면 일반 이어하기를 제공하지 않고 `입력 크기 조정 필요`로 표시한다. 메뉴 또는 `repair-prompt`에서 정확한 `REPAIR`를 입력해야 실행당 한 번 v5 입력 투영으로 복구를 준비하며, 이 동작은 공급자를 호출하지 않는다. 준비 뒤 실제 실행에는 다시 별도의 정확한 `LIVE` 확인이 필요하다.
 
@@ -201,20 +203,23 @@ DUOFORGE  LIVE 진행 화면
 
 라이브 실행 자체는 최종 계획 확인을 위해 비리디렉션 대화형 입출력을 요구하며, 리디렉션된 `resume --live`는 공급자 호출 전에 `DF-LIVE-NONINTERACTIVE`로 차단한다. 지원 호스트인 PowerShell 7 독립 ConsoleHost 또는 Windows Terminal에서 VT를 지원하고 창이 최소 `72×20`이면 대체 화면 버퍼를 사용한다. 대화형 호스트에서 VT가 없거나 창이 좁거나 화면 갱신이 실패하면 모델 실행을 중단하지 않고 ANSI 없는 축약형 누적 진행 로그로 전환한다. 실패·재시도·중단 복구·최종 renderer 오류에는 고정형 진행판과 누적 로그 모두 같은 DF 코드·진단 ID·실제 진단 파일 경로를 표시한다. 누적 로그는 기존처럼 단계 전환과 해당 단계의 최신 확정 요약 한 건만 기록하고 초 단위 heartbeat에는 같은 요약을 반복하지 않는다. 종료 화면에서 Enter를 누르면 대화형 메뉴 실행은 작업 메뉴로, 명시적 `resume --live`는 셸 프롬프트로 돌아가며 메뉴 복귀 화면과 명시적 JSON 결과에도 같은 진단 참조가 남는다.
 
-기존 공급자별 라이브 스모크와 2라운드 전체 단계 E2E는 `workflow-v1 shared-document/dual-document`의 역사적 증거이며 신규 모드 완료로 재해석하지 않는다. 대체된 workflow-v1 테스트 전용 실행기와 생성 결과는 저장소 정리 범위에서 제거했으며, workflow-v1 읽기·재개 호환성은 직렬화 fixture를 사용하는 오프라인 회귀로 계속 보호한다. 2026-07-28에는 별도 `workflow-v2` 실제 공급자 E2E를 실행해 모드 1 `13/13`, 모드 2 `13/13`, 모드 3 `14/14` 단계와 입력 해시 불변·A/B 계보·최종 파일·이벤트 비노출을 확인했다. 라이브 검증기는 이제 신규 `logs\` 부재와 선택적으로 존재하는 `diagnostics.jsonl`의 Depth 100 재파싱·허용 목록·canary 비노출도 검사한다. 세 모드 모두 `AWAITING_USER` 체크포인트로 강화 검증을 통과했다. 이는 질문 카드와 사용자 게이트가 정상 작동한 E2E 성공 상태이며, 테스트 픽스처의 결정을 임의로 답해 `COMPLETED`로 바꾸는 추가 공급자 호출은 완료 조건이 아니다. 모드 3 최초 실행에서 발견한 Minor 근거 대기의 잘못된 차단 상태는 중앙 차단 규칙 재계산으로 수정한 뒤 신규 실제 공급자 실행으로 재검증했다. 실행 ID와 판정 근거는 [docs/STAGE0_SPIKE.md](docs/STAGE0_SPIKE.md)에 기록한다.
+기존 공급자별 라이브 스모크와 2라운드 전체 단계 E2E는 `workflow-v1 shared-document/dual-document`의 역사적 증거이며 신규 모드 완료로 재해석하지 않는다. 대체된 workflow-v1 테스트 전용 실행기와 생성 결과는 저장소 정리 범위에서 제거했으며, workflow-v1 읽기·재개 호환성은 직렬화 fixture를 사용하는 오프라인 회귀로 계속 보호한다. 2026-07-28에는 별도 `workflow-v2` 실제 공급자 E2E를 실행해 모드 1 `13/13`, 모드 2 `13/13`, 모드 3 `14/14` 단계와 입력 해시 불변·A/B 계보·최종 파일·이벤트 비노출을 확인했다. 라이브 검증기는 이제 신규 `logs\` 부재와 선택적으로 존재하는 `diagnostics.jsonl`의 Depth 100 재파싱·허용 목록·canary 비노출도 검사한다. 세 모드 모두 `AWAITING_USER` 체크포인트로 강화 검증을 통과했다. 이는 질문 카드와 사용자 게이트가 정상 작동한 E2E 성공 상태이며, 테스트 픽스처의 결정을 임의로 답해 `COMPLETED`로 바꾸는 추가 공급자 호출은 완료 조건이 아니다. 모드 3 최초 실행에서 발견한 Minor 근거 대기의 잘못된 차단 상태는 중앙 차단 규칙 재계산으로 수정한 뒤 신규 실제 공급자 실행으로 재검증했다. 실행 ID와 판정 근거는 [역사 기록](docs/history/STAGE0_SPIKE.md)에 보존한다.
 
 ## 테스트
 
-2026-07-31 기준 PowerShell 7 오프라인 회귀는 162개다. 기존 회귀에 더해 실제 프로세스 heartbeat callback의 `0,1,2`초 전달과 스피너 프레임 변화, observer·프레임 오류의 고정 코드 단일 폴백, 쟁점 정의/참조 대상 분리, 현재 입력 세대 시도와 누적 호출 분리, 재시도 소진의 `FAILED_STAGE`, 복합 실행의 0-call 복구, 공급자 프로세스 오류의 안전 분류와 doctor·카탈로그·단계 호출 컨텍스트 동일성을 포함하며 모두 통과한다.
-
-실제 공급자 E2E의 테스트 전용 Claude 선택은 `tests\workflow-v2-live-settings.json`에서 관리하며 현재 `sonnet/low`로 고정한다. 전체 workflow-v2 라이브 E2E 실행기는 이 설정과 정확한 `LIVE` 동의를 요구한다. 진행판 전용 `tests\Invoke-LiveProgressE2E.ps1`은 실제 카탈로그가 노출한 Codex `gpt-5.6-luna/low`와 Claude `sonnet/low`만 허용하고 다른 모델로 대체하지 않으며, 첫 Codex·Claude 장벽 뒤 자동 `PAUSED_USER`를 요구한다. 2026-07-31 최초 실행, 별도 승인한 재시험, 비관리자 호스트 재검증 `run-20260731-142621-3d2365`, 재부팅 후 재검증 `run-20260731-163804-17c44b` 모두 Codex 첫 호출이 동일한 `DF-PROVIDER-PROCESS`(종료 코드 1, stdout 0바이트, stderr 163바이트)로 끝나 Claude를 호출하지 않았다. 네 실행 모두 모델 대체나 실행 내 자동 재시도 없이 실패 폐쇄했다. 세 번째와 네 번째 실행은 `STANDARD`, 프로필 일치, PowerShell 7.6.3 `ConsoleHost`, 비리디렉션 `120×30` 환경에서 수행했으며, 네 번째 실행 직전과 직후 8501 리스너 및 Python 프로세스는 0이었다. 따라서 관리자 권한·프로필 불일치와 Streamlit/Uvicorn 서버는 각각 단독 원인이 아니다. 실제 화면의 장시간 프레임 변화와 2-call `PAUSED_USER` 성공은 아직 입증되지 않았으며, 오프라인 callback·프레임 회귀와 구분해 기록한다. 일반 실행의 모델 선택 화면과 사용자 실행에 저장된 선택값은 바꾸지 않으며, 과거 `opus/high` E2E는 문서화된 시점 증거로만 취급하고 재호출하지 않는다.
-
-현재 Codex 경로는 doctor·모델 카탈로그·단계 호출 모두 같은 `node.exe`와 `codex.js`, 인증 home과 정제된 자식 환경을 사용한다. 카탈로그 가시성은 실제 모델 호출 가능성을 증명하지 않으므로 doctor에는 `UNVERIFIED`로 표시한다. 종료 코드가 0이 아닌 공급자 프로세스의 stderr는 메모리에서만 고정 안전 사유로 분류하고 즉시 버린다. stderr가 알려진 사유를 주지 못한 Codex 실패에 한해 stdout JSONL의 공식 fatal `error.message`와 `turn.failed.error.message`만 같은 고정 사유로 즉시 축약하며, `item.*`, 비공식 이벤트와 비JSON 내용은 분류 근거로 쓰지 않는다. 두 원시 버퍼는 반환 전에 비우고 화면·로그·진단·예외·상태에 전달하지 않는다. `MODEL_UNAVAILABLE`, `AUTH`, `INVALID_OPTION`, `SCHEMA_REJECTED`, `NETWORK`, `REASONING_UNAVAILABLE`, `MODEL_CONFIGURATION_UNAVAILABLE`을 포함한 합성 fixture가 이 경계와 원문 제거를 검증한다. 전용 LIVE 실행기는 관리자 PowerShell을 거부한다. 일반 비관리자 PowerShell 7에서도 동일 실패를 재현했으므로 권한은 단독 원인이 아니다.
-
-현재 사용자 Codex 기본 설정은 `gpt-5.6-sol/high`지만 DuoForge 단계 실행은 저장된 선택값을 `--model`과 `model_reasoning_effort`로 명시하고 `--ignore-user-config`를 사용하므로 같은 호출 프로필이 아니다. `codex-cli 0.146.0`의 실제 카탈로그는 Sol의 `high`, Luna의 `low`·`medium`을 모두 노출했고, 세 조합과 Luna/low 단계 스키마 조합의 전체 인자 배열은 parse-only 검사에서 모두 종료 코드 0이었다. 원본 성공 실행은 `codex-cli 0.145.0`의 Sol/high였으므로 현재 결함은 모델 이름 오타보다 비대화형 `exec`의 실제 요청·스키마·버전 경계를 분리해 확인해야 한다. `tests\Invoke-CodexInvocationMatrix.ps1`은 정확한 새 `LIVE` 한 번에 Sol/high 기본 호출, Luna/low 기본 호출, Luna/medium 기본 호출, 조건부 Luna/low 단계 스키마 호출만 순서대로 수행하며 예상 3회·절대 상한 4회와 `PAUSED_USER` 안전 요약을 강제한다.
+2026-08-04 기준 PowerShell 7 전체 오프라인 회귀는 `216개 통과, 0개 실패`다. workflow-v1/v2 저장 호환성, workflow-v3 얇은 자동 코어와 단계 결과 계약, 통합 복구, 사용자 결정 반영, 네 지원 터미널 프레임, 원문·비밀값 비노출을 함께 검증한다. 이 테스트는 실제 Codex·Claude 공급자를 호출하거나 사용자 실행을 재개하지 않는다.
 
 ```powershell
 & 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -File '.\tests\Run-Tests.ps1'
 ```
 
-구현 단계와 안전 판단은 [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md), 당시 CLI·실제 공급자 E2E 검증 기록은 [docs/STAGE0_SPIKE.md](docs/STAGE0_SPIKE.md), 3A 격리 판정은 [docs/3A_ISOLATION_SPIKE.md](docs/3A_ISOLATION_SPIKE.md)를 참고한다. 현재 설치·로그인·모델 사용 가능 상태는 `.\duoforge.cmd doctor --json`으로 다시 확인한다.
+실제 공급자 E2E와 호출 행렬은 테스트별 정확한 `LIVE` 동의와 고정된 모델·호출 상한이 있을 때만 별도로 실행한다. 과거 CLI·실제 공급자 결과와 미완료된 저비용 진행판 검증은 [단계 0 역사 기록](docs/history/STAGE0_SPIKE.md)에 보존한다. 현재 설치·로그인·모델 사용 가능 상태는 `.\duoforge.cmd doctor --json`으로 다시 확인한다.
+
+## 문서 기준
+
+- 현재 지원 동작과 사용법: 이 `README.md`
+- 현재 제품 계약: [require/PRD.md](require/PRD.md)
+- 구현한 슬라이스와 안전 계약: [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md)
+- 완료·후속·장기 후보 인덱스: [docs/ROADMAP.md](docs/ROADMAP.md)
+- 모드 4 격리 실패 판정: [docs/3A_ISOLATION_SPIKE.md](docs/3A_ISOLATION_SPIKE.md)
+- 당시 CLI·실제 공급자 E2E 시점 증거: [docs/history/STAGE0_SPIKE.md](docs/history/STAGE0_SPIKE.md)

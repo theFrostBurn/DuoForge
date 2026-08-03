@@ -2,6 +2,7 @@
 
 검증일: 2026-07-27  
 환경: Windows, PowerShell 7.6.3
+상태: 역사 기록
 
 이 문서는 검증 당시의 CLI·모델·실제 공급자 E2E 결과를 보존하는 시점 기록이다. 현재 설치·인증·모델 상태는 `.\duoforge.cmd doctor --json`으로 다시 확인한다.
 
@@ -49,7 +50,7 @@
 - 독립 문서 E2E에서 수정한 결함: Codex 엄격 스키마의 선택 속성 거부, 여러 사용자 답변의 최신값 집계, 반복 무효화 감사 이력 배열, 이미 답한 과거 질문의 최종 병합 재등장
 - 결정 반영 검증: 두 최신 공급자 결과가 결정 8건의 반영을 명시했고, 최종 렌더러가 결정 원장을 적용해 과거 질문을 확정 처리한 뒤 모델 재호출 없이 `AWAITING_USER`에서 `COMPLETED`로 전환
 - 3A OS 격리 스파이크: 범위 밖 표식 읽기와 중첩 `cmd.exe` 실행은 종료 코드 0으로 성공했고, 쓰기만 접근 거부와 전후 SHA-256 동일을 확인해 3A 게이트를 계속 닫음
-- 3A 상세 근거: [3A_ISOLATION_SPIKE.md](3A_ISOLATION_SPIKE.md)
+- 3A 상세 근거: [3A_ISOLATION_SPIKE.md](../3A_ISOLATION_SPIKE.md)
 
 ## workflow-v2 실제 공급자 E2E
 
@@ -99,6 +100,16 @@
 - 재부팅 후 8501 리스너와 Python 프로세스가 모두 0인 상태에서 같은 제한 토큰 PowerShell 7을 다시 증명했다. `run-20260731-163804-17c44b`도 Codex 1회에서 같은 안전 메타데이터로 실패했으므로 Streamlit/Uvicorn 서버 역시 단독 원인이 아니다. Claude 호출, 모델 대체, 자동 재시도와 공급자 작업 잔여는 모두 0건이었다.
 - 원본 `run-20260730-021613-3e022b`는 `PAUSED_USER`를 유지하며 이 진단에서 재개하거나 공급자를 호출하지 않았다.
 - 전용 `tests\Invoke-CodexInvocationMatrix.ps1`은 새 정확한 `LIVE`가 있을 때만 Sol/high 기본 호출을 양성 대조군으로 먼저 실행하고, 성공할 때 Luna/low 기본 호출과 Luna/medium 기본 호출로 모델·추론 경계를 이동한다. Luna/low 기본 호출까지 성공한 경우에만 같은 조합에 정확한 단계 스키마를 적용한다. 예상 3회, 조건 충족 시 4회, 절대 상한 4회이며 Claude·다른 모델·자동 대체·원본 실행 재개는 없다.
+
+## workflow-v3 문서 병합 완료 실행
+
+검증일: 2026-08-02  
+2026-08-04 읽기 전용 재확인
+
+- `run-20260802-172112-62707b`은 `workflow-v3/thin-core-v1`의 `document-merge` 실행이며 상태는 `COMPLETED`다.
+- 조건부 최종 수정을 포함한 5/5 단계가 커밋됐고, 재확인 과정에서 공급자를 호출하거나 실행 파일을 변경하지 않았다.
+- `final`에는 `FINAL.md`, `OPEN_QUESTIONS.md`, `artifacts.json`이 있다.
+- 이 실행은 workflow-v3 핵심 문서 완료 경로의 시점 증거다. PRD가 요구하는 `source-trace.md`, `DEBATE_SUMMARY.md`, `DECISIONS.md`가 없으므로 부속 추적 산출물 계약의 완료 증거로 사용하지 않는다.
 
 ## 공식 기준
 
